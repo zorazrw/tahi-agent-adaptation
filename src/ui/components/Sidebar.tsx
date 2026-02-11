@@ -131,62 +131,75 @@ export function Sidebar({
           </svg>
         </button>
       </div>
-      {/* Top half: task sessions */}
+      {/* Top half: current task box + switch dropdown */}
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        <div className="flex flex-col gap-2 overflow-y-auto flex-1 min-h-0 py-2">
-        {sessionList.length === 0 && (
-          <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted">
-            No sessions yet. Click "+ New Task" to start.
-          </div>
-        )}
-        {sessionList.map((session) => (
-          <div
-            key={session.id}
-            className={`cursor-pointer rounded-xl border px-2 py-3 text-left transition ${activeSessionId === session.id ? "border-accent/30 bg-accent-subtle" : "border-ink-900/5 bg-surface hover:bg-surface-tertiary"}`}
-            onClick={() => setActiveSessionId(session.id)}
-            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setActiveSessionId(session.id); } }}
-            role="button"
-            tabIndex={0}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
-                <div className={`text-[12px] font-medium ${session.status === "running" ? "text-info" : session.status === "completed" ? "text-success" : session.status === "error" ? "text-error" : "text-ink-800"}`}>
-                  {session.title}
-                </div>
-                <div className="flex items-center justify-between mt-0.5 text-xs text-muted">
-                  <span className="truncate">{formatCwd(session.cwd)}</span>
-                </div>
-              </div>
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button className="flex-shrink-0 rounded-full p-1.5 text-ink-500 hover:bg-ink-900/10" aria-label="Open session menu" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
-                      <circle cx="5" cy="12" r="1.7" />
-                      <circle cx="12" cy="12" r="1.7" />
-                      <circle cx="19" cy="12" r="1.7" />
-                    </svg>
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content className="z-50 min-w-[220px] rounded-xl border border-ink-900/10 bg-white p-1 shadow-lg" align="center" sideOffset={8}>
-                    <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => onDeleteSession(session.id)}>
-                      <svg viewBox="0 0 24 24" className="h-4 w-4 text-error/80" fill="none" stroke="currentColor" strokeWidth="1.8">
-                        <path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" />
-                      </svg>
-                      Delete this session
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => setResumeSessionId(session.id)}>
-                      <svg viewBox="0 0 24 24" className="h-4 w-4 text-ink-500" fill="none" stroke="currentColor" strokeWidth="1.8">
-                        <path d="M4 5h16v14H4z" /><path d="M7 9h10M7 12h6" /><path d="M13 15l3 2-3 2" />
-                      </svg>
-                      Resume in Claude Code
-                    </DropdownMenu.Item>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
+        <div className="py-2">
+          {sessionList.length === 0 ? (
+            <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted">
+              No sessions yet. Click "+ New Task" to start.
             </div>
-          </div>
-        ))}
+          ) : (
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  type="button"
+                  className="flex w-full cursor-pointer items-center gap-2 rounded-xl border border-ink-900/10 bg-surface px-3 py-3 text-left transition hover:bg-surface-tertiary hover:border-ink-900/20 focus:outline-none focus:ring-2 focus:ring-accent/30 data-[state=open]:border-accent/30 data-[state=open]:bg-accent-subtle"
+                >
+                  <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                    {activeSessionId && sessions[activeSessionId] ? (
+                      <>
+                        <div className={`text-[12px] font-medium ${sessions[activeSessionId].status === "running" ? "text-info" : sessions[activeSessionId].status === "completed" ? "text-success" : sessions[activeSessionId].status === "error" ? "text-error" : "text-ink-800"}`}>
+                          {sessions[activeSessionId].title}
+                        </div>
+                        <div className="mt-0.5 text-xs text-muted">
+                          <span className="truncate">{formatCwd(sessions[activeSessionId].cwd)}</span>
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-xs text-muted">Select a task</span>
+                    )}
+                  </div>
+                  <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-ink-500" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content className="z-50 max-h-[min(60vh,320px)] min-w-[240px] overflow-y-auto rounded-xl border border-ink-900/10 bg-white p-1 shadow-lg" align="start" sideOffset={6}>
+                  <div className="px-2 py-1.5 text-xs font-medium text-ink-500">Switch task</div>
+                  {sessionList.map((session) => (
+                    <DropdownMenu.Item
+                      key={session.id}
+                      className="flex cursor-pointer flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left text-sm text-ink-700 outline-none hover:bg-ink-900/5 data-[highlighted]:bg-ink-900/5"
+                      onSelect={() => setActiveSessionId(session.id)}
+                    >
+                      <span className={`font-medium ${session.status === "running" ? "text-info" : session.status === "completed" ? "text-success" : session.status === "error" ? "text-error" : "text-ink-800"}`}>
+                        {session.title}
+                      </span>
+                      <span className="text-xs text-muted">{formatCwd(session.cwd)}</span>
+                    </DropdownMenu.Item>
+                  ))}
+                  {activeSessionId && (
+                    <>
+                      <DropdownMenu.Separator className="my-1 h-px bg-ink-900/10" />
+                      <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => activeSessionId && onDeleteSession(activeSessionId)}>
+                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-error/80" fill="none" stroke="currentColor" strokeWidth="1.8">
+                          <path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" />
+                        </svg>
+                        Delete this session
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => activeSessionId && setResumeSessionId(activeSessionId)}>
+                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-ink-500" fill="none" stroke="currentColor" strokeWidth="1.8">
+                          <path d="M4 5h16v14H4z" /><path d="M7 9h10M7 12h6" /><path d="M13 15l3 2-3 2" />
+                        </svg>
+                        Resume in Claude Code
+                      </DropdownMenu.Item>
+                    </>
+                  )}
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          )}
         </div>
       </div>
       {/* Bottom half: verifier area */}
