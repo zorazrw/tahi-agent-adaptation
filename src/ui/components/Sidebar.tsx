@@ -20,11 +20,19 @@ export function Sidebar({
   const [copied, setCopied] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
 
-  // Verifier area: list of verification criteria (user-editable text)
-  const [verificationCriteria, setVerificationCriteria] = useState<string[]>([]);
+  // Placeholder steps for progress (multi-step plan); replace with real agent steps later
+  const progressSteps = ["Step 1", "Step 2", "Step 3", "Step 4"];
+
+  // Per-step verification criteria; index = progress step index
+  const [verificationCriteriaByStep, setVerificationCriteriaByStep] = useState<string[][]>(() =>
+    Array.from({ length: progressSteps.length }, () => [])
+  );
+  const [selectedStepIndex, setSelectedStepIndex] = useState(0);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draftText, setDraftText] = useState("");
   const editInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const verificationCriteria = verificationCriteriaByStep[selectedStepIndex] ?? [];
 
   const formatCwd = (cwd?: string) => {
     if (!cwd) return "Working dir unavailable";
@@ -63,8 +71,14 @@ export function Sidebar({
   }, [editingIndex]);
 
   const startAddCriterion = () => {
-    const newIndex = verificationCriteria.length;
-    setVerificationCriteria((prev) => [...prev, ""]);
+    const list = verificationCriteriaByStep[selectedStepIndex] ?? [];
+    const newIndex = list.length;
+    setVerificationCriteriaByStep((prev) => {
+      const next = prev.slice();
+      const stepList = next[selectedStepIndex] ?? [];
+      next[selectedStepIndex] = [...stepList, ""];
+      return next;
+    });
     setEditingIndex(newIndex);
     setDraftText("");
   };
@@ -77,13 +91,15 @@ export function Sidebar({
   const saveEdit = () => {
     if (editingIndex === null) return;
     const trimmed = draftText.trim();
-    setVerificationCriteria((prev) => {
-      const next = [...prev];
+    setVerificationCriteriaByStep((prev) => {
+      const next = prev.slice();
+      const stepList = [...(next[selectedStepIndex] ?? [])];
       if (trimmed) {
-        next[editingIndex] = trimmed;
+        stepList[editingIndex] = trimmed;
       } else {
-        next.splice(editingIndex, 1);
+        stepList.splice(editingIndex, 1);
       }
+      next[selectedStepIndex] = stepList;
       return next;
     });
     setEditingIndex(null);
@@ -201,10 +217,39 @@ export function Sidebar({
             </DropdownMenu.Root>
           )}
         </div>
+        {/* Progress: connected dots multi-step plan */}
+        {sessionList.length > 0 && (
+          <div className="shrink-0 border-t border-ink-900/10 pt-3">
+            <div className="mb-2 text-xs font-medium text-ink-600">Progress</div>
+            <div className="flex flex-col">
+              {progressSteps.map((label, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className="flex items-start gap-2.5 w-full text-left rounded-lg -ml-1 pl-1 py-0.5 transition-colors hover:bg-ink-900/5 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:ring-inset"
+                  onClick={() => {
+                    setSelectedStepIndex(i);
+                    setEditingIndex(null);
+                  }}
+                >
+                  <div className="flex flex-col items-center pt-0.5">
+                    <div className={`h-2.5 w-2.5 shrink-0 rounded-full border-2 transition-colors ${selectedStepIndex === i ? "border-accent bg-accent/20" : "border-ink-900/30 bg-surface"}`} />
+                    {i < progressSteps.length - 1 && (
+                      <div className="w-px h-5 bg-ink-900/20 shrink-0" />
+                    )}
+                  </div>
+                  <div className={`pb-1.5 text-xs ${selectedStepIndex === i ? "font-medium text-ink-800" : "text-ink-700"}`}>{label}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
-      {/* Bottom half: verifier area */}
+      {/* Bottom half: verifier area (per-step criteria) */}
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-        <div className="shrink-0 text-xs font-medium text-ink-600 mb-2">Verification criteria</div>
+        <div className="shrink-0 text-xs font-medium text-ink-600 mb-2">
+          Verification criteria — {progressSteps[selectedStepIndex]}
+        </div>
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
           {verificationCriteria.map((text, index) => (
             <div key={index} className="shrink-0">
