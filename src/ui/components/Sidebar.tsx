@@ -21,6 +21,7 @@ export function Sidebar({
   const setActiveSessionId = useAppStore((state) => state.setActiveSessionId);
   const updateSessionSteps = useAppStore((state) => state.updateSessionSteps);
   const updateSessionVerificationCriteria = useAppStore((state) => state.updateSessionVerificationCriteria);
+  const updateSessionVerifierMarks = useAppStore((state) => state.updateSessionVerifierMarks);
   const updateSessionTitle = useAppStore((state) => state.updateSessionTitle);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -43,8 +44,6 @@ export function Sidebar({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draftText, setDraftText] = useState("");
   const editInputRef = useRef<HTMLTextAreaElement | null>(null);
-  /** Per-session, per-step verifier marks: key = `${sessionId}_${stepIndex}`, value = ('check'|'cross'|undefined)[] */
-  const [verifierMarks, setVerifierMarks] = useState<Record<string, ("check" | "cross" | undefined)[]>>({});
 
   // Sync verification criteria from store when session or steps change (and not editing a criterion).
   useEffect(() => {
@@ -235,16 +234,20 @@ export function Sidebar({
     sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: next } });
   };
 
-  const verifierMarksKey = activeSessionId != null && selectedStepIndex >= 0 ? `${activeSessionId}_${selectedStepIndex}` : "";
-  const currentVerifierMarks = verifierMarksKey ? verifierMarks[verifierMarksKey] ?? [] : [];
+  const currentVerifierMarks = activeSession?.verifierMarks?.[selectedStepIndex] ?? [];
 
   const toggleVerifierMark = (index: number) => {
-    if (!verifierMarksKey) return;
-    const next = [...currentVerifierMarks];
-    while (next.length <= index) next.push(undefined);
-    const cur = next[index];
-    next[index] = cur === "check" ? "cross" : "check";
-    setVerifierMarks((prev) => ({ ...prev, [verifierMarksKey]: next }));
+    if (!activeSessionId) return;
+    const allMarks = activeSession?.verifierMarks ?? [];
+    const stepMarks = [...(allMarks[selectedStepIndex] ?? [])];
+    while (stepMarks.length <= index) stepMarks.push(undefined);
+    const cur = stepMarks[index];
+    stepMarks[index] = cur === "check" ? "cross" : "check";
+    const nextFull = allMarks.slice(0, progressSteps.length);
+    while (nextFull.length <= selectedStepIndex) nextFull.push([]);
+    nextFull[selectedStepIndex] = stepMarks;
+    updateSessionVerifierMarks(activeSessionId, nextFull);
+    sendEvent({ type: "session.updateVerifierMarks", payload: { sessionId: activeSessionId, verifierMarks: nextFull } });
   };
 
   const handleCopyCommand = async () => {

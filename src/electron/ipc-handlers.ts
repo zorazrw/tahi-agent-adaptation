@@ -271,6 +271,7 @@ export function handleClientEvent(event: ClientEvent) {
         completedStepIndices: history.session.completedStepIndices,
         outputFiles: history.session.outputFiles,
         verificationCriteria: history.session.verificationCriteria,
+        verifierMarks: history.session.verifierMarks,
         title: history.session.title
       }
     });
@@ -429,6 +430,16 @@ export function handleClientEvent(event: ClientEvent) {
     if (hasLiveSession(sessionId)) {
       sessions.updateSession(sessionId, { verificationCriteria });
       broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
+    }
+    return;
+  }
+
+  if (event.type === "session.updateVerifierMarks") {
+    const { sessionId, verifierMarks } = event.payload;
+    sessions.persistVerifierMarks(sessionId, verifierMarks);
+    if (hasLiveSession(sessionId)) {
+      sessions.updateSession(sessionId, { verifierMarks });
+      broadcast({ type: "session.verifierMarks", payload: { sessionId, verifierMarks } });
     }
     return;
   }

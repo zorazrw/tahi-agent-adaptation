@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ServerEvent, SessionStatus, StreamMessage } from "../types";
+import type { ServerEvent, SessionStatus, StreamMessage, VerifierMark } from "../types";
 
 export type PermissionRequest = {
   toolUseId: string;
@@ -16,6 +16,7 @@ export type SessionView = {
   completedStepIndices?: number[];
   outputFiles?: string[][];
   verificationCriteria?: string[][];
+  verifierMarks?: VerifierMark[][];
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
   lastPrompt?: string;
@@ -49,6 +50,7 @@ interface AppState {
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
   updateSessionSteps: (sessionId: string, steps: string[]) => void;
   updateSessionVerificationCriteria: (sessionId: string, verificationCriteria: string[][]) => void;
+  updateSessionVerifierMarks: (sessionId: string, verifierMarks: VerifierMark[][]) => void;
   updateSessionTitle: (sessionId: string, title: string) => void;
   handleServerEvent: (event: ServerEvent) => void;
 }
@@ -100,6 +102,19 @@ export const useAppStore = create<AppState>((set, get) => ({
         sessions: {
           ...state.sessions,
           [sessionId]: { ...existing, verificationCriteria }
+        }
+      };
+    });
+  },
+
+  updateSessionVerifierMarks: (sessionId, verifierMarks) => {
+    set((state) => {
+      const existing = state.sessions[sessionId];
+      if (!existing) return {};
+      return {
+        sessions: {
+          ...state.sessions,
+          [sessionId]: { ...existing, verifierMarks }
         }
       };
     });
@@ -159,6 +174,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             completedStepIndices: session.completedStepIndices ?? existing.completedStepIndices,
             outputFiles: session.outputFiles ?? existing.outputFiles,
             verificationCriteria: session.verificationCriteria ?? existing.verificationCriteria,
+            verifierMarks: session.verifierMarks ?? existing.verifierMarks,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
           };
@@ -195,7 +211,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, steps, completedStepIndices, outputFiles, verificationCriteria, title } = event.payload;
+        const { sessionId, messages, status, steps, completedStepIndices, outputFiles, verificationCriteria, verifierMarks, title } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -209,6 +225,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 ...(completedStepIndices !== undefined && { completedStepIndices }),
                 ...(outputFiles !== undefined && { outputFiles }),
                 ...(verificationCriteria !== undefined && { verificationCriteria }),
+                ...(verifierMarks !== undefined && { verifierMarks }),
                 ...(title !== undefined && { title }),
                 hydrated: true
               }
@@ -254,6 +271,20 @@ export const useAppStore = create<AppState>((set, get) => ({
             sessions: {
               ...state.sessions,
               [sessionId]: { ...existing, verificationCriteria }
+            }
+          };
+        });
+        break;
+      }
+
+      case "session.verifierMarks": {
+        const { sessionId, verifierMarks } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, verifierMarks }
             }
           };
         });

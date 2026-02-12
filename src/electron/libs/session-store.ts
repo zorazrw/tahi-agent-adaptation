@@ -51,6 +51,34 @@ function parseCompletedStepIndices(raw: unknown): number[] | undefined {
   }
 }
 
+export type VerifierMark = "check" | "cross" | undefined;
+
+function parseVerifierMarks(raw: unknown): VerifierMark[][] | undefined {
+  if (raw == null) return undefined;
+  try {
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(arr)) return undefined;
+    const result: VerifierMark[][] = [];
+    for (const row of arr) {
+      if (!Array.isArray(row)) return undefined;
+      result.push(
+        row.map((cell) => (cell === "check" || cell === "cross" ? cell : undefined))
+      );
+    }
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+function serializeVerifierMarks(marks: VerifierMark[][] | undefined): string | null {
+  if (!marks || !Array.isArray(marks)) return null;
+  const arr = marks.map((row) =>
+    Array.isArray(row) ? row.map((m) => (m === "check" || m === "cross" ? m : "")) : []
+  );
+  return JSON.stringify(arr);
+}
+
 export type PendingPermission = {
   toolUseId: string;
   toolName: string;
@@ -70,6 +98,7 @@ export type Session = {
   completedStepIndices?: number[];
   outputFiles?: string[][];
   verificationCriteria?: string[][];
+  verifierMarks?: VerifierMark[][];
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -86,6 +115,7 @@ export type StoredSession = {
   completedStepIndices?: number[];
   outputFiles?: string[][];
   verificationCriteria?: string[][];
+  verifierMarks?: VerifierMark[][];
   createdAt: number;
   updatedAt: number;
 };
@@ -118,17 +148,19 @@ export class SessionStore {
       steps: [],
       outputFiles: [],
       verificationCriteria: [],
+      verifierMarks: [],
       pendingPermissions: new Map()
     };
     this.sessions.set(id, session);
     const stepsJson = JSON.stringify(session.steps ?? []);
     const outputFilesJson = JSON.stringify(session.outputFiles ?? []);
     const verificationCriteriaJson = JSON.stringify(session.verificationCriteria ?? []);
+    const verifierMarksJson = serializeVerifierMarks(session.verifierMarks);
     this.db
       .prepare(
         `insert into sessions
-          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -141,6 +173,7 @@ export class SessionStore {
         stepsJson,
         verificationCriteriaJson,
         outputFilesJson,
+        verifierMarksJson,
         now,
         now
       );
@@ -154,7 +187,7 @@ export class SessionStore {
   listSessions(): StoredSession[] {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, completed_step_indices, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices, created_at, updated_at
          from sessions
          order by updated_at desc`
       )
@@ -174,6 +207,7 @@ export class SessionStore {
         completedStepIndices: parseCompletedStepIndices(row.completed_step_indices) ?? mem?.completedStepIndices ?? [],
         outputFiles: parseOutputFiles(row.output_files) ?? mem?.outputFiles ?? [],
         verificationCriteria: parseVerificationCriteria(row.verification_criteria) ?? mem?.verificationCriteria ?? [],
+        verifierMarks: parseVerifierMarks(row.verifier_marks) ?? mem?.verifierMarks ?? [],
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
       };
@@ -197,7 +231,7 @@ export class SessionStore {
   getSessionHistory(id: string): SessionHistory | null {
     const sessionRow = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, completed_step_indices, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices, created_at, updated_at
          from sessions
          where id = ?`
       )
@@ -225,6 +259,7 @@ export class SessionStore {
         completedStepIndices: parseCompletedStepIndices(sessionRow.completed_step_indices) ?? mem?.completedStepIndices ?? [],
         outputFiles: parseOutputFiles(sessionRow.output_files) ?? mem?.outputFiles ?? [],
         verificationCriteria: parseVerificationCriteria(sessionRow.verification_criteria) ?? mem?.verificationCriteria ?? [],
+        verifierMarks: parseVerifierMarks(sessionRow.verifier_marks) ?? mem?.verifierMarks ?? [],
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },
@@ -289,6 +324,14 @@ export class SessionStore {
       .run(json, Date.now(), id);
   }
 
+  /** Persist only verifier marks to DB. */
+  persistVerifierMarks(id: string, verifierMarks: VerifierMark[][]): void {
+    const json = serializeVerifierMarks(verifierMarks);
+    this.db
+      .prepare(`update sessions set verifier_marks = ?, updated_at = ? where id = ?`)
+      .run(json, Date.now(), id);
+  }
+
   private persistSession(id: string, updates: Partial<Session>): void {
     const fields: string[] = [];
     const values: Array<string | number | null> = [];
@@ -302,7 +345,8 @@ export class SessionStore {
       steps: "steps",
       completedStepIndices: "completed_step_indices",
       outputFiles: "output_files",
-      verificationCriteria: "verification_criteria"
+      verificationCriteria: "verification_criteria",
+      verifierMarks: "verifier_marks"
     } as const;
 
     for (const key of Object.keys(updates) as Array<keyof typeof updatable>) {
@@ -316,6 +360,8 @@ export class SessionStore {
         values.push(Array.isArray(value) && value.every((x) => typeof x === "number") ? JSON.stringify(value) : null);
       } else if (key === "outputFiles" || key === "verificationCriteria") {
         values.push(Array.isArray(value) && value.every(Array.isArray) ? JSON.stringify(value) : null);
+      } else if (key === "verifierMarks") {
+        values.push(serializeVerifierMarks(value as VerifierMark[][]));
       } else {
         values.push(value === undefined ? null : (value as string));
       }
@@ -367,6 +413,11 @@ export class SessionStore {
     } catch {
       /* column may already exist */
     }
+    try {
+      this.db.exec(`alter table sessions add column verifier_marks text`);
+    } catch {
+      /* column may already exist */
+    }
     this.db.exec(
       `create table if not exists messages (
         id text primary key,
@@ -382,7 +433,7 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, completed_step_indices
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices
          from sessions`
       )
       .all();
@@ -399,6 +450,7 @@ export class SessionStore {
         completedStepIndices: parseCompletedStepIndices(row.completed_step_indices),
         outputFiles: parseOutputFiles(row.output_files),
         verificationCriteria: parseVerificationCriteria(row.verification_criteria),
+        verifierMarks: parseVerifierMarks(row.verifier_marks),
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);

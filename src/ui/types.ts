@@ -9,6 +9,8 @@ export type StreamMessage = SDKMessage | UserPromptMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 
+export type VerifierMark = "check" | "cross" | undefined;
+
 export type SessionInfo = {
   id: string;
   title: string;
@@ -19,6 +21,7 @@ export type SessionInfo = {
   completedStepIndices?: number[];
   outputFiles?: string[][];
   verificationCriteria?: string[][];
+  verifierMarks?: VerifierMark[][];
   createdAt: number;
   updatedAt: number;
 };
@@ -29,10 +32,11 @@ export type ServerEvent =
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
   | { type: "session.status"; payload: { sessionId: string; status: SessionStatus; title?: string; cwd?: string; error?: string } }
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
-  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[]; completedStepIndices?: number[]; outputFiles?: string[][]; verificationCriteria?: string[][]; title?: string } }
+  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[]; completedStepIndices?: number[]; outputFiles?: string[][]; verificationCriteria?: string[][]; verifierMarks?: VerifierMark[][]; title?: string } }
   | { type: "session.steps"; payload: { sessionId: string; steps: string[] } }
   | { type: "session.outputFiles"; payload: { sessionId: string; outputFiles: string[][] } }
   | { type: "session.verificationCriteria"; payload: { sessionId: string; verificationCriteria: string[][] } }
+  | { type: "session.verifierMarks"; payload: { sessionId: string; verifierMarks: VerifierMark[][] } }
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }
   | { type: "session.stepCompleted"; payload: { sessionId: string; stepIndex: number } }
@@ -47,6 +51,7 @@ export type ClientEvent =
   | { type: "session.delete"; payload: { sessionId: string } }
   | { type: "session.updateSteps"; payload: { sessionId: string; steps: string[] } }
   | { type: "session.updateVerificationCriteria"; payload: { sessionId: string; verificationCriteria: string[][] } }
+  | { type: "session.updateVerifierMarks"; payload: { sessionId: string; verifierMarks: VerifierMark[][] } }
   | { type: "session.updateTitle"; payload: { sessionId: string; title: string } }
   | { type: "session.list" }
   | { type: "session.history"; payload: { sessionId: string } }
