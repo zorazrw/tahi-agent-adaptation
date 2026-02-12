@@ -43,6 +43,8 @@ export function Sidebar({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draftText, setDraftText] = useState("");
   const editInputRef = useRef<HTMLTextAreaElement | null>(null);
+  /** Per-session, per-step verifier marks: key = `${sessionId}_${stepIndex}`, value = ('check'|'cross'|undefined)[] */
+  const [verifierMarks, setVerifierMarks] = useState<Record<string, ("check" | "cross" | undefined)[]>>({});
 
   // Sync verification criteria from store when session or steps change (and not editing a criterion).
   useEffect(() => {
@@ -231,6 +233,18 @@ export function Sidebar({
     setDraftText("");
     updateSessionVerificationCriteria(activeSessionId, next);
     sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: next } });
+  };
+
+  const verifierMarksKey = activeSessionId != null && selectedStepIndex >= 0 ? `${activeSessionId}_${selectedStepIndex}` : "";
+  const currentVerifierMarks = verifierMarksKey ? verifierMarks[verifierMarksKey] ?? [] : [];
+
+  const toggleVerifierMark = (index: number) => {
+    if (!verifierMarksKey) return;
+    const next = [...currentVerifierMarks];
+    while (next.length <= index) next.push(undefined);
+    const cur = next[index];
+    next[index] = cur === "check" ? "cross" : "check";
+    setVerifierMarks((prev) => ({ ...prev, [verifierMarksKey]: next }));
   };
 
   const handleCopyCommand = async () => {
@@ -517,38 +531,67 @@ export function Sidebar({
           {verificationCriteria.length === 0 && !editingIndex ? (
             <p className="text-xs text-muted py-1">No verifiers for this step. Add criteria to check output files and quality.</p>
           ) : null}
-          {verificationCriteria.map((text, index) => (
-            <div key={index} className="shrink-0">
-              {editingIndex === index ? (
-                <div className="rounded-xl border border-accent/40 bg-surface p-1.5">
-                  <textarea
-                    ref={editingIndex === index ? (el) => { editInputRef.current = el; } : undefined}
-                    className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/30"
-                    placeholder="Enter verification criterion..."
-                    value={draftText}
-                    onChange={(e) => setDraftText(e.target.value)}
-                    onBlur={saveEdit}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        saveEdit();
-                      }
-                    }}
-                  />
+          {verificationCriteria.map((text, index) => {
+            const mark = currentVerifierMarks[index];
+            return (
+              <div key={index} className="shrink-0 flex items-start gap-2">
+                <div className="flex-1 min-w-0">
+                  {editingIndex === index ? (
+                    <div className="rounded-xl border border-accent/40 bg-surface p-1.5">
+                      <textarea
+                        ref={editingIndex === index ? (el) => { editInputRef.current = el; } : undefined}
+                        className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/30"
+                        placeholder="Enter verification criterion..."
+                        value={draftText}
+                        onChange={(e) => setDraftText(e.target.value)}
+                        onBlur={saveEdit}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            saveEdit();
+                          }
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      className="cursor-pointer rounded-xl border border-ink-900/10 bg-surface px-3 py-2 text-left text-xs text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors min-h-[38px] flex items-center"
+                      onClick={() => startEditCriterion(index)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); startEditCriterion(index); } }}
+                    >
+                      <span className="line-clamp-2 break-words">{text || "Click to edit"}</span>
+                    </div>
+                  )}
                 </div>
-              ) : (
-                <div
-                  className="cursor-pointer rounded-xl border border-ink-900/10 bg-surface px-3 py-2 text-left text-xs text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors min-h-[38px] flex items-center"
-                  onClick={() => startEditCriterion(index)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); startEditCriterion(index); } }}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleVerifierMark(index);
+                  }}
+                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-ink-900/10 hover:text-ink-700 focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors mt-0.5"
+                  aria-label={mark === "check" ? "Mark as failed (cross)" : "Mark as passed (check)"}
+                  title={mark === "check" ? "Mark as failed" : "Mark as passed"}
                 >
-                  <span className="line-clamp-2 break-words">{text || "Click to edit"}</span>
-                </div>
-              )}
-            </div>
-          ))}
+                  {mark === "check" ? (
+                    <svg viewBox="0 0 24 24" className="h-4 w-4 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  ) : mark === "cross" ? (
+                    <svg viewBox="0 0 24 24" className="h-4 w-4 text-red-500" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            );
+          })}
           <button
             type="button"
             className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-2.5 text-muted hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[38px] w-full"
