@@ -65,7 +65,7 @@ function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): strin
 export function buildPromptForStep(stepDescription: string, stepIndex: number, totalSteps: number): string {
   const oneBased = stepIndex + 1;
   return [
-    `Execute step ${oneBased} of ${totalSteps} of the workflow. Complete only this sub-task.`,
+    `Execute step ${oneBased} of ${totalSteps} of the workflow. Complete only this sub-task. Save the output files in the current working directory.`,
     "",
     `Step: ${stepDescription}`
   ].join("\n");

@@ -146,9 +146,9 @@ app.on("ready", () => {
                 return { error: "Invalid file path" };
             }
             const ext = filePath.toLowerCase().slice(filePath.lastIndexOf("."));
-            const allowed = [".txt", ".xlsx", ".xls", ".docx"];
+            const allowed = [".txt", ".xlsx", ".xls", ".docx", ".jpg", ".jpeg", ".png"];
             if (!allowed.includes(ext)) {
-                return { error: "Only .txt, .xlsx, .xls, and .docx files can be previewed" };
+                return { error: "Only .txt, .xlsx, .xls, .docx, .jpg, .jpeg, and .png files can be previewed" };
             }
             const base = (cwd && typeof cwd === "string") ? cwd : process.cwd();
             const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
@@ -159,6 +159,12 @@ app.on("ready", () => {
             }
 
             const buffer = await readFile(resolved);
+
+            if (ext === ".jpg" || ext === ".jpeg" || ext === ".png") {
+                const mime = ext === ".png" ? "image/png" : "image/jpeg";
+                const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+                return { kind: "image", dataUrl };
+            }
 
             if (ext === ".xlsx" || ext === ".xls") {
                 const workbook = XLSX.read(buffer, { type: "buffer" });

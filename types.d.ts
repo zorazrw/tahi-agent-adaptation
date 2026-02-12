@@ -16,6 +16,7 @@ type PreviewFileResult =
     | { kind: "txt"; content: string }
     | { kind: "xlsx"; data: unknown[][] }
     | { kind: "docx"; html: string }
+    | { kind: "image"; dataUrl: string }
     | { error: string };
 
 type EventPayloadMapping = {

@@ -2,14 +2,14 @@ import { useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
 
 const FILE_TOOL_NAMES = new Set(["Read", "Write", "Edit"]);
-const PREVIEW_EXTENSIONS = [".txt", ".xlsx", ".xls", ".docx"];
+const PREVIEW_EXTENSIONS = [".txt", ".xlsx", ".xls", ".docx", ".jpg", ".jpeg", ".png"];
 
 function pathHasPreviewExt(path: string): boolean {
   const lower = path.toLowerCase();
   return PREVIEW_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
-/** From the current chat session, find the latest file referred by the agent (tool_use Read/Write/Edit) that we can preview (.txt, .xlsx, .xls, .docx). */
+/** From the current chat session, find the latest file referred by the agent (tool_use Read/Write/Edit) that we can preview (.txt, .xlsx, .xls, .docx, .jpg, .png). */
 export function getLatestPreviewFileRef(messages: StreamMessage[]): string | null {
   let latest: string | null = null;
   for (const msg of messages) {
@@ -32,6 +32,7 @@ type PreviewFileResult =
   | { kind: "txt"; content: string }
   | { kind: "xlsx"; data: unknown[][] }
   | { kind: "docx"; html: string }
+  | { kind: "image"; dataUrl: string }
   | { error: string };
 
 type FilePreviewProps = {
@@ -110,6 +111,15 @@ export function FilePreview({ filePath, cwd }: FilePreviewProps) {
             className="file-preview-docx text-sm text-ink-700 prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1"
             dangerouslySetInnerHTML={{ __html: result.html }}
           />
+        )}
+        {result && "kind" in result && result.kind === "image" && !loading && (
+          <div className="flex items-center justify-center min-h-[120px]">
+            <img
+              src={result.dataUrl}
+              alt="Preview"
+              className="max-w-full max-h-full object-contain rounded"
+            />
+          </div>
         )}
       </div>
     </div>

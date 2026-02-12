@@ -260,7 +260,7 @@ function App() {
           <span className="text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
         </div>
 
-        {/* Top 2/3: file preview (latest .txt / .xlsx / .docx referred by agent) */}
+        {/* Top 2/3: file preview (latest .txt / .xlsx / .docx / .jpg / .png referred by agent) */}
         <div className="flex-[2] min-h-0 flex flex-col p-4 bg-surface-cream">
           <FilePreview filePath={getLatestPreviewFileRef(messages)} cwd={activeSession?.cwd} />
         </div>
