@@ -315,7 +315,7 @@ export function Sidebar({
         {/* Progress: connected dots multi-step plan (step labels editable) */}
         {sessionList.length > 0 && (
           <div className="shrink-0 border-t border-ink-900/10 pt-3">
-            <div className="mb-2 text-xs font-medium text-ink-600">Progress</div>
+            <div className="mb-2 text-sm font-semibold text-ink-600">Progress</div>
             <div className="flex flex-col">
               {progressSteps.map((label, i) => (
                 <div key={i} className="flex items-start gap-2.5 w-full min-w-0">
@@ -416,18 +416,18 @@ export function Sidebar({
         )}
       </div>
       {/* Bottom half: verifier area (per-step criteria) */}
-      <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-        <div className="shrink-0 text-xs font-medium text-ink-600 mb-2">
-          Verification criteria — {progressSteps[selectedStepIndex]}
+      <div className="flex-1 min-h-0 max-h-[260px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
+        <div className="shrink-0 text-sm font-semibold text-ink-600 mb-2">
+          Verifier
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
           {verificationCriteria.map((text, index) => (
             <div key={index} className="shrink-0">
               {editingIndex === index ? (
-                <div className="rounded-xl border border-accent/40 bg-surface p-2">
+                <div className="rounded-xl border border-accent/40 bg-surface p-1.5">
                   <textarea
                     ref={editingIndex === index ? (el) => { editInputRef.current = el; } : undefined}
-                    className="w-full min-h-[60px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-2 text-xs text-ink-800 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/30"
+                    className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/30"
                     placeholder="Enter verification criterion..."
                     value={draftText}
                     onChange={(e) => setDraftText(e.target.value)}
@@ -442,7 +442,7 @@ export function Sidebar({
                 </div>
               ) : (
                 <div
-                  className="cursor-pointer rounded-xl border border-ink-900/10 bg-surface px-3 py-2.5 text-left text-xs text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors min-h-[44px] flex items-center"
+                  className="cursor-pointer rounded-xl border border-ink-900/10 bg-surface px-3 py-2 text-left text-xs text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors min-h-[38px] flex items-center"
                   onClick={() => startEditCriterion(index)}
                   role="button"
                   tabIndex={0}
@@ -455,7 +455,7 @@ export function Sidebar({
           ))}
           <button
             type="button"
-            className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-3 text-muted hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[44px] w-full"
+            className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-2.5 text-muted hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[38px] w-full"
             onClick={startAddCriterion}
             aria-label="Add verification criterion"
           >
