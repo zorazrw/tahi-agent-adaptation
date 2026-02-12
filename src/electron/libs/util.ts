@@ -30,7 +30,7 @@ export const generateSessionTitle = async (userIntent: string | null) => {
 
   try {
     const result: SDKResultMessage = await unstable_v2_prompt(
-      `please analynis the following user input to generate a short but clearly title to identify this conversation theme:
+      `please analyze the following user input to generate a short but clear title to identify this conversation theme:
       ${userIntent}
       directly output the title, do not include any other content`, {
       model: getCurrentApiConfig()?.model || "claude-sonnet",
@@ -39,7 +39,10 @@ export const generateSessionTitle = async (userIntent: string | null) => {
     });
 
     if (result.subtype === "success") {
-      return result.result;
+      const raw = result.result?.trim() ?? "";
+      // If the model prefixed with "Title:" or similar, use only the part after the colon
+      const afterColon = raw.includes(":") ? raw.slice(raw.indexOf(":") + 1).trim() : raw;
+      return afterColon || "New Session";
     }
 
     // Log any non-success result for debugging
