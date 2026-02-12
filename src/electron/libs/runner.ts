@@ -23,7 +23,7 @@ const DEFAULT_CWD = process.cwd();
 /** Appended to the user's first message so the model produces workflow steps, file names, and verifiers. */
 const TODO_LIST_INSTRUCTION = [
   "",
-  "First, you must produce exactly three outputs for this task:",
+  "For a given task, you must produce exactly three outputs:",
   "  1. Workflow steps (short action/outcome per step)",
   "  2. File name(s) for each step (the expected output file name or path per step)",
   "  3. Verifiers (what to check per step: file exists, content correct, etc.)",
@@ -49,14 +49,16 @@ const TODO_LIST_INSTRUCTION = [
   "Step 2:",
   "- ...",
   "",
-  "In OUTPUT FILES you must list the output file name (or path) for each step—one line per step; multiple files on one line separated by commas. In VERIFIERS list only what to check (e.g. 'Output file exists', 'Data is correct'). Use the exact headers OUTPUT FILES:, Step N:, and VERIFIERS:. DO NOT proceed with the task."
+  "In OUTPUT FILES you must list the output file name (or path) for each step—one line per step; multiple files on one line separated by commas. In VERIFIERS list only what to check (e.g. 'Output file exists', 'Data is correct'). Use the exact headers OUTPUT FILES:, Step N:, and VERIFIERS:.",
+  "",
+  "Task instruction:"
 ].join("\n");
 
 function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): string {
   const trimmed = userPrompt.trim();
   if (!trimmed) return trimmed;
   if (!isFirstMessage) return trimmed;
-  return trimmed + TODO_LIST_INSTRUCTION;
+  return TODO_LIST_INSTRUCTION + trimmed;
 }
 
 /** Builds the user prompt for solving a single workflow step (used for task-solving LLM calls). */
