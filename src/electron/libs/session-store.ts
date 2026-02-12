@@ -16,6 +16,7 @@ export type Session = {
   cwd?: string;
   allowedTools?: string;
   lastPrompt?: string;
+  steps?: string[];
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -28,6 +29,7 @@ export type StoredSession = {
   allowedTools?: string;
   lastPrompt?: string;
   claudeSessionId?: string;
+  steps?: string[];
   createdAt: number;
   updatedAt: number;
 };
@@ -92,17 +94,22 @@ export class SessionStore {
          order by updated_at desc`
       )
       .all() as Array<Record<string, unknown>>;
-    return rows.map((row) => ({
-      id: String(row.id),
-      title: String(row.title),
-      status: row.status as SessionStatus,
-      cwd: row.cwd ? String(row.cwd) : undefined,
-      allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
-      lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
-      claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
-      createdAt: Number(row.created_at),
-      updatedAt: Number(row.updated_at)
-    }));
+    return rows.map((row) => {
+      const id = String(row.id);
+      const mem = this.sessions.get(id);
+      return {
+        id,
+        title: String(row.title),
+        status: row.status as SessionStatus,
+        cwd: row.cwd ? String(row.cwd) : undefined,
+        allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
+        lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
+        claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
+        steps: mem?.steps,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at)
+      };
+    });
   }
 
   listRecentCwds(limit = 8): string[] {
@@ -136,6 +143,7 @@ export class SessionStore {
       .all(id) as Array<Record<string, unknown>>)
       .map((row) => JSON.parse(String(row.data)) as StreamMessage);
 
+    const mem = this.sessions.get(id);
     return {
       session: {
         id: String(sessionRow.id),
@@ -145,6 +153,7 @@ export class SessionStore {
         allowedTools: sessionRow.allowed_tools ? String(sessionRow.allowed_tools) : undefined,
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
         claudeSessionId: sessionRow.claude_session_id ? String(sessionRow.claude_session_id) : undefined,
+        steps: mem?.steps,
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },

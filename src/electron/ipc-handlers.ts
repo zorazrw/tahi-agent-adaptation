@@ -29,6 +29,29 @@ function hasLiveSession(sessionId: string): boolean {
   return Boolean(sessions.getSession(sessionId));
 }
 
+/** Parse numbered steps from LLM text like "1. First step\n2. Second step" or "1) Step one". */
+function parseNumberedSteps(text: string): string[] {
+  if (!text || typeof text !== "string") return [];
+  const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
+  const steps: string[] = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*\d+[.)]\s*(.+)$/);
+    if (match) steps.push(match[1].trim());
+  }
+  return steps;
+}
+
+/** Extract full text from an assistant message's content blocks. */
+function getAssistantMessageText(message: unknown): string {
+  const m = message as { type?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
+  if (m?.type !== "assistant" || !Array.isArray(m?.message?.content)) return "";
+  const parts: string[] = [];
+  for (const block of m.message.content) {
+    if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
+  }
+  return parts.join("\n");
+}
+
 function emit(event: ServerEvent) {
   // If a session was deleted, drop late events that would resurrect it in the UI.
   // (Session history lookups are DB-backed, so these late events commonly lead to "Unknown session".)
@@ -46,7 +69,19 @@ function emit(event: ServerEvent) {
     sessions.updateSession(event.payload.sessionId, { status: event.payload.status });
   }
   if (event.type === "stream.message") {
-    sessions.recordMessage(event.payload.sessionId, event.payload.message);
+    const { sessionId, message } = event.payload;
+    sessions.recordMessage(sessionId, message);
+    const text = getAssistantMessageText(message);
+    if (text) {
+      const steps = parseNumberedSteps(text);
+      if (steps.length >= 2) {
+        const session = sessions.getSession(sessionId);
+        if (session && !session.steps?.length) {
+          sessions.updateSession(sessionId, { steps });
+          broadcast({ type: "session.steps", payload: { sessionId, steps } });
+        }
+      }
+    }
   }
   if (event.type === "stream.user_prompt") {
     sessions.recordMessage(event.payload.sessionId, {
@@ -81,7 +116,8 @@ export function handleClientEvent(event: ClientEvent) {
       payload: {
         sessionId: history.session.id,
         status: history.session.status,
-        messages: history.messages
+        messages: history.messages,
+        steps: history.session.steps
       }
     });
     return;

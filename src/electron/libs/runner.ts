@@ -20,10 +20,26 @@ export type RunnerHandle = {
 
 const DEFAULT_CWD = process.cwd();
 
+/** Appended to the user's first message so the model produces a short todo list for the task. */
+const TODO_LIST_INSTRUCTION = [
+  "",
+  "First, generate a workflow for this task with these rules:",
+  "- Each step must be within 10 words; ideally use 4 steps or fewer.",
+  "- Output the workflow only (in format of '1. First step\n2. Second step'). DO NOT proceed with the task."
+].join("\n");
+
+function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): string {
+  const trimmed = userPrompt.trim();
+  if (!trimmed) return trimmed;
+  if (!isFirstMessage) return trimmed;
+  return trimmed + TODO_LIST_INSTRUCTION;
+}
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
   const { prompt, session, resumeSessionId, onEvent, onSessionUpdate } = options;
   const abortController = new AbortController();
+  const isFirstMessage = resumeSessionId == null;
+  const promptToSend = buildPromptForQuery(prompt, isFirstMessage);
 
   const sendMessage = (message: SDKMessage) => {
     onEvent({
@@ -61,7 +77,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       };
       
       const q = query({
-        prompt,
+        prompt: promptToSend,
         options: {
           cwd: session.cwd ?? DEFAULT_CWD,
           resume: resumeSessionId,

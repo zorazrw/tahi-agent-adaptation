@@ -16,6 +16,7 @@ export type SessionInfo = {
   status: SessionStatus;
   claudeSessionId?: string;
   cwd?: string;
+  steps?: string[];
   createdAt: number;
   updatedAt: number;
 };
@@ -26,7 +27,8 @@ export type ServerEvent =
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
   | { type: "session.status"; payload: { sessionId: string; status: SessionStatus; title?: string; cwd?: string; error?: string } }
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
-  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[] } }
+  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[] } }
+  | { type: "session.steps"; payload: { sessionId: string; steps: string[] } }
   | { type: "session.deleted"; payload: { sessionId: string } }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } };

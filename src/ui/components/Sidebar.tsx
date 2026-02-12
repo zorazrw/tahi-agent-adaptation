@@ -20,17 +20,32 @@ export function Sidebar({
   const [copied, setCopied] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
 
-  // Placeholder steps for progress (multi-step plan); replace with real agent steps later
-  const progressSteps = ["Step 1", "Step 2", "Step 3", "Step 4"];
+  const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+  const DEFAULT_STEPS = ["Step 1", "Step 2", "Step 3", "Step 4"];
+  const progressSteps = activeSession?.steps?.length ? activeSession.steps : DEFAULT_STEPS;
 
-  // Per-step verification criteria; index = progress step index
   const [verificationCriteriaByStep, setVerificationCriteriaByStep] = useState<string[][]>(() =>
-    Array.from({ length: progressSteps.length }, () => [])
+    Array.from({ length: DEFAULT_STEPS.length }, () => [])
   );
   const [selectedStepIndex, setSelectedStepIndex] = useState(0);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draftText, setDraftText] = useState("");
   const editInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    setVerificationCriteriaByStep((prev) => {
+      const n = progressSteps.length;
+      if (prev.length === n) return prev;
+      if (prev.length < n) return [...prev, ...Array.from({ length: n - prev.length }, () => [])];
+      return prev.slice(0, n);
+    });
+  }, [progressSteps.length]);
+
+  useEffect(() => {
+    if (selectedStepIndex >= progressSteps.length) {
+      setSelectedStepIndex(Math.max(0, progressSteps.length - 1));
+    }
+  }, [progressSteps.length, selectedStepIndex]);
 
   const verificationCriteria = verificationCriteriaByStep[selectedStepIndex] ?? [];
 

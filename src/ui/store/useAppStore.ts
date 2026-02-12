@@ -12,6 +12,7 @@ export type SessionView = {
   title: string;
   status: SessionStatus;
   cwd?: string;
+  steps?: string[];
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
   lastPrompt?: string;
@@ -109,6 +110,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             status: session.status,
             title: session.title,
             cwd: session.cwd,
+            steps: session.steps ?? existing.steps,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
           };
@@ -145,13 +147,33 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status } = event.payload;
+        const { sessionId, messages, status, steps } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, status, messages, hydrated: true }
+              [sessionId]: {
+                ...existing,
+                status,
+                messages,
+                ...(steps !== undefined && { steps }),
+                hydrated: true
+              }
+            }
+          };
+        });
+        break;
+      }
+
+      case "session.steps": {
+        const { sessionId, steps } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, steps }
             }
           };
         });
