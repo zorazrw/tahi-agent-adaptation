@@ -44,6 +44,7 @@ interface AppState {
   setApiConfigChecked: (checked: boolean) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
+  updateSessionSteps: (sessionId: string, steps: string[]) => void;
   handleServerEvent: (event: ServerEvent) => void;
 }
 
@@ -72,6 +73,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   setShowSettingsModal: (showSettingsModal) => set({ showSettingsModal }),
   setActiveSessionId: (id) => set({ activeSessionId: id }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
+
+  updateSessionSteps: (sessionId, steps) => {
+    set((state) => {
+      const existing = state.sessions[sessionId];
+      if (!existing) return {};
+      return {
+        sessions: {
+          ...state.sessions,
+          [sessionId]: { ...existing, steps }
+        }
+      };
+    });
+  },
 
   markHistoryRequested: (sessionId) => {
     set((state) => {

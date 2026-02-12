@@ -16,6 +16,7 @@ export function Sidebar({
   const sessions = useAppStore((state) => state.sessions);
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const setActiveSessionId = useAppStore((state) => state.setActiveSessionId);
+  const updateSessionSteps = useAppStore((state) => state.updateSessionSteps);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
@@ -28,6 +29,9 @@ export function Sidebar({
     Array.from({ length: DEFAULT_STEPS.length }, () => [])
   );
   const [selectedStepIndex, setSelectedStepIndex] = useState(0);
+  const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
+  const [editingStepDraft, setEditingStepDraft] = useState("");
+  const editingStepInputRef = useRef<HTMLInputElement | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [draftText, setDraftText] = useState("");
   const editInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -46,6 +50,55 @@ export function Sidebar({
       setSelectedStepIndex(Math.max(0, progressSteps.length - 1));
     }
   }, [progressSteps.length, selectedStepIndex]);
+
+  useEffect(() => {
+    if (editingStepIndex !== null) {
+      editingStepInputRef.current?.focus();
+    }
+  }, [editingStepIndex]);
+
+  const startEditStepLabel = (index: number) => {
+    setEditingStepIndex(index);
+    setEditingStepDraft(progressSteps[index] ?? "");
+  };
+
+  const saveStepLabelEdit = () => {
+    if (editingStepIndex === null || !activeSessionId) return;
+    const trimmed = editingStepDraft.trim();
+    const newSteps = [...progressSteps];
+    if (trimmed) {
+      newSteps[editingStepIndex] = trimmed;
+    } else {
+      newSteps.splice(editingStepIndex, 1);
+    }
+    if (newSteps.length > 0) {
+      updateSessionSteps(activeSessionId, newSteps);
+    } else {
+      updateSessionSteps(activeSessionId, []);
+    }
+    setEditingStepIndex(null);
+    setEditingStepDraft("");
+  };
+
+  const deleteStep = (index: number) => {
+    if (!activeSessionId) return;
+    const newSteps = progressSteps.filter((_, i) => i !== index);
+    updateSessionSteps(activeSessionId, newSteps.length > 0 ? newSteps : []);
+    setEditingStepIndex(null);
+    if (selectedStepIndex >= newSteps.length) {
+      setSelectedStepIndex(Math.max(0, newSteps.length - 1));
+    } else if (selectedStepIndex > index) {
+      setSelectedStepIndex(selectedStepIndex - 1);
+    }
+  };
+
+  const addStep = () => {
+    if (!activeSessionId) return;
+    const newSteps = [...progressSteps, ""];
+    updateSessionSteps(activeSessionId, newSteps);
+    setEditingStepIndex(newSteps.length - 1);
+    setEditingStepDraft("");
+  };
 
   const verificationCriteria = verificationCriteriaByStep[selectedStepIndex] ?? [];
 
@@ -232,30 +285,105 @@ export function Sidebar({
             </DropdownMenu.Root>
           )}
         </div>
-        {/* Progress: connected dots multi-step plan */}
+        {/* Progress: connected dots multi-step plan (step labels editable) */}
         {sessionList.length > 0 && (
           <div className="shrink-0 border-t border-ink-900/10 pt-3">
             <div className="mb-2 text-xs font-medium text-ink-600">Progress</div>
             <div className="flex flex-col">
               {progressSteps.map((label, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  className="flex items-start gap-2.5 w-full text-left rounded-lg -ml-1 pl-1 py-0.5 transition-colors hover:bg-ink-900/5 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:ring-inset"
-                  onClick={() => {
-                    setSelectedStepIndex(i);
-                    setEditingIndex(null);
-                  }}
-                >
-                  <div className="flex flex-col items-center pt-0.5">
-                    <div className={`h-2.5 w-2.5 shrink-0 rounded-full border-2 transition-colors ${selectedStepIndex === i ? "border-accent bg-accent/20" : "border-ink-900/30 bg-surface"}`} />
+                <div key={i} className="flex items-start gap-2.5 w-full min-w-0">
+                  <button
+                    type="button"
+                    className="flex flex-col items-center pt-0.5 shrink-0 rounded focus:outline-none focus:ring-2 focus:ring-accent/30 focus:ring-inset"
+                    onClick={() => {
+                      setSelectedStepIndex(i);
+                      setEditingIndex(null);
+                    }}
+                    aria-label={`Select step ${i + 1}`}
+                  >
+                    <div className={`h-2.5 w-2.5 rounded-full border-2 transition-colors ${selectedStepIndex === i ? "border-accent bg-accent/20" : "border-ink-900/30 bg-surface"}`} />
                     {i < progressSteps.length - 1 && (
                       <div className="w-px h-5 bg-ink-900/20 shrink-0" />
                     )}
+                  </button>
+                  <div className="flex-1 min-w-0 pb-1.5 pt-0.5">
+                    {editingStepIndex === i ? (
+                      <input
+                        ref={editingStepIndex === i ? (el) => { editingStepInputRef.current = el; } : undefined}
+                        type="text"
+                        className="w-full rounded border border-ink-900/20 bg-surface px-2 py-1 text-xs text-ink-800 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
+                        value={editingStepDraft}
+                        onChange={(e) => setEditingStepDraft(e.target.value)}
+                        onBlur={saveStepLabelEdit}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            saveStepLabelEdit();
+                          }
+                          if (e.key === "Escape") {
+                            setEditingStepIndex(null);
+                            setEditingStepDraft("");
+                          }
+                        }}
+                      />
+                    ) : (
+                      <div className="flex items-center gap-0.5 min-w-0 group">
+                        <button
+                          type="button"
+                          className={`flex-1 text-left text-xs truncate rounded px-1 -mx-1 py-0.5 transition-colors hover:bg-ink-900/5 ${selectedStepIndex === i ? "font-medium text-ink-800" : "text-ink-700"}`}
+                          onClick={() => {
+                            setSelectedStepIndex(i);
+                            setEditingIndex(null);
+                          }}
+                        >
+                          {label}
+                        </button>
+                        <button
+                          type="button"
+                          className="shrink-0 rounded p-0.5 text-ink-400 hover:text-ink-600 hover:bg-ink-900/10 opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/30"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startEditStepLabel(i);
+                          }}
+                          aria-label="Edit step label"
+                        >
+                          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className="shrink-0 rounded p-0.5 text-ink-400 hover:text-error hover:bg-ink-900/10 opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/30"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteStep(i);
+                          }}
+                          aria-label="Delete step"
+                        >
+                          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M5 12h14" />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <div className={`pb-1.5 text-xs ${selectedStepIndex === i ? "font-medium text-ink-800" : "text-ink-700"}`}>{label}</div>
-                </button>
+                </div>
               ))}
+              <div className="flex items-start gap-2.5 w-full min-w-0">
+                <div className="flex flex-col items-center pt-0.5 shrink-0 w-2.5" aria-hidden />
+                <button
+                  type="button"
+                  className="flex-1 flex items-center gap-1.5 rounded-lg border border-dashed border-ink-900/20 px-2 py-1.5 mt-0.5 text-xs text-muted hover:border-ink-900/30 hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
+                  onClick={addStep}
+                  aria-label="Add step"
+                >
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  <span>Add step</span>
+                </button>
+              </div>
             </div>
           </div>
         )}
