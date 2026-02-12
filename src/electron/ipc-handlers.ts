@@ -1,12 +1,15 @@
 import { BrowserWindow } from "electron";
 import type { ClientEvent, ServerEvent } from "./types.js";
-import { runClaude, type RunnerHandle } from "./libs/runner.js";
+import { runClaude, buildPromptForStep, type RunnerHandle } from "./libs/runner.js";
 import { SessionStore } from "./libs/session-store.js";
 import { app } from "electron";
 import { join } from "path";
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
+
+/** While a step-solving run is in progress, maps sessionId -> stepIndex so we can emit stepCompleted on result. */
+const sessionCurrentStepIndex = new Map<string, number>();
 
 function initializeSessions() {
   if (!sessions) {
@@ -82,6 +85,22 @@ function emit(event: ServerEvent) {
         }
       }
     }
+    // When a step-solving run completes, mark that step as completed and persist.
+    const m = message as { type?: string; subtype?: string };
+    if (m.type === "result") {
+      const stepIndex = sessionCurrentStepIndex.get(sessionId);
+      if (stepIndex !== undefined) {
+        sessionCurrentStepIndex.delete(sessionId);
+        if (m.subtype === "success") {
+          const session = sessions.getSession(sessionId);
+          if (session) {
+            const completed = [...(session.completedStepIndices ?? []), stepIndex].sort((a, b) => a - b);
+            sessions.updateSession(sessionId, { completedStepIndices: completed });
+          }
+          broadcast({ type: "session.stepCompleted", payload: { sessionId, stepIndex } });
+        }
+      }
+    }
   }
   if (event.type === "stream.user_prompt") {
     sessions.recordMessage(event.payload.sessionId, {
@@ -90,6 +109,65 @@ function emit(event: ServerEvent) {
     });
   }
   broadcast(event);
+}
+
+/** Starts a task-solving LLM call for the given workflow step index (0-based). */
+function triggerStepSolve(sessionId: string, stepIndex: number) {
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (!session) return;
+  if (!session.steps?.length || stepIndex < 0 || stepIndex >= session.steps.length) {
+    broadcast({
+      type: "runner.error",
+      payload: { sessionId, message: "No workflow steps yet. Send a message first to generate the workflow." }
+    });
+    return;
+  }
+  if (!session.claudeSessionId) {
+    broadcast({
+      type: "runner.error",
+      payload: { sessionId, message: "Cannot solve step: session has no resume id yet." }
+    });
+    return;
+  }
+
+  sessionCurrentStepIndex.set(sessionId, stepIndex);
+  const stepPrompt = buildPromptForStep(session.steps[stepIndex], stepIndex, session.steps.length);
+  store.updateSession(sessionId, { status: "running", lastPrompt: stepPrompt });
+  broadcast({
+    type: "session.status",
+    payload: { sessionId, status: "running", title: session.title, cwd: session.cwd }
+  });
+  broadcast({
+    type: "stream.user_prompt",
+    payload: { sessionId, prompt: stepPrompt }
+  });
+
+  runClaude({
+    prompt: stepPrompt,
+    session,
+    resumeSessionId: session.claudeSessionId,
+    onEvent: emit,
+    onSessionUpdate: (updates) => {
+      store.updateSession(session.id, updates);
+    }
+  })
+    .then((handle) => {
+      runnerHandles.set(session.id, handle);
+    })
+    .catch((error) => {
+      store.updateSession(session.id, { status: "error" });
+      broadcast({
+        type: "session.status",
+        payload: {
+          sessionId: session.id,
+          status: "error",
+          title: session.title,
+          cwd: session.cwd,
+          error: String(error)
+        }
+      });
+    });
 }
 
 export function handleClientEvent(event: ClientEvent) {
@@ -118,6 +196,7 @@ export function handleClientEvent(event: ClientEvent) {
         status: history.session.status,
         messages: history.messages,
         steps: history.session.steps,
+        completedStepIndices: history.session.completedStepIndices,
         verificationCriteria: history.session.verificationCriteria,
         title: history.session.title
       }
@@ -233,6 +312,12 @@ export function handleClientEvent(event: ClientEvent) {
         });
       });
 
+    return;
+  }
+
+  if (event.type === "session.solveStep") {
+    const { sessionId, stepIndex } = event.payload;
+    triggerStepSolve(sessionId, stepIndex);
     return;
   }
 

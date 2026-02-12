@@ -13,6 +13,7 @@ export type SessionView = {
   status: SessionStatus;
   cwd?: string;
   steps?: string[];
+  completedStepIndices?: number[];
   verificationCriteria?: string[][];
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
@@ -154,6 +155,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             title: session.title ?? existing.title,
             cwd: session.cwd,
             steps: session.steps ?? existing.steps,
+            completedStepIndices: session.completedStepIndices ?? existing.completedStepIndices,
             verificationCriteria: session.verificationCriteria ?? existing.verificationCriteria,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
@@ -191,7 +193,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, steps, verificationCriteria, title } = event.payload;
+        const { sessionId, messages, status, steps, completedStepIndices, verificationCriteria, title } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -202,6 +204,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 status,
                 messages,
                 ...(steps !== undefined && { steps }),
+                ...(completedStepIndices !== undefined && { completedStepIndices }),
                 ...(verificationCriteria !== undefined && { verificationCriteria }),
                 ...(title !== undefined && { title }),
                 hydrated: true
@@ -248,6 +251,22 @@ export const useAppStore = create<AppState>((set, get) => ({
             sessions: {
               ...state.sessions,
               [sessionId]: { ...existing, title }
+            }
+          };
+        });
+        break;
+      }
+
+      case "session.stepCompleted": {
+        const { sessionId, stepIndex } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          const completed = existing.completedStepIndices ?? [];
+          if (completed.includes(stepIndex)) return {};
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, completedStepIndices: [...completed, stepIndex].sort((a, b) => a - b) }
             }
           };
         });

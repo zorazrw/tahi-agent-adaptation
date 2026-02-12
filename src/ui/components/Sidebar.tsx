@@ -383,22 +383,33 @@ export function Sidebar({
             <div className="mb-2 text-sm font-semibold text-ink-600">Progress</div>
             <div className="flex flex-col">
               {progressSteps.map((label, i) => (
-                <div key={i} className="flex items-start gap-2.5 w-full min-w-0">
+                <div key={i} className="flex items-center gap-3 w-full min-w-0">
                   <button
                     type="button"
-                    className="flex flex-col items-center pt-0.5 shrink-0 rounded focus:outline-none focus:ring-2 focus:ring-accent/30 focus:ring-inset"
+                    className="flex flex-col items-center shrink-0 rounded-full p-1.5 -m-1.5 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:ring-inset min-w-[32px] min-h-[32px] justify-center"
                     onClick={() => {
                       setSelectedStepIndex(i);
                       setEditingIndex(null);
+                      if (activeSessionId) {
+                        sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId, stepIndex: i } });
+                      }
                     }}
-                    aria-label={`Select step ${i + 1}`}
+                    aria-label={`Run step ${i + 1}`}
                   >
-                    <div className={`h-2.5 w-2.5 rounded-full border-2 transition-colors ${selectedStepIndex === i ? "border-accent bg-accent/20" : "border-ink-900/30 bg-surface"}`} />
+                    <div
+                      className={`h-4 w-4 rounded-full border-2 transition-colors flex-shrink-0 ${
+                        activeSession?.completedStepIndices?.includes(i)
+                          ? "step-circle-completed"
+                          : selectedStepIndex === i
+                            ? "border-accent bg-accent/20"
+                            : "border-ink-900/30 bg-surface"
+                      }`}
+                    />
                     {i < progressSteps.length - 1 && (
-                      <div className="w-px h-5 bg-ink-900/20 shrink-0" />
+                      <div className="w-px h-4 bg-ink-900/20 shrink-0 mt-0.5" />
                     )}
                   </button>
-                  <div className="flex-1 min-w-0 pb-1.5 pt-0.5">
+                  <div className="flex-1 min-w-0 py-0.5">
                     {editingStepIndex === i ? (
                       <input
                         ref={editingStepIndex === i ? (el) => { editingStepInputRef.current = el; } : undefined}
@@ -462,8 +473,8 @@ export function Sidebar({
                   </div>
                 </div>
               ))}
-              <div className="flex items-start gap-2.5 w-full min-w-0">
-                <div className="flex flex-col items-center pt-0.5 shrink-0 w-2.5" aria-hidden />
+              <div className="flex items-center gap-3 w-full min-w-0">
+                <div className="shrink-0 w-8 h-4" aria-hidden />
                 <button
                   type="button"
                   className="flex-1 flex items-center gap-1.5 rounded-lg border border-dashed border-ink-900/20 px-2 py-1.5 mt-0.5 text-xs text-muted hover:border-ink-900/30 hover:text-ink-600 hover:bg-ink-900/5 transition-colors"

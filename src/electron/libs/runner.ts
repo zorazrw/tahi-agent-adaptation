@@ -35,6 +35,16 @@ function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): strin
   return trimmed + TODO_LIST_INSTRUCTION;
 }
 
+/** Builds the user prompt for solving a single workflow step (used for task-solving LLM calls). */
+export function buildPromptForStep(stepDescription: string, stepIndex: number, totalSteps: number): string {
+  const oneBased = stepIndex + 1;
+  return [
+    `Execute step ${oneBased} of ${totalSteps} of the workflow. Complete only this sub-task.`,
+    "",
+    `Step: ${stepDescription}`
+  ].join("\n");
+}
+
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
   const { prompt, session, resumeSessionId, onEvent, onSessionUpdate } = options;
   const abortController = new AbortController();

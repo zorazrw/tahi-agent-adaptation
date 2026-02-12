@@ -111,3 +111,9 @@ code, pre, textarea.mono, input.mono {
 .animate-shimmer {
   animation: shimmer 1.4s linear infinite;
 }
+
+/* Step progress circle: completed state (orange) */
+.step-circle-completed {
+  background-color: var(--color-accent);
+  border-color: var(--color-accent);
+}

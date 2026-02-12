@@ -25,6 +25,18 @@ function parseVerificationCriteria(raw: unknown): string[][] | undefined {
   }
 }
 
+function parseCompletedStepIndices(raw: unknown): number[] | undefined {
+  if (raw == null) return undefined;
+  try {
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(arr)) return undefined;
+    const ok = arr.every((x) => typeof x === "number" && Number.isInteger(x));
+    return ok ? (arr as number[]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export type PendingPermission = {
   toolUseId: string;
   toolName: string;
@@ -41,6 +53,7 @@ export type Session = {
   allowedTools?: string;
   lastPrompt?: string;
   steps?: string[];
+  completedStepIndices?: number[];
   verificationCriteria?: string[][];
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
@@ -55,6 +68,7 @@ export type StoredSession = {
   lastPrompt?: string;
   claudeSessionId?: string;
   steps?: string[];
+  completedStepIndices?: number[];
   verificationCriteria?: string[][];
   createdAt: number;
   updatedAt: number;
@@ -121,7 +135,7 @@ export class SessionStore {
   listSessions(): StoredSession[] {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, completed_step_indices, created_at, updated_at
          from sessions
          order by updated_at desc`
       )
@@ -138,6 +152,7 @@ export class SessionStore {
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
         steps: parseSteps(row.steps) ?? mem?.steps ?? [],
+        completedStepIndices: parseCompletedStepIndices(row.completed_step_indices) ?? mem?.completedStepIndices ?? [],
         verificationCriteria: parseVerificationCriteria(row.verification_criteria) ?? mem?.verificationCriteria ?? [],
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
@@ -162,7 +177,7 @@ export class SessionStore {
   getSessionHistory(id: string): SessionHistory | null {
     const sessionRow = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, completed_step_indices, created_at, updated_at
          from sessions
          where id = ?`
       )
@@ -187,6 +202,7 @@ export class SessionStore {
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
         claudeSessionId: sessionRow.claude_session_id ? String(sessionRow.claude_session_id) : undefined,
         steps: parseSteps(sessionRow.steps) ?? mem?.steps ?? [],
+        completedStepIndices: parseCompletedStepIndices(sessionRow.completed_step_indices) ?? mem?.completedStepIndices ?? [],
         verificationCriteria: parseVerificationCriteria(sessionRow.verification_criteria) ?? mem?.verificationCriteria ?? [],
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
@@ -263,6 +279,7 @@ export class SessionStore {
       allowedTools: "allowed_tools",
       lastPrompt: "last_prompt",
       steps: "steps",
+      completedStepIndices: "completed_step_indices",
       verificationCriteria: "verification_criteria"
     } as const;
 
@@ -273,6 +290,8 @@ export class SessionStore {
       const value = updates[key];
       if (key === "steps") {
         values.push(Array.isArray(value) ? JSON.stringify(value) : null);
+      } else if (key === "completedStepIndices") {
+        values.push(Array.isArray(value) && value.every((x) => typeof x === "number") ? JSON.stringify(value) : null);
       } else if (key === "verificationCriteria") {
         values.push(Array.isArray(value) && value.every(Array.isArray) ? JSON.stringify(value) : null);
       } else {
@@ -316,6 +335,11 @@ export class SessionStore {
     } catch {
       /* column may already exist */
     }
+    try {
+      this.db.exec(`alter table sessions add column completed_step_indices text`);
+    } catch {
+      /* column may already exist */
+    }
     this.db.exec(
       `create table if not exists messages (
         id text primary key,
@@ -331,7 +355,7 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, completed_step_indices
          from sessions`
       )
       .all();
@@ -345,6 +369,7 @@ export class SessionStore {
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         steps: parseSteps(row.steps),
+        completedStepIndices: parseCompletedStepIndices(row.completed_step_indices),
         verificationCriteria: parseVerificationCriteria(row.verification_criteria),
         pendingPermissions: new Map()
       };

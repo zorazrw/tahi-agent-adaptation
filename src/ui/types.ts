@@ -16,6 +16,7 @@ export type SessionInfo = {
   claudeSessionId?: string;
   cwd?: string;
   steps?: string[];
+  completedStepIndices?: number[];
   verificationCriteria?: string[][];
   createdAt: number;
   updatedAt: number;
@@ -27,11 +28,12 @@ export type ServerEvent =
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
   | { type: "session.status"; payload: { sessionId: string; status: SessionStatus; title?: string; cwd?: string; error?: string } }
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
-  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[]; verificationCriteria?: string[][]; title?: string } }
+  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[]; completedStepIndices?: number[]; verificationCriteria?: string[][]; title?: string } }
   | { type: "session.steps"; payload: { sessionId: string; steps: string[] } }
   | { type: "session.verificationCriteria"; payload: { sessionId: string; verificationCriteria: string[][] } }
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }
+  | { type: "session.stepCompleted"; payload: { sessionId: string; stepIndex: number } }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } };
 
@@ -46,4 +48,5 @@ export type ClientEvent =
   | { type: "session.updateTitle"; payload: { sessionId: string; title: string } }
   | { type: "session.list" }
   | { type: "session.history"; payload: { sessionId: string } }
+  | { type: "session.solveStep"; payload: { sessionId: string; stepIndex: number } }
   | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: PermissionResult } };
