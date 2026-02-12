@@ -14,6 +14,7 @@ export type SessionView = {
   cwd?: string;
   steps?: string[];
   completedStepIndices?: number[];
+  outputFiles?: string[][];
   verificationCriteria?: string[][];
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
@@ -156,6 +157,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             cwd: session.cwd,
             steps: session.steps ?? existing.steps,
             completedStepIndices: session.completedStepIndices ?? existing.completedStepIndices,
+            outputFiles: session.outputFiles ?? existing.outputFiles,
             verificationCriteria: session.verificationCriteria ?? existing.verificationCriteria,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
@@ -193,7 +195,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, steps, completedStepIndices, verificationCriteria, title } = event.payload;
+        const { sessionId, messages, status, steps, completedStepIndices, outputFiles, verificationCriteria, title } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -205,6 +207,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 messages,
                 ...(steps !== undefined && { steps }),
                 ...(completedStepIndices !== undefined && { completedStepIndices }),
+                ...(outputFiles !== undefined && { outputFiles }),
                 ...(verificationCriteria !== undefined && { verificationCriteria }),
                 ...(title !== undefined && { title }),
                 hydrated: true
@@ -223,6 +226,20 @@ export const useAppStore = create<AppState>((set, get) => ({
             sessions: {
               ...state.sessions,
               [sessionId]: { ...existing, steps }
+            }
+          };
+        });
+        break;
+      }
+
+      case "session.outputFiles": {
+        const { sessionId, outputFiles } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, outputFiles }
             }
           };
         });

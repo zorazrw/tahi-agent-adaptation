@@ -18,6 +18,7 @@ export type SessionInfo = {
   cwd?: string;
   steps?: string[];
   completedStepIndices?: number[];
+  outputFiles?: string[][];
   verificationCriteria?: string[][];
   createdAt: number;
   updatedAt: number;
@@ -29,8 +30,9 @@ export type ServerEvent =
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
   | { type: "session.status"; payload: { sessionId: string; status: SessionStatus; title?: string; cwd?: string; error?: string } }
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
-  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[]; completedStepIndices?: number[]; verificationCriteria?: string[][]; title?: string } }
+  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[]; completedStepIndices?: number[]; outputFiles?: string[][]; verificationCriteria?: string[][]; title?: string } }
   | { type: "session.steps"; payload: { sessionId: string; steps: string[] } }
+  | { type: "session.outputFiles"; payload: { sessionId: string; outputFiles: string[][] } }
   | { type: "session.verificationCriteria"; payload: { sessionId: string; verificationCriteria: string[][] } }
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }

@@ -491,12 +491,32 @@ export function Sidebar({
           </div>
         )}
       </div>
-      {/* Bottom half: verifier area (per-step criteria) */}
+      {/* Files: expected output file name(s) for the current step */}
+      <div className="shrink-0 flex flex-col border-t border-ink-900/10 pt-2 pb-2">
+        <div className="shrink-0 text-sm font-semibold text-ink-600 mb-1.5">
+          Files {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+        </div>
+        <div className="min-h-0 overflow-y-auto max-h-[88px] flex flex-col gap-1">
+          {(activeSession?.outputFiles?.[selectedStepIndex] ?? []).length === 0 ? (
+            <p className="text-xs text-muted py-0.5">No output file name for this step.</p>
+          ) : (
+            (activeSession?.outputFiles?.[selectedStepIndex] ?? []).map((fileName, i) => (
+              <div key={i} className="font-mono text-xs text-ink-700 truncate rounded bg-ink-900/5 px-2 py-1" title={fileName}>
+                {fileName}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+      {/* Verifier area (per-step criteria from workflow or user) */}
       <div className="flex-1 min-h-0 max-h-[260px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
         <div className="shrink-0 text-sm font-semibold text-ink-600 mb-2">
-          Verifier
+          Verifier {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
+          {verificationCriteria.length === 0 && !editingIndex ? (
+            <p className="text-xs text-muted py-1">No verifiers for this step. Add criteria to check output files and quality.</p>
+          ) : null}
           {verificationCriteria.map((text, index) => (
             <div key={index} className="shrink-0">
               {editingIndex === index ? (

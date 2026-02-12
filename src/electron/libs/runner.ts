@@ -20,12 +20,36 @@ export type RunnerHandle = {
 
 const DEFAULT_CWD = process.cwd();
 
-/** Appended to the user's first message so the model produces a short todo list for the task. */
+/** Appended to the user's first message so the model produces workflow steps, file names, and verifiers. */
 const TODO_LIST_INSTRUCTION = [
   "",
-  "First, generate a workflow for this task with these rules:",
+  "First, you must produce exactly three outputs for this task:",
+  "  1. Workflow steps (short action/outcome per step)",
+  "  2. File name(s) for each step (the expected output file name or path per step)",
+  "  3. Verifiers (what to check per step: file exists, content correct, etc.)",
+  "",
+  "Rules:",
   "- Each step must be within 10 words; ideally use 4 steps or fewer.",
-  "- Output the workflow only (in format of '1. First step\n2. Second step'). DO NOT proceed with the task."
+  "- Each step must have clear, tangible file output. In the workflow list describe only the action (e.g. 'Create summary report')—do NOT put file names in the step text.",
+  "- Output in this exact format:",
+  "",
+  "  1. First step (action/outcome only)",
+  "  2. Second step",
+  "  ...",
+  "",
+  "OUTPUT FILES:",
+  "Step 1: file1.xlsx",
+  "Step 2: path/to/file2.png",
+  "...",
+  "",
+  "VERIFIERS:",
+  "Step 1:",
+  "- Output file exists",
+  "- [Optional: main quality check]",
+  "Step 2:",
+  "- ...",
+  "",
+  "In OUTPUT FILES you must list the output file name (or path) for each step—one line per step; multiple files on one line separated by commas. In VERIFIERS list only what to check (e.g. 'Output file exists', 'Data is correct'). Use the exact headers OUTPUT FILES:, Step N:, and VERIFIERS:. DO NOT proceed with the task."
 ].join("\n");
 
 function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): string {
