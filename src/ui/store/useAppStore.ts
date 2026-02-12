@@ -13,6 +13,7 @@ export type SessionView = {
   status: SessionStatus;
   cwd?: string;
   steps?: string[];
+  verificationCriteria?: string[][];
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
   lastPrompt?: string;
@@ -45,6 +46,7 @@ interface AppState {
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
   updateSessionSteps: (sessionId: string, steps: string[]) => void;
+  updateSessionVerificationCriteria: (sessionId: string, verificationCriteria: string[][]) => void;
   handleServerEvent: (event: ServerEvent) => void;
 }
 
@@ -82,6 +84,19 @@ export const useAppStore = create<AppState>((set, get) => ({
         sessions: {
           ...state.sessions,
           [sessionId]: { ...existing, steps }
+        }
+      };
+    });
+  },
+
+  updateSessionVerificationCriteria: (sessionId, verificationCriteria) => {
+    set((state) => {
+      const existing = state.sessions[sessionId];
+      if (!existing) return {};
+      return {
+        sessions: {
+          ...state.sessions,
+          [sessionId]: { ...existing, verificationCriteria }
         }
       };
     });
@@ -125,6 +140,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             title: session.title,
             cwd: session.cwd,
             steps: session.steps ?? existing.steps,
+            verificationCriteria: session.verificationCriteria ?? existing.verificationCriteria,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
           };
@@ -161,7 +177,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, steps } = event.payload;
+        const { sessionId, messages, status, steps, verificationCriteria } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -172,6 +188,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 status,
                 messages,
                 ...(steps !== undefined && { steps }),
+                ...(verificationCriteria !== undefined && { verificationCriteria }),
                 hydrated: true
               }
             }
@@ -188,6 +205,20 @@ export const useAppStore = create<AppState>((set, get) => ({
             sessions: {
               ...state.sessions,
               [sessionId]: { ...existing, steps }
+            }
+          };
+        });
+        break;
+      }
+
+      case "session.verificationCriteria": {
+        const { sessionId, verificationCriteria } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, verificationCriteria }
             }
           };
         });

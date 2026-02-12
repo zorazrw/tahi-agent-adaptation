@@ -11,6 +11,20 @@ function parseSteps(raw: unknown): string[] | undefined {
   }
 }
 
+function parseVerificationCriteria(raw: unknown): string[][] | undefined {
+  if (raw == null) return undefined;
+  try {
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(arr)) return undefined;
+    const ok = arr.every(
+      (row) => Array.isArray(row) && row.every((x) => typeof x === "string")
+    );
+    return ok ? (arr as string[][]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export type PendingPermission = {
   toolUseId: string;
   toolName: string;
@@ -27,6 +41,7 @@ export type Session = {
   allowedTools?: string;
   lastPrompt?: string;
   steps?: string[];
+  verificationCriteria?: string[][];
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -40,6 +55,7 @@ export type StoredSession = {
   lastPrompt?: string;
   claudeSessionId?: string;
   steps?: string[];
+  verificationCriteria?: string[][];
   createdAt: number;
   updatedAt: number;
 };
@@ -70,15 +86,17 @@ export class SessionStore {
       allowedTools: options.allowedTools,
       lastPrompt: options.prompt,
       steps: [],
+      verificationCriteria: [],
       pendingPermissions: new Map()
     };
     this.sessions.set(id, session);
     const stepsJson = JSON.stringify(session.steps ?? []);
+    const verificationCriteriaJson = JSON.stringify(session.verificationCriteria ?? []);
     this.db
       .prepare(
         `insert into sessions
-          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -89,6 +107,7 @@ export class SessionStore {
         session.allowedTools ?? null,
         session.lastPrompt ?? null,
         stepsJson,
+        verificationCriteriaJson,
         now,
         now
       );
@@ -102,7 +121,7 @@ export class SessionStore {
   listSessions(): StoredSession[] {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, created_at, updated_at
          from sessions
          order by updated_at desc`
       )
@@ -119,6 +138,7 @@ export class SessionStore {
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
         steps: parseSteps(row.steps) ?? mem?.steps ?? [],
+        verificationCriteria: parseVerificationCriteria(row.verification_criteria) ?? mem?.verificationCriteria ?? [],
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
       };
@@ -142,7 +162,7 @@ export class SessionStore {
   getSessionHistory(id: string): SessionHistory | null {
     const sessionRow = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, created_at, updated_at
          from sessions
          where id = ?`
       )
@@ -167,6 +187,7 @@ export class SessionStore {
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
         claudeSessionId: sessionRow.claude_session_id ? String(sessionRow.claude_session_id) : undefined,
         steps: parseSteps(sessionRow.steps) ?? mem?.steps ?? [],
+        verificationCriteria: parseVerificationCriteria(sessionRow.verification_criteria) ?? mem?.verificationCriteria ?? [],
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },
@@ -216,6 +237,14 @@ export class SessionStore {
       .run(stepsJson, Date.now(), id);
   }
 
+  /** Persist only verification criteria to DB (e.g. when session may not be in memory yet). */
+  persistVerificationCriteria(id: string, verificationCriteria: string[][]): void {
+    const json = Array.isArray(verificationCriteria) ? JSON.stringify(verificationCriteria) : null;
+    this.db
+      .prepare(`update sessions set verification_criteria = ?, updated_at = ? where id = ?`)
+      .run(json, Date.now(), id);
+  }
+
   private persistSession(id: string, updates: Partial<Session>): void {
     const fields: string[] = [];
     const values: Array<string | number | null> = [];
@@ -225,7 +254,8 @@ export class SessionStore {
       cwd: "cwd",
       allowedTools: "allowed_tools",
       lastPrompt: "last_prompt",
-      steps: "steps"
+      steps: "steps",
+      verificationCriteria: "verification_criteria"
     } as const;
 
     for (const key of Object.keys(updates) as Array<keyof typeof updatable>) {
@@ -235,6 +265,8 @@ export class SessionStore {
       const value = updates[key];
       if (key === "steps") {
         values.push(Array.isArray(value) ? JSON.stringify(value) : null);
+      } else if (key === "verificationCriteria") {
+        values.push(Array.isArray(value) && value.every(Array.isArray) ? JSON.stringify(value) : null);
       } else {
         values.push(value === undefined ? null : (value as string));
       }
@@ -261,12 +293,18 @@ export class SessionStore {
         allowed_tools text,
         last_prompt text,
         steps text,
+        verification_criteria text,
         created_at integer not null,
         updated_at integer not null
       )`
     );
     try {
       this.db.exec(`alter table sessions add column steps text`);
+    } catch {
+      /* column may already exist */
+    }
+    try {
+      this.db.exec(`alter table sessions add column verification_criteria text`);
     } catch {
       /* column may already exist */
     }
@@ -285,7 +323,7 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria
          from sessions`
       )
       .all();
@@ -299,6 +337,7 @@ export class SessionStore {
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         steps: parseSteps(row.steps),
+        verificationCriteria: parseVerificationCriteria(row.verification_criteria),
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);

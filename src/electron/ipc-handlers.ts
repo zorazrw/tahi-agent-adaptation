@@ -117,7 +117,8 @@ export function handleClientEvent(event: ClientEvent) {
         sessionId: history.session.id,
         status: history.session.status,
         messages: history.messages,
-        steps: history.session.steps
+        steps: history.session.steps,
+        verificationCriteria: history.session.verificationCriteria
       }
     });
     return;
@@ -259,6 +260,16 @@ export function handleClientEvent(event: ClientEvent) {
     if (hasLiveSession(sessionId)) {
       sessions.updateSession(sessionId, { steps });
       broadcast({ type: "session.steps", payload: { sessionId, steps } });
+    }
+    return;
+  }
+
+  if (event.type === "session.updateVerificationCriteria") {
+    const { sessionId, verificationCriteria } = event.payload;
+    sessions.persistVerificationCriteria(sessionId, verificationCriteria);
+    if (hasLiveSession(sessionId)) {
+      sessions.updateSession(sessionId, { verificationCriteria });
+      broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
     }
     return;
   }

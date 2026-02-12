@@ -20,6 +20,7 @@ export function Sidebar({
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const setActiveSessionId = useAppStore((state) => state.setActiveSessionId);
   const updateSessionSteps = useAppStore((state) => state.updateSessionSteps);
+  const updateSessionVerificationCriteria = useAppStore((state) => state.updateSessionVerificationCriteria);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
@@ -39,14 +40,17 @@ export function Sidebar({
   const [draftText, setDraftText] = useState("");
   const editInputRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // Sync verification criteria from store when session or steps change (and not editing a criterion).
   useEffect(() => {
-    setVerificationCriteriaByStep((prev) => {
-      const n = progressSteps.length;
-      if (prev.length === n) return prev;
-      if (prev.length < n) return [...prev, ...Array.from({ length: n - prev.length }, () => [])];
-      return prev.slice(0, n);
-    });
-  }, [progressSteps.length]);
+    if (editingIndex !== null) return;
+    const fromStore = activeSession?.verificationCriteria ?? [];
+    const n = progressSteps.length;
+    const synced =
+      fromStore.length >= n
+        ? fromStore.slice(0, n)
+        : [...fromStore, ...Array.from({ length: n - fromStore.length }, () => [])];
+    setVerificationCriteriaByStep(synced);
+  }, [activeSessionId, activeSession?.verificationCriteria, progressSteps.length, editingIndex]);
 
   useEffect(() => {
     if (selectedStepIndex >= progressSteps.length) {
@@ -81,6 +85,12 @@ export function Sidebar({
       updateSessionSteps(activeSessionId, []);
     }
     sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: stepsToSave } });
+    const n = newSteps.length;
+    const criteria = verificationCriteriaByStep.slice(0, n);
+    while (criteria.length < n) criteria.push([]);
+    setVerificationCriteriaByStep(criteria);
+    updateSessionVerificationCriteria(activeSessionId, criteria);
+    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: criteria } });
     setEditingStepIndex(null);
     setEditingStepDraft("");
   };
@@ -91,6 +101,10 @@ export function Sidebar({
     const stepsToSave = newSteps.length > 0 ? newSteps : [];
     updateSessionSteps(activeSessionId, stepsToSave);
     sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: stepsToSave } });
+    const criteria = verificationCriteriaByStep.filter((_, i) => i !== index);
+    setVerificationCriteriaByStep(criteria);
+    updateSessionVerificationCriteria(activeSessionId, criteria);
+    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: criteria } });
     setEditingStepIndex(null);
     if (selectedStepIndex >= newSteps.length) {
       setSelectedStepIndex(Math.max(0, newSteps.length - 1));
@@ -104,6 +118,10 @@ export function Sidebar({
     const newSteps = [...progressSteps, ""];
     updateSessionSteps(activeSessionId, newSteps);
     sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: newSteps } });
+    const criteria = [...verificationCriteriaByStep, []];
+    setVerificationCriteriaByStep(criteria);
+    updateSessionVerificationCriteria(activeSessionId, criteria);
+    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: criteria } });
     setEditingStepIndex(newSteps.length - 1);
     setEditingStepDraft("");
   };
@@ -147,16 +165,17 @@ export function Sidebar({
   }, [editingIndex]);
 
   const startAddCriterion = () => {
+    if (!activeSessionId) return;
     const list = verificationCriteriaByStep[selectedStepIndex] ?? [];
     const newIndex = list.length;
-    setVerificationCriteriaByStep((prev) => {
-      const next = prev.slice();
-      const stepList = next[selectedStepIndex] ?? [];
-      next[selectedStepIndex] = [...stepList, ""];
-      return next;
-    });
+    const next = verificationCriteriaByStep.slice();
+    const stepList = next[selectedStepIndex] ?? [];
+    next[selectedStepIndex] = [...stepList, ""];
+    setVerificationCriteriaByStep(next);
     setEditingIndex(newIndex);
     setDraftText("");
+    updateSessionVerificationCriteria(activeSessionId, next);
+    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: next } });
   };
 
   const startEditCriterion = (index: number) => {
@@ -165,21 +184,21 @@ export function Sidebar({
   };
 
   const saveEdit = () => {
-    if (editingIndex === null) return;
+    if (editingIndex === null || !activeSessionId) return;
     const trimmed = draftText.trim();
-    setVerificationCriteriaByStep((prev) => {
-      const next = prev.slice();
-      const stepList = [...(next[selectedStepIndex] ?? [])];
-      if (trimmed) {
-        stepList[editingIndex] = trimmed;
-      } else {
-        stepList.splice(editingIndex, 1);
-      }
-      next[selectedStepIndex] = stepList;
-      return next;
-    });
+    const next = verificationCriteriaByStep.slice();
+    const stepList = [...(next[selectedStepIndex] ?? [])];
+    if (trimmed) {
+      stepList[editingIndex] = trimmed;
+    } else {
+      stepList.splice(editingIndex, 1);
+    }
+    next[selectedStepIndex] = stepList;
+    setVerificationCriteriaByStep(next);
     setEditingIndex(null);
     setDraftText("");
+    updateSessionVerificationCriteria(activeSessionId, next);
+    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: next } });
   };
 
   const handleCopyCommand = async () => {
