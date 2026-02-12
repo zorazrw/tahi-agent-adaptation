@@ -237,6 +237,13 @@ export class SessionStore {
       .run(stepsJson, Date.now(), id);
   }
 
+  /** Persist only title to DB (e.g. when session may not be in memory yet). */
+  persistTitle(id: string, title: string): void {
+    this.db
+      .prepare(`update sessions set title = ?, updated_at = ? where id = ?`)
+      .run(title, Date.now(), id);
+  }
+
   /** Persist only verification criteria to DB (e.g. when session may not be in memory yet). */
   persistVerificationCriteria(id: string, verificationCriteria: string[][]): void {
     const json = Array.isArray(verificationCriteria) ? JSON.stringify(verificationCriteria) : null;
@@ -249,6 +256,7 @@ export class SessionStore {
     const fields: string[] = [];
     const values: Array<string | number | null> = [];
     const updatable = {
+      title: "title",
       claudeSessionId: "claude_session_id",
       status: "status",
       cwd: "cwd",

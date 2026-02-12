@@ -21,9 +21,13 @@ export function Sidebar({
   const setActiveSessionId = useAppStore((state) => state.setActiveSessionId);
   const updateSessionSteps = useAppStore((state) => state.updateSessionSteps);
   const updateSessionVerificationCriteria = useAppStore((state) => state.updateSessionVerificationCriteria);
+  const updateSessionTitle = useAppStore((state) => state.updateSessionTitle);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const DEFAULT_STEPS = ["Step 1", "Step 2", "Step 3", "Step 4"];
@@ -63,6 +67,34 @@ export function Sidebar({
       editingStepInputRef.current?.focus();
     }
   }, [editingStepIndex]);
+
+  useEffect(() => {
+    if (editingTitle) {
+      titleInputRef.current?.focus();
+    }
+  }, [editingTitle]);
+
+  useEffect(() => {
+    setEditingTitle(false);
+    setTitleDraft("");
+  }, [activeSessionId]);
+
+  const startEditTitle = () => {
+    if (!activeSessionId || !sessions[activeSessionId]) return;
+    setTitleDraft(sessions[activeSessionId].title ?? "");
+    setEditingTitle(true);
+  };
+
+  const saveTitle = () => {
+    if (!activeSessionId || !editingTitle) return;
+    const trimmed = titleDraft.trim();
+    if (trimmed) {
+      updateSessionTitle(activeSessionId, trimmed);
+      sendEvent({ type: "session.updateTitle", payload: { sessionId: activeSessionId, title: trimmed } });
+    }
+    setEditingTitle(false);
+    setTitleDraft("");
+  };
 
   const startEditStepLabel = (index: number) => {
     setEditingStepIndex(index);
@@ -252,20 +284,53 @@ export function Sidebar({
           ) : (
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
                   className="flex w-full cursor-pointer items-center gap-2 rounded-xl border border-ink-900/10 bg-surface px-3 py-3 text-left transition hover:bg-surface-tertiary hover:border-ink-900/20 focus:outline-none focus:ring-2 focus:ring-accent/30 data-[state=open]:border-accent/30 data-[state=open]:bg-accent-subtle"
                 >
-                  <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                  <div
+                    className="flex min-w-0 flex-1 flex-col overflow-hidden"
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  >
                     {activeSessionId && sessions[activeSessionId] ? (
-                      <>
-                        <div className={`text-[12px] font-medium ${sessions[activeSessionId].status === "running" ? "text-info" : sessions[activeSessionId].status === "completed" ? "text-success" : sessions[activeSessionId].status === "error" ? "text-error" : "text-ink-800"}`}>
-                          {sessions[activeSessionId].title}
-                        </div>
-                        <div className="mt-0.5 text-xs text-muted">
-                          <span className="truncate">{formatCwd(sessions[activeSessionId].cwd)}</span>
-                        </div>
-                      </>
+                      editingTitle ? (
+                        <input
+                          ref={titleInputRef}
+                          type="text"
+                          className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] font-medium text-ink-800 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
+                          value={titleDraft}
+                          onChange={(e) => setTitleDraft(e.target.value)}
+                          onBlur={saveTitle}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter") saveTitle();
+                            if (e.key === "Escape") { setEditingTitle(false); setTitleDraft(""); }
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          aria-label="Edit task title"
+                        />
+                      ) : (
+                        <>
+                          <div
+                            className={`text-[12px] font-medium ${sessions[activeSessionId].status === "running" ? "text-info" : sessions[activeSessionId].status === "completed" ? "text-success" : sessions[activeSessionId].status === "error" ? "text-error" : "text-ink-800"} truncate cursor-text hover:underline`}
+                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); startEditTitle(); }}
+                            onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); startEditTitle(); } }}
+                            aria-label="Edit task title"
+                          >
+                            {sessions[activeSessionId].title}
+                          </div>
+                          <div className="mt-0.5 text-xs text-muted">
+                            <span className="truncate">{formatCwd(sessions[activeSessionId].cwd)}</span>
+                          </div>
+                        </>
+                      )
                     ) : (
                       <span className="text-xs text-muted">Select a task</span>
                     )}
@@ -273,7 +338,7 @@ export function Sidebar({
                   <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-ink-500" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M6 9l6 6 6-6" />
                   </svg>
-                </button>
+                </div>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content className="z-50 max-h-[min(60vh,320px)] min-w-[240px] overflow-y-auto rounded-xl border border-ink-900/10 bg-white p-1 shadow-lg" align="start" sideOffset={6}>
