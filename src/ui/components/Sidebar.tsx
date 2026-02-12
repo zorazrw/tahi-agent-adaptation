@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Dialog from "@radix-ui/react-dialog";
+import type { ClientEvent } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
 interface SidebarProps {
   connected: boolean;
+  sendEvent: (event: ClientEvent) => void;
   onNewSession: () => void;
   onDeleteSession: (sessionId: string) => void;
 }
 
 export function Sidebar({
+  sendEvent,
   onNewSession,
   onDeleteSession
 }: SidebarProps) {
@@ -71,11 +74,13 @@ export function Sidebar({
     } else {
       newSteps.splice(editingStepIndex, 1);
     }
+    const stepsToSave = newSteps.length > 0 ? newSteps : [];
     if (newSteps.length > 0) {
       updateSessionSteps(activeSessionId, newSteps);
     } else {
       updateSessionSteps(activeSessionId, []);
     }
+    sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: stepsToSave } });
     setEditingStepIndex(null);
     setEditingStepDraft("");
   };
@@ -83,7 +88,9 @@ export function Sidebar({
   const deleteStep = (index: number) => {
     if (!activeSessionId) return;
     const newSteps = progressSteps.filter((_, i) => i !== index);
-    updateSessionSteps(activeSessionId, newSteps.length > 0 ? newSteps : []);
+    const stepsToSave = newSteps.length > 0 ? newSteps : [];
+    updateSessionSteps(activeSessionId, stepsToSave);
+    sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: stepsToSave } });
     setEditingStepIndex(null);
     if (selectedStepIndex >= newSteps.length) {
       setSelectedStepIndex(Math.max(0, newSteps.length - 1));
@@ -96,6 +103,7 @@ export function Sidebar({
     if (!activeSessionId) return;
     const newSteps = [...progressSteps, ""];
     updateSessionSteps(activeSessionId, newSteps);
+    sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: newSteps } });
     setEditingStepIndex(newSteps.length - 1);
     setEditingStepDraft("");
   };

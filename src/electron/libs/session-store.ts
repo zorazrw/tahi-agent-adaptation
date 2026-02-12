@@ -1,6 +1,16 @@
 import Database from "better-sqlite3";
 import type { SessionStatus, StreamMessage } from "../types.js";
 
+function parseSteps(raw: unknown): string[] | undefined {
+  if (raw == null) return undefined;
+  try {
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(arr) && arr.every((x) => typeof x === "string") ? arr : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export type PendingPermission = {
   toolUseId: string;
   toolName: string;
@@ -59,14 +69,16 @@ export class SessionStore {
       cwd: options.cwd,
       allowedTools: options.allowedTools,
       lastPrompt: options.prompt,
+      steps: [],
       pendingPermissions: new Map()
     };
     this.sessions.set(id, session);
+    const stepsJson = JSON.stringify(session.steps ?? []);
     this.db
       .prepare(
         `insert into sessions
-          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -76,6 +88,7 @@ export class SessionStore {
         session.cwd ?? null,
         session.allowedTools ?? null,
         session.lastPrompt ?? null,
+        stepsJson,
         now,
         now
       );
@@ -89,7 +102,7 @@ export class SessionStore {
   listSessions(): StoredSession[] {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, created_at, updated_at
          from sessions
          order by updated_at desc`
       )
@@ -105,7 +118,7 @@ export class SessionStore {
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
-        steps: mem?.steps,
+        steps: parseSteps(row.steps) ?? mem?.steps ?? [],
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
       };
@@ -129,7 +142,7 @@ export class SessionStore {
   getSessionHistory(id: string): SessionHistory | null {
     const sessionRow = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, created_at, updated_at
          from sessions
          where id = ?`
       )
@@ -153,7 +166,7 @@ export class SessionStore {
         allowedTools: sessionRow.allowed_tools ? String(sessionRow.allowed_tools) : undefined,
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
         claudeSessionId: sessionRow.claude_session_id ? String(sessionRow.claude_session_id) : undefined,
-        steps: mem?.steps,
+        steps: parseSteps(sessionRow.steps) ?? mem?.steps ?? [],
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },
@@ -195,6 +208,14 @@ export class SessionStore {
     return removedFromDb || Boolean(existing);
   }
 
+  /** Persist only steps to DB (e.g. when session may not be in memory yet). */
+  persistSteps(id: string, steps: string[]): void {
+    const stepsJson = Array.isArray(steps) ? JSON.stringify(steps) : null;
+    this.db
+      .prepare(`update sessions set steps = ?, updated_at = ? where id = ?`)
+      .run(stepsJson, Date.now(), id);
+  }
+
   private persistSession(id: string, updates: Partial<Session>): void {
     const fields: string[] = [];
     const values: Array<string | number | null> = [];
@@ -203,7 +224,8 @@ export class SessionStore {
       status: "status",
       cwd: "cwd",
       allowedTools: "allowed_tools",
-      lastPrompt: "last_prompt"
+      lastPrompt: "last_prompt",
+      steps: "steps"
     } as const;
 
     for (const key of Object.keys(updates) as Array<keyof typeof updatable>) {
@@ -211,7 +233,11 @@ export class SessionStore {
       if (!column) continue;
       fields.push(`${column} = ?`);
       const value = updates[key];
-      values.push(value === undefined ? null : (value as string));
+      if (key === "steps") {
+        values.push(Array.isArray(value) ? JSON.stringify(value) : null);
+      } else {
+        values.push(value === undefined ? null : (value as string));
+      }
     }
 
     if (fields.length === 0) return;
@@ -234,10 +260,16 @@ export class SessionStore {
         cwd text,
         allowed_tools text,
         last_prompt text,
+        steps text,
         created_at integer not null,
         updated_at integer not null
       )`
     );
+    try {
+      this.db.exec(`alter table sessions add column steps text`);
+    } catch {
+      /* column may already exist */
+    }
     this.db.exec(
       `create table if not exists messages (
         id text primary key,
@@ -253,7 +285,7 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps
          from sessions`
       )
       .all();
@@ -266,6 +298,7 @@ export class SessionStore {
         cwd: row.cwd ? String(row.cwd) : undefined,
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
+        steps: parseSteps(row.steps),
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);

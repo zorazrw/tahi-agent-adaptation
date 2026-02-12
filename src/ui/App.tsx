@@ -247,6 +247,7 @@ function App() {
     <div className="flex h-screen bg-surface">
       <Sidebar
         connected={connected}
+        sendEvent={sendEvent}
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
       />

@@ -252,6 +252,17 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
+  if (event.type === "session.updateSteps") {
+    const { sessionId, steps } = event.payload;
+    // Always persist to DB so steps survive relaunch (even if session not in memory yet).
+    sessions.persistSteps(sessionId, steps);
+    if (hasLiveSession(sessionId)) {
+      sessions.updateSession(sessionId, { steps });
+      broadcast({ type: "session.steps", payload: { sessionId, steps } });
+    }
+    return;
+  }
+
   if (event.type === "session.delete") {
     const sessionId = event.payload.sessionId;
     const handle = runnerHandles.get(sessionId);
