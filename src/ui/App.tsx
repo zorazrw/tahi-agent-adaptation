@@ -9,7 +9,7 @@ import { StartSessionModal } from "./components/StartSessionModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { PromptInput, usePromptActions } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
-import { FilePreview, getLatestPreviewFileRef } from "./components/FilePreview";
+import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
 import MDContent from "./render/markdown";
 
 const SCROLL_THRESHOLD = 50;
@@ -46,6 +46,7 @@ function App() {
   const pendingStart = useAppStore((s) => s.pendingStart);
   const apiConfigChecked = useAppStore((s) => s.apiConfigChecked);
   const setApiConfigChecked = useAppStore((s) => s.setApiConfigChecked);
+  const selectedStepIndex = useAppStore((s) => s.selectedStepIndex);
 
   // Helper function to extract partial message content
   const getPartialMessageContent = (eventMessage: any) => {
@@ -260,9 +261,12 @@ function App() {
           <span className="text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
         </div>
 
-        {/* Top 2/3: file preview (latest .txt / .xlsx / .docx / .jpg / .png referred by agent) */}
+        {/* Top 2/3: file preview (file from Files section for selected workflow step) */}
         <div className="flex-[2] min-h-0 flex flex-col p-4 bg-surface-cream">
-          <FilePreview filePath={getLatestPreviewFileRef(messages)} cwd={activeSession?.cwd} />
+          <FilePreview
+            filePath={getPreviewFileForStep(activeSession?.outputFiles, selectedStepIndex)}
+            cwd={activeSession?.cwd}
+          />
         </div>
 
         {/* Bottom 1/3: chat (messages + prompt) */}

@@ -112,6 +112,17 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         ...env
       };
       
+      // Build tools list: default Claude Code tools + CodeExecution (if not already present)
+      const defaultTools = [
+        "Task", "TaskOutput", "Bash", "Glob", "Grep", "ExitPlanMode", "Read", "Edit", "Write",
+        "NotebookEdit", "WebFetch", "TodoWrite", "WebSearch", "KillShell", "AskUserQuestion",
+        "Skill", "EnterPlanMode"
+      ];
+      const codeExecutionTool = "CodeExecution";
+      const toolsList = defaultTools.includes(codeExecutionTool)
+        ? defaultTools
+        : [...defaultTools, codeExecutionTool];
+
       const q = query({
         prompt: promptToSend,
         options: {
@@ -123,6 +134,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           permissionMode: "bypassPermissions",
           includePartialMessages: true,
           allowDangerouslySkipPermissions: true,
+          tools: toolsList,
           canUseTool: async (toolName, input, { signal }) => {
             // For AskUserQuestion, we need to wait for user response
             if (toolName === "AskUserQuestion") {

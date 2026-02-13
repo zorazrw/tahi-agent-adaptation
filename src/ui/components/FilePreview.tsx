@@ -28,6 +28,17 @@ export function getLatestPreviewFileRef(messages: StreamMessage[]): string | nul
   return latest;
 }
 
+/** First previewable file from the given step's output files list (used for step-scoped preview). */
+export function getPreviewFileForStep(
+  outputFiles: string[][] | undefined,
+  selectedStepIndex: number
+): string | null {
+  const files = outputFiles?.[selectedStepIndex];
+  if (!files?.length) return null;
+  const path = files.find((p) => pathHasPreviewExt(p));
+  return path ?? null;
+}
+
 type PreviewFileResult =
   | { kind: "txt"; content: string }
   | { kind: "xlsx"; data: unknown[][] }

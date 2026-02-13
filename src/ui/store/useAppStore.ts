@@ -28,6 +28,7 @@ export type SessionView = {
 interface AppState {
   sessions: Record<string, SessionView>;
   activeSessionId: string | null;
+  selectedStepIndex: number;
   prompt: string;
   cwd: string;
   pendingStart: boolean;
@@ -45,6 +46,7 @@ interface AppState {
   setShowStartModal: (show: boolean) => void;
   setShowSettingsModal: (show: boolean) => void;
   setActiveSessionId: (id: string | null) => void;
+  setSelectedStepIndex: (index: number) => void;
   setApiConfigChecked: (checked: boolean) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
@@ -62,6 +64,7 @@ function createSession(id: string): SessionView {
 export const useAppStore = create<AppState>((set, get) => ({
   sessions: {},
   activeSessionId: null,
+  selectedStepIndex: 0,
   prompt: "",
   cwd: "",
   pendingStart: false,
@@ -78,7 +81,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setGlobalError: (globalError) => set({ globalError }),
   setShowStartModal: (showStartModal) => set({ showStartModal }),
   setShowSettingsModal: (showSettingsModal) => set({ showSettingsModal }),
-  setActiveSessionId: (id) => set({ activeSessionId: id }),
+  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0 }),
+  setSelectedStepIndex: (index) => set({ selectedStepIndex: index }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
 
   updateSessionSteps: (sessionId, steps) => {

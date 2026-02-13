@@ -19,6 +19,8 @@ export function Sidebar({
   const sessions = useAppStore((state) => state.sessions);
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const setActiveSessionId = useAppStore((state) => state.setActiveSessionId);
+  const selectedStepIndex = useAppStore((state) => state.selectedStepIndex);
+  const setSelectedStepIndex = useAppStore((state) => state.setSelectedStepIndex);
   const updateSessionSteps = useAppStore((state) => state.updateSessionSteps);
   const updateSessionVerificationCriteria = useAppStore((state) => state.updateSessionVerificationCriteria);
   const updateSessionVerifierMarks = useAppStore((state) => state.updateSessionVerifierMarks);
@@ -37,7 +39,6 @@ export function Sidebar({
   const [verificationCriteriaByStep, setVerificationCriteriaByStep] = useState<string[][]>(() =>
     Array.from({ length: DEFAULT_STEPS.length }, () => [])
   );
-  const [selectedStepIndex, setSelectedStepIndex] = useState(0);
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
   const [editingStepDraft, setEditingStepDraft] = useState("");
   const editingStepInputRef = useRef<HTMLInputElement | null>(null);
