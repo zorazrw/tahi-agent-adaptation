@@ -25,3 +25,6 @@ dist-electron
 *.sw?
 
 .env
+
+# Local test DB for scripts
+scripts/test_sessions.db
