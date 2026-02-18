@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   PermissionResult,
   SDKAssistantMessage,
@@ -7,9 +7,12 @@ import type {
   SDKUserMessage
 } from "@anthropic-ai/claude-agent-sdk";
 import type { StreamMessage } from "../types";
+import { useAppStore } from "../store/useAppStore";
 import type { PermissionRequest } from "../store/useAppStore";
 import MDContent from "../render/markdown";
 import { DecisionPanel } from "./DecisionPanel";
+import { WorkflowCard } from "./WorkflowCard";
+import { hasWorkflowPattern, extractPreWorkflowText } from "../../shared/workflow-parser";
 
 type MessageContent = SDKAssistantMessage["message"]["content"][number];
 type ToolResultContent = SDKUserMessage["message"]["content"][number];
@@ -166,6 +169,28 @@ const AssistantBlockCard = ({ title, text, showIndicator = false }: { title: str
     <MDContent text={text} />
   </div>
 );
+
+const WorkflowAssistantBlock = ({ text, showIndicator = false }: { text: string; showIndicator?: boolean }) => {
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const session = useAppStore((s) => activeSessionId ? s.sessions[activeSessionId] : undefined);
+  const preText = useMemo(() => extractPreWorkflowText(text), [text]);
+  const steps = session?.steps ?? [];
+  const outputFiles = session?.outputFiles ?? [];
+  const verifiers = session?.verificationCriteria ?? [];
+
+  return (
+    <div className="flex flex-col mt-4">
+      <div className="header text-accent flex items-center gap-2">
+        <StatusDot variant="success" isActive={showIndicator} isVisible={showIndicator} />
+        Assistant
+      </div>
+      {preText && <MDContent text={preText} />}
+      {steps.length > 0 && (
+        <WorkflowCard steps={steps} outputFiles={outputFiles} verifiers={verifiers} />
+      )}
+    </div>
+  );
+};
 
 const ToolUseCard = ({ messageContent, showIndicator = false }: { messageContent: MessageContent; showIndicator?: boolean }) => {
   if (messageContent.type !== "tool_use") return null;
@@ -332,6 +357,9 @@ export function MessageCard({
             return <AssistantBlockCard key={idx} title="Thinking" text={content.thinking} showIndicator={isLastContent && showIndicator} />;
           }
           if (content.type === "text") {
+            if (hasWorkflowPattern(content.text)) {
+              return <WorkflowAssistantBlock key={idx} text={content.text} showIndicator={isLastContent && showIndicator} />;
+            }
             return <AssistantBlockCard key={idx} title="Assistant" text={content.text} showIndicator={isLastContent && showIndicator} />;
           }
           if (content.type === "tool_use") {
