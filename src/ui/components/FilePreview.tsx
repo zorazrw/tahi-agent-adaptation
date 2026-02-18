@@ -1,15 +1,33 @@
 import { useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
+import { getRenderer } from "./file-renderers";
 
 const FILE_TOOL_NAMES = new Set(["Read", "Write", "Edit"]);
-const PREVIEW_EXTENSIONS = [".txt", ".xlsx", ".xls", ".docx", ".jpg", ".jpeg", ".png"];
+const PREVIEW_EXTENSIONS = [
+  // Documents
+  ".txt", ".md", ".csv", ".tsv", ".json",
+  ".xlsx", ".xls", ".docx", ".pdf",
+  // Web
+  ".html", ".htm",
+  // Images
+  ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+  // Media
+  ".mp4", ".webm", ".mp3", ".wav", ".ogg",
+  // Code
+  ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+  ".py", ".rb", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp", ".cs",
+  ".css", ".scss", ".less", ".php", ".swift", ".kt",
+  ".sh", ".bash", ".zsh",
+  ".yaml", ".yml", ".toml", ".xml", ".sql",
+  ".r", ".lua", ".dart", ".scala", ".ex", ".exs", ".hs", ".ml",
+];
 
 function pathHasPreviewExt(path: string): boolean {
   const lower = path.toLowerCase();
   return PREVIEW_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
-/** From the current chat session, find the latest file referred by the agent (tool_use Read/Write/Edit) that we can preview (.txt, .xlsx, .xls, .docx, .jpg, .png). */
+/** From the current chat session, find the latest file referred by the agent (tool_use Read/Write/Edit) that we can preview (.txt, .xlsx, .xls, .docx, .jpg, .png, .pdf). */
 export function getLatestPreviewFileRef(messages: StreamMessage[]): string | null {
   let latest: string | null = null;
   for (const msg of messages) {
@@ -44,6 +62,14 @@ type PreviewFileResult =
   | { kind: "xlsx"; data: unknown[][] }
   | { kind: "docx"; html: string }
   | { kind: "image"; dataUrl: string }
+  | { kind: "pdf"; data: string }
+  | { kind: "md"; content: string }
+  | { kind: "code"; content: string; language: string }
+  | { kind: "csv"; content: string }
+  | { kind: "json"; content: string }
+  | { kind: "html"; content: string }
+  | { kind: "video"; dataUrl: string }
+  | { kind: "audio"; dataUrl: string }
   | { error: string };
 
 type FilePreviewProps = {
@@ -72,6 +98,8 @@ export function FilePreview({ filePath, cwd }: FilePreviewProps) {
 
   if (!filePath) return null;
 
+  const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
+
   return (
     <div className="flex flex-col h-full min-h-0 rounded-lg border border-ink-900/10 bg-surface-secondary">
       <div className="shrink-0 px-3 py-2 border-b border-ink-900/10">
@@ -92,46 +120,7 @@ export function FilePreview({ filePath, cwd }: FilePreviewProps) {
         {result && "error" in result && !loading && (
           <p className="text-sm text-error">{result.error}</p>
         )}
-        {result && "kind" in result && result.kind === "txt" && !loading && (
-          <pre className="text-sm text-ink-700 whitespace-pre-wrap break-words font-mono">
-            {result.content}
-          </pre>
-        )}
-        {result && "kind" in result && result.kind === "xlsx" && !loading && (
-          <div className="overflow-auto">
-            <table className="text-sm text-ink-700 border-collapse border border-ink-900/20">
-              <tbody>
-                {result.data.map((row: unknown[], i: number) => (
-                  <tr key={i}>
-                    {(Array.isArray(row) ? row : []).map((cell, j) => (
-                      <td
-                        key={j}
-                        className="border border-ink-900/20 px-2 py-1.5 align-top"
-                      >
-                        {cell != null ? String(cell) : ""}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {result && "kind" in result && result.kind === "docx" && !loading && (
-          <div
-            className="file-preview-docx text-sm text-ink-700 prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1"
-            dangerouslySetInnerHTML={{ __html: result.html }}
-          />
-        )}
-        {result && "kind" in result && result.kind === "image" && !loading && (
-          <div className="flex items-center justify-center min-h-[120px]">
-            <img
-              src={result.dataUrl}
-              alt="Preview"
-              className="max-w-full max-h-full object-contain rounded"
-            />
-          </div>
-        )}
+        {Renderer && !loading && <Renderer data={result} />}
       </div>
     </div>
   );

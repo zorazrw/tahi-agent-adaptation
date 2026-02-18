@@ -17,6 +17,14 @@ type PreviewFileResult =
     | { kind: "xlsx"; data: unknown[][] }
     | { kind: "docx"; html: string }
     | { kind: "image"; dataUrl: string }
+    | { kind: "pdf"; data: string }
+    | { kind: "md"; content: string }
+    | { kind: "code"; content: string; language: string }
+    | { kind: "csv"; content: string }
+    | { kind: "json"; content: string }
+    | { kind: "html"; content: string }
+    | { kind: "video"; dataUrl: string }
+    | { kind: "audio"; dataUrl: string }
     | { error: string };
 
 type EventPayloadMapping = {

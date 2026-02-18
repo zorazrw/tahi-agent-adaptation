@@ -140,32 +140,81 @@ app.on("ready", () => {
         }
     });
 
+    const IMAGE_MIME: Record<string, string> = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".svg": "image/svg+xml",
+    };
+    const VIDEO_MIME: Record<string, string> = { ".mp4": "video/mp4", ".webm": "video/webm" };
+    const AUDIO_MIME: Record<string, string> = { ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg" };
+    const CODE_LANG: Record<string, string> = {
+        ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".jsx": "javascript",
+        ".ts": "typescript", ".tsx": "typescript",
+        ".py": "python", ".rb": "ruby", ".rs": "rust", ".go": "go",
+        ".java": "java", ".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp", ".cs": "csharp",
+        ".css": "css", ".scss": "scss", ".less": "less",
+        ".php": "php", ".swift": "swift", ".kt": "kotlin",
+        ".sh": "bash", ".bash": "bash", ".zsh": "bash",
+        ".yaml": "yaml", ".yml": "yaml", ".toml": "ini", ".xml": "xml",
+        ".sql": "sql", ".r": "r", ".lua": "lua", ".dart": "dart", ".scala": "scala",
+        ".ex": "elixir", ".exs": "elixir", ".hs": "haskell", ".ml": "ocaml",
+    };
+    const TEXT_KINDS = new Set([".txt", ".md", ".csv", ".tsv", ".json", ".html", ".htm"]);
+    const ALLOWED_EXTS = new Set([
+        ...Object.keys(IMAGE_MIME), ...Object.keys(VIDEO_MIME), ...Object.keys(AUDIO_MIME),
+        ...Object.keys(CODE_LANG), ...TEXT_KINDS,
+        ".xlsx", ".xls", ".docx", ".pdf",
+    ]);
+
     ipcMainHandle("preview-file", async (_: any, filePath: string, cwd?: string | null) => {
         try {
             if (!filePath || typeof filePath !== "string") {
                 return { error: "Invalid file path" };
             }
             const ext = filePath.toLowerCase().slice(filePath.lastIndexOf("."));
-            const allowed = [".txt", ".xlsx", ".xls", ".docx", ".jpg", ".jpeg", ".png"];
-            if (!allowed.includes(ext)) {
-                return { error: "Only .txt, .xlsx, .xls, .docx, .jpg, .jpeg, and .png files can be previewed" };
+            if (!ALLOWED_EXTS.has(ext)) {
+                return { error: `File type "${ext}" is not supported for preview` };
             }
             const base = (cwd && typeof cwd === "string") ? cwd : process.cwd();
             const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
 
+            // --- Text-based formats (read as UTF-8) ---
             if (ext === ".txt") {
-                const content = await readFile(resolved, "utf8");
-                return { kind: "txt", content };
+                return { kind: "txt", content: await readFile(resolved, "utf8") };
+            }
+            if (ext === ".md") {
+                return { kind: "md", content: await readFile(resolved, "utf8") };
+            }
+            if (ext === ".csv" || ext === ".tsv") {
+                return { kind: "csv", content: await readFile(resolved, "utf8") };
+            }
+            if (ext === ".json") {
+                return { kind: "json", content: await readFile(resolved, "utf8") };
+            }
+            if (ext === ".html" || ext === ".htm") {
+                return { kind: "html", content: await readFile(resolved, "utf8") };
+            }
+            if (CODE_LANG[ext]) {
+                return { kind: "code", content: await readFile(resolved, "utf8"), language: CODE_LANG[ext] };
             }
 
+            // --- Binary formats (read as buffer) ---
             const buffer = await readFile(resolved);
 
-            if (ext === ".jpg" || ext === ".jpeg" || ext === ".png") {
-                const mime = ext === ".png" ? "image/png" : "image/jpeg";
-                const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+            if (IMAGE_MIME[ext]) {
+                const dataUrl = `data:${IMAGE_MIME[ext]};base64,${buffer.toString("base64")}`;
                 return { kind: "image", dataUrl };
             }
-
+            if (VIDEO_MIME[ext]) {
+                const dataUrl = `data:${VIDEO_MIME[ext]};base64,${buffer.toString("base64")}`;
+                return { kind: "video", dataUrl };
+            }
+            if (AUDIO_MIME[ext]) {
+                const dataUrl = `data:${AUDIO_MIME[ext]};base64,${buffer.toString("base64")}`;
+                return { kind: "audio", dataUrl };
+            }
+            if (ext === ".pdf") {
+                return { kind: "pdf", data: buffer.toString("base64") };
+            }
             if (ext === ".xlsx" || ext === ".xls") {
                 const workbook = XLSX.read(buffer, { type: "buffer" });
                 const firstSheetName = workbook.SheetNames[0];
@@ -176,7 +225,6 @@ app.on("ready", () => {
                 const data = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: "" });
                 return { kind: "xlsx", data };
             }
-
             if (ext === ".docx") {
                 const result = await mammoth.convertToHtml({ buffer });
                 return { kind: "docx", html: result.value };

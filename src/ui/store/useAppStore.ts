@@ -315,10 +315,14 @@ export const useAppStore = create<AppState>((set, get) => ({
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           const completed = existing.completedStepIndices ?? [];
           if (completed.includes(stepIndex)) return {};
+          const nextCompleted = [...completed, stepIndex].sort((a, b) => a - b);
+          // Auto-advance preview to the next step (or stay on last if all done)
+          const nextStepIndex = Math.min(stepIndex + 1, (existing.steps?.length ?? 1) - 1);
           return {
+            selectedStepIndex: sessionId === state.activeSessionId ? nextStepIndex : state.selectedStepIndex,
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, completedStepIndices: [...completed, stepIndex].sort((a, b) => a - b) }
+              [sessionId]: { ...existing, completedStepIndices: nextCompleted }
             }
           };
         });

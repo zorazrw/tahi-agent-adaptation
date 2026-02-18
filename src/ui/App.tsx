@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
@@ -23,6 +23,9 @@ function App() {
   const [showPartialMessage, setShowPartialMessage] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [hasNewMessages, setHasNewMessages] = useState(false);
+  const [splitPercent, setSplitPercent] = useState(66); // file preview takes 66% by default
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const isDraggingRef = useRef(false);
   const prevMessagesLengthRef = useRef(0);
   const scrollHeightBeforeLoadRef = useRef(0);
   const shouldRestoreScrollRef = useRef(false);
@@ -244,6 +247,73 @@ function App() {
     resetToLatest();
   }, [resetToLatest]);
 
+  const handleSplitMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const container = splitContainerRef.current;
+    if (!container) return;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const rect = container.getBoundingClientRect();
+      const y = ev.clientY - rect.top;
+      const pct = Math.min(85, Math.max(15, (y / rect.height) * 100));
+      setSplitPercent(pct);
+    };
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, []);
+
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+
+  // Filter to only high-level messages (skip raw stream events)
+  const transcriptMessages = useMemo(() => {
+    const validTypes = new Set(["user_prompt", "assistant", "user", "system", "result"]);
+    return messages.filter((m) => validTypes.has(m.type));
+  }, [messages]);
+
+  const messagesToMarkdown = useCallback((msgs: typeof transcriptMessages) => {
+    const lines: string[] = [];
+    for (const msg of msgs) {
+      if (msg.type === "user_prompt") {
+        lines.push(`## User\n\n${msg.prompt}\n`);
+      } else if (msg.type === "assistant") {
+        for (const block of (msg as any).message.content) {
+          if (block.type === "text") lines.push(`## Assistant\n\n${block.text}\n`);
+          else if (block.type === "tool_use") lines.push(`### Tool Use: ${block.name}\n\n\`\`\`json\n${JSON.stringify(block.input, null, 2)}\n\`\`\`\n`);
+        }
+      } else if (msg.type === "user") {
+        for (const block of (msg as any).message.content) {
+          if (block.type === "tool_result") {
+            const text = Array.isArray(block.content) ? block.content.map((c: any) => c.text || "").join("\n") : String(block.content ?? "");
+            if (text.trim()) lines.push(`### Tool Result${block.is_error ? " (Error)" : ""}\n\n\`\`\`\n${text}\n\`\`\`\n`);
+          }
+        }
+      } else if (msg.type === "result") {
+        const r = msg as any;
+        lines.push(`## Result (${r.subtype})\n\nCost: $${r.total_cost_usd?.toFixed(2) ?? "?"} | Duration: ${r.duration_ms ? (r.duration_ms / 60000).toFixed(1) + "min" : "?"}\n`);
+      }
+    }
+    return lines.join("\n");
+  }, []);
+
+  const handleCopyTranscript = useCallback((format: "json" | "markdown") => {
+    const data = format === "json" ? JSON.stringify(transcriptMessages, null, 2) : messagesToMarkdown(transcriptMessages);
+    navigator.clipboard.writeText(data).then(() => {
+      setCopyFeedback(format === "json" ? "JSON" : "Markdown");
+      setTimeout(() => setCopyFeedback(null), 1500);
+    });
+  }, [transcriptMessages, messagesToMarkdown]);
+
   return (
     <div className="flex h-screen bg-surface">
       <Sidebar
@@ -261,16 +331,38 @@ function App() {
           <span className="text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
         </div>
 
-        {/* Top 2/3: file preview (file from Files section for selected workflow step) */}
-        <div className="flex-[2] min-h-0 flex flex-col p-4 bg-surface-cream">
+        <div ref={splitContainerRef} className="flex flex-1 flex-col min-h-0">
+        {/* Top: file preview (file from Files section for selected workflow step) */}
+        <div className="min-h-0 flex flex-col p-4 bg-surface-cream" style={{ height: `${splitPercent}%` }}>
           <FilePreview
             filePath={getPreviewFileForStep(activeSession?.outputFiles, selectedStepIndex)}
             cwd={activeSession?.cwd}
           />
         </div>
 
-        {/* Bottom 1/3: chat (messages + prompt) */}
-        <div className="flex flex-[1] min-h-0 flex-col border-t border-ink-900/10 bg-surface-cream">
+        {/* Drag handle */}
+        <div
+          onMouseDown={handleSplitMouseDown}
+          className="shrink-0 h-1.5 cursor-row-resize relative group border-t border-ink-900/10 hover:bg-accent/20 active:bg-accent/30 transition-colors"
+        />
+
+        {/* Bottom: chat (messages + prompt) */}
+        <div className="min-h-0 flex flex-col bg-surface-cream" style={{ height: `${100 - splitPercent}%` }}>
+          {/* Chat toolbar */}
+          <div className="shrink-0 flex items-center justify-end gap-1 px-4 py-1 border-b border-ink-900/10">
+            {copyFeedback ? (
+              <span className="text-xs text-success px-2 py-0.5">Copied {copyFeedback}!</span>
+            ) : (
+              <>
+                <button onClick={() => handleCopyTranscript("markdown")} className="text-xs text-muted hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as Markdown">
+                  Copy MD
+                </button>
+                <button onClick={() => handleCopyTranscript("json")} className="text-xs text-muted hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as JSON">
+                  Copy JSON
+                </button>
+              </>
+            )}
+          </div>
           <div
             ref={scrollContainerRef}
             onScroll={handleScroll}
@@ -351,6 +443,7 @@ function App() {
           <div className="h-24 shrink-0 lg:h-28" aria-hidden />
           <PromptInput sendEvent={sendEvent} onSendMessage={handleSendMessage} disabled={visibleMessages.length === 0} />
         </div>
+        </div>{/* end splitContainerRef */}
 
         {hasNewMessages && !shouldAutoScroll && (
           <button
