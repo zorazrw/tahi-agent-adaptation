@@ -72,12 +72,17 @@ type PreviewFileResult =
   | { kind: "audio"; dataUrl: string }
   | { error: string };
 
+function isFileNotFoundError(error: string): boolean {
+  return /ENOENT|no such file or directory/i.test(error);
+}
+
 type FilePreviewProps = {
   filePath: string | null;
   cwd?: string | null;
+  stepCompleted?: boolean;
 };
 
-export function FilePreview({ filePath, cwd }: FilePreviewProps) {
+export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) {
   const [result, setResult] = useState<PreviewFileResult | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -94,10 +99,11 @@ export function FilePreview({ filePath, cwd }: FilePreviewProps) {
       .then((res) => setResult(res))
       .catch((err) => setResult({ error: err instanceof Error ? err.message : String(err) }))
       .finally(() => setLoading(false));
-  }, [filePath, cwd]);
+  }, [filePath, cwd, stepCompleted]);
 
   if (!filePath) return null;
 
+  const isNotFound = result && "error" in result && isFileNotFoundError(result.error);
   const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
 
   return (
@@ -117,7 +123,16 @@ export function FilePreview({ filePath, cwd }: FilePreviewProps) {
             <span>Loading…</span>
           </div>
         )}
-        {result && "error" in result && !loading && (
+        {isNotFound && !loading && (
+          <div className="flex items-center gap-2 text-sm text-muted">
+            <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 6v6l4 2" />
+            </svg>
+            <span>File will be generated when this step runs</span>
+          </div>
+        )}
+        {result && "error" in result && !isNotFound && !loading && (
           <p className="text-sm text-error">{result.error}</p>
         )}
         {Renderer && !loading && <Renderer data={result} />}

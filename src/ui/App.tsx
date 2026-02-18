@@ -337,6 +337,7 @@ function App() {
           <FilePreview
             filePath={getPreviewFileForStep(activeSession?.outputFiles, selectedStepIndex)}
             cwd={activeSession?.cwd}
+            stepCompleted={activeSession?.completedStepIndices?.includes(selectedStepIndex) ?? false}
           />
         </div>
 
