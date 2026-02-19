@@ -319,7 +319,7 @@ export function Sidebar({
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
         <div className="py-2">
           {sessionList.length === 0 ? (
-            <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted">
+            <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted-foreground">
               No sessions yet. Click "+ New Task" to start.
             </div>
           ) : (
@@ -328,7 +328,7 @@ export function Sidebar({
                 <div
                   role="button"
                   tabIndex={0}
-                  className="flex w-full cursor-pointer items-center gap-2 rounded-xl border border-ink-900/10 bg-surface px-3 py-3 text-left transition hover:bg-surface-tertiary hover:border-ink-900/20 focus:outline-none focus:ring-2 focus:ring-accent/30 data-[state=open]:border-accent/30 data-[state=open]:bg-accent-subtle"
+                  className="flex w-full cursor-pointer items-center gap-2 rounded-xl border border-ink-900/10 bg-surface px-3 py-3 text-left transition hover:bg-surface-tertiary hover:border-ink-900/20 focus:outline-none focus:ring-2 focus:ring-primary/30 data-[state=open]:border-primary/30 data-[state=open]:bg-primary-subtle"
                 >
                   <div
                     className="flex min-w-0 flex-1 flex-col overflow-hidden"
@@ -341,7 +341,7 @@ export function Sidebar({
                         <input
                           ref={titleInputRef}
                           type="text"
-                          className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] font-medium text-ink-800 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
+                          className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] font-medium text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
                           value={titleDraft}
                           onChange={(e) => setTitleDraft(e.target.value)}
                           onBlur={saveTitle}
@@ -367,13 +367,13 @@ export function Sidebar({
                           >
                             {sessions[activeSessionId].title}
                           </div>
-                          <div className="mt-0.5 text-xs text-muted">
+                          <div className="mt-0.5 text-xs text-muted-foreground">
                             <span className="truncate">{formatCwd(sessions[activeSessionId].cwd)}</span>
                           </div>
                         </>
                       )
                     ) : (
-                      <span className="text-xs text-muted">Select a task</span>
+                      <span className="text-xs text-muted-foreground">Select a task</span>
                     )}
                   </div>
                   <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-ink-500" fill="none" stroke="currentColor" strokeWidth="2">
@@ -393,7 +393,7 @@ export function Sidebar({
                       <span className={`font-medium ${session.status === "running" ? "text-info" : session.status === "completed" ? "text-success" : session.status === "error" ? "text-error" : "text-ink-800"}`}>
                         {session.title}
                       </span>
-                      <span className="text-xs text-muted">{formatCwd(session.cwd)}</span>
+                      <span className="text-xs text-muted-foreground">{formatCwd(session.cwd)}</span>
                     </DropdownMenu.Item>
                   ))}
                   {activeSessionId && (
@@ -421,9 +421,12 @@ export function Sidebar({
         {/* Progress: vertical timeline */}
         {sessionList.length > 0 && (
           <div className="shrink-0 border-t border-ink-900/10 pt-3">
-            <div className="mb-2 text-sm font-semibold text-ink-600">Progress</div>
+            <div className="flex items-center gap-2 mb-2">
+              <div className="h-3 w-0.5 rounded-full bg-primary" />
+              <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Progress</span>
+            </div>
             {progressSteps.length === 0 ? (
-              <p className="text-xs text-muted py-1 mb-1">No steps defined yet. Add steps to track progress.</p>
+              <p className="text-xs text-muted-foreground py-1 mb-1">No steps defined yet. Add steps to track progress.</p>
             ) : (
               <div className="flex flex-col gap-0">
                 {progressSteps.map((label, i) => {
@@ -443,7 +446,7 @@ export function Sidebar({
                             isCompleted
                               ? "step-circle-completed"
                               : isSelected
-                                ? "border-accent bg-accent/20"
+                                ? "border-primary bg-primary/20"
                                 : "border-ink-900/25 bg-surface"
                           }`} />
                         </button>
@@ -457,7 +460,7 @@ export function Sidebar({
                           <input
                             ref={editingStepIndex === i ? (el) => { editingStepInputRef.current = el; } : undefined}
                             type="text"
-                            className="w-full rounded border border-ink-900/20 bg-surface px-2 py-1 text-xs text-ink-800 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
+                            className="w-full rounded border border-ink-900/20 bg-surface px-2 py-1 text-xs text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
                             value={editingStepDraft}
                             onChange={(e) => setEditingStepDraft(e.target.value)}
                             onBlur={saveStepLabelEdit}
@@ -473,12 +476,12 @@ export function Sidebar({
                               className={`flex-1 text-left text-xs leading-snug rounded px-1 -mx-1 py-0.5 transition-colors hover:bg-ink-900/5 line-clamp-2 break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-700"}`}
                               onClick={() => { setSelectedStepIndex(i); setEditingIndex(null); }}
                             >
-                              {label || <span className="italic text-muted">Untitled step</span>}
+                              {label || <span className="italic text-muted-foreground">Untitled step</span>}
                             </button>
                             <div className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                               <button
                                 type="button"
-                                className="rounded p-0.5 text-ink-400 hover:text-ink-600 hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-accent/30"
+                                className="rounded p-0.5 text-ink-400 hover:text-ink-600 hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-primary/30"
                                 onClick={(e) => { e.stopPropagation(); startEditStepLabel(i); }}
                                 aria-label="Edit step label"
                               >
@@ -489,7 +492,7 @@ export function Sidebar({
                               </button>
                               <button
                                 type="button"
-                                className="rounded p-0.5 text-ink-400 hover:text-error hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-accent/30"
+                                className="rounded p-0.5 text-ink-400 hover:text-error hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-primary/30"
                                 onClick={(e) => { e.stopPropagation(); deleteStep(i); }}
                                 aria-label="Delete step"
                               >
@@ -510,7 +513,7 @@ export function Sidebar({
             <div className="flex gap-2 mt-1">
               <button
                 type="button"
-                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-900/20 px-2 py-1.5 text-xs text-muted hover:border-ink-900/30 hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-900/20 px-2 py-1.5 text-xs text-muted-foreground hover:border-ink-900/30 hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
                 onClick={addStep}
                 aria-label="Add step"
               >
@@ -522,7 +525,7 @@ export function Sidebar({
               {progressSteps.length > 0 && activeSessionId && (
                 <button
                   type="button"
-                  className="flex items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover transition-colors shadow-soft"
+                  className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover transition-colors shadow-soft"
                   onClick={() => {
                     sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId, stepIndex: selectedStepIndex } });
                   }}
@@ -540,12 +543,15 @@ export function Sidebar({
       </div>
       {/* Files: expected output file name(s) for the current step */}
       <div className="shrink-0 flex flex-col border-t border-ink-900/10 pt-2 pb-2">
-        <div className="shrink-0 text-sm font-semibold text-ink-600 mb-1.5">
-          Files {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+        <div className="shrink-0 flex items-center gap-2 mb-1.5">
+          <div className="h-3 w-0.5 rounded-full bg-ink-400" />
+          <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+            Files {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+          </span>
         </div>
         <div className="min-h-0 overflow-y-auto max-h-[88px] flex flex-col gap-1">
           {(activeSession?.outputFiles?.[selectedStepIndex] ?? []).length === 0 ? (
-            <p className="text-xs text-muted py-0.5">No output file name for this step.</p>
+            <p className="text-xs text-muted-foreground py-0.5">No output file name for this step.</p>
           ) : (
             (activeSession?.outputFiles?.[selectedStepIndex] ?? []).map((fileName, i) => (
               <div key={i} className="font-mono text-xs text-ink-700 truncate rounded bg-ink-900/5 px-2 py-1" title={fileName}>
@@ -557,12 +563,15 @@ export function Sidebar({
       </div>
       {/* Verifier area (per-step criteria from workflow or user) */}
       <div className="flex-1 min-h-0 max-h-[260px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-        <div className="shrink-0 text-sm font-semibold text-ink-600 mb-2">
-          Verifier {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+        <div className="shrink-0 flex items-center gap-2 mb-2">
+          <div className="h-3 w-0.5 rounded-full bg-ink-400" />
+          <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+            Verifier {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+          </span>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
           {verificationCriteria.length === 0 && !editingIndex ? (
-            <p className="text-xs text-muted py-1">No verifiers for this step. Add criteria to check output files and quality.</p>
+            <p className="text-xs text-muted-foreground py-1">No verifiers for this step. Add criteria to check output files and quality.</p>
           ) : null}
           {verificationCriteria.map((text, index) => {
             const mark = currentVerifierMarks[index];
@@ -570,10 +579,10 @@ export function Sidebar({
               <div key={index} className="shrink-0 flex items-start gap-2">
                 <div className="flex-1 min-w-0">
                   {editingIndex === index ? (
-                    <div className="rounded-xl border border-accent/40 bg-surface p-1.5">
+                    <div className="rounded-xl border border-primary/40 bg-surface p-1.5">
                       <textarea
                         ref={editingIndex === index ? (el) => { editInputRef.current = el; } : undefined}
-                        className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/30"
+                        className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
                         placeholder="Enter verification criterion..."
                         value={draftText}
                         onChange={(e) => setDraftText(e.target.value)}
@@ -604,7 +613,7 @@ export function Sidebar({
                     e.stopPropagation();
                     toggleVerifierMark(index);
                   }}
-                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-ink-900/10 hover:text-ink-700 focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors mt-0.5"
+                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-ink-900/10 hover:text-ink-700 focus:outline-none focus:ring-2 focus:ring-primary/30 transition-colors mt-0.5"
                   aria-label={mark === "check" ? "Mark as failed (cross)" : "Mark as passed (check)"}
                   title={mark === "check" ? "Mark as failed" : "Mark as passed"}
                 >
@@ -628,7 +637,7 @@ export function Sidebar({
                     e.stopPropagation();
                     removeCriterion(index);
                   }}
-                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-red-50 hover:text-red-600 hover:border-red-200 focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors mt-0.5"
+                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-red-50 hover:text-red-600 hover:border-red-200 focus:outline-none focus:ring-2 focus:ring-primary/30 transition-colors mt-0.5"
                   aria-label="Remove verifier"
                   title="Remove verifier"
                 >
@@ -643,7 +652,7 @@ export function Sidebar({
           })}
           <button
             type="button"
-            className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-2.5 text-muted hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[38px] w-full"
+            className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-2.5 text-muted-foreground hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[38px] w-full"
             onClick={startAddCriterion}
             aria-label="Add verification criterion"
           >
@@ -655,8 +664,8 @@ export function Sidebar({
       </div>
       <Dialog.Root open={!!resumeSessionId} onOpenChange={(open) => !open && setResumeSessionId(null)}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-xl -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-6 shadow-xl">
+          <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm animate-fade-in" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-xl -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-6 shadow-xl animate-scale-in">
             <div className="flex items-start justify-between gap-4">
               <Dialog.Title className="text-lg font-semibold text-ink-800">Resume</Dialog.Title>
               <Dialog.Close asChild>
@@ -682,10 +691,10 @@ export function Sidebar({
       </Dialog.Root>
       <Dialog.Root open={!!deleteConfirmSessionId} onOpenChange={(open) => !open && setDeleteConfirmSessionId(null)}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-6 shadow-xl">
+          <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm animate-fade-in" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-6 shadow-xl animate-scale-in">
             <Dialog.Title className="text-lg font-semibold text-ink-800">Delete session?</Dialog.Title>
-            <p className="mt-2 text-sm text-muted">This action cannot be undone. The session and its history will be permanently removed.</p>
+            <p className="mt-2 text-sm text-muted-foreground">This action cannot be undone. The session and its history will be permanently removed.</p>
             <div className="mt-5 flex gap-3">
               <Dialog.Close asChild>
                 <button className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors">

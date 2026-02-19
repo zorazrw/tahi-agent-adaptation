@@ -65,7 +65,7 @@ export function ImageRenderer({ data }: { data: { kind: "image"; dataUrl: string
         >
           −
         </button>
-        <span className="text-xs text-muted w-12 text-center">{Math.round(scale * 100)}%</span>
+        <span className="text-xs text-muted-foreground w-12 text-center">{Math.round(scale * 100)}%</span>
         <button
           onClick={zoomIn}
           disabled={scale >= MAX_SCALE}

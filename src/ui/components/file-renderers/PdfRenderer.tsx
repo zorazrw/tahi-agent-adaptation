@@ -68,7 +68,7 @@ export function PdfRenderer({ data }: { data: { kind: "pdf"; data: string } }) {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 text-sm text-muted">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
@@ -90,7 +90,7 @@ export function PdfRenderer({ data }: { data: { kind: "pdf"; data: string } }) {
         >
           ‹ Prev
         </button>
-        <span className="text-xs text-muted">
+        <span className="text-xs text-muted-foreground">
           {currentPage} / {numPages}
         </span>
         <button
@@ -111,7 +111,7 @@ export function PdfRenderer({ data }: { data: { kind: "pdf"; data: string } }) {
         >
           −
         </button>
-        <span className="text-xs text-muted w-12 text-center">{Math.round(scale * 100)}%</span>
+        <span className="text-xs text-muted-foreground w-12 text-center">{Math.round(scale * 100)}%</span>
         <button
           onClick={zoomIn}
           disabled={scale >= MAX_SCALE}

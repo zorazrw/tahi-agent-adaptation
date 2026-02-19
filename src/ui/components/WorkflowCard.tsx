@@ -8,8 +8,8 @@ export function WorkflowCard({ steps, outputFiles, verifiers }: WorkflowCardProp
   if (!steps.length) return null;
 
   return (
-    <div className="mt-3 rounded-2xl border border-accent/20 bg-accent-subtle p-5">
-      <div className="text-xs font-semibold text-accent">Workflow Plan</div>
+    <div className="mt-3 rounded-2xl border border-primary/20 bg-primary-subtle p-5">
+      <div className="text-xs font-semibold text-primary">Workflow Plan</div>
       <div className="mt-3 flex flex-col gap-4">
         {steps.map((step, i) => {
           const files = outputFiles[i] ?? [];

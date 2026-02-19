@@ -44,7 +44,7 @@ export function CsvRenderer({ data }: { data: { kind: "csv"; content: string } }
   const rows = useMemo(() => parseCsv(data.content), [data.content]);
 
   if (rows.length === 0) {
-    return <p className="text-sm text-muted">Empty file</p>;
+    return <p className="text-sm text-muted-foreground">Empty file</p>;
   }
 
   const header = rows[0]!;

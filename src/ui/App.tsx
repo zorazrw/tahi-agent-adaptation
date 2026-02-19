@@ -10,7 +10,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { PromptInput, usePromptActions } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
-import MDContent from "./render/markdown";
+import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const SCROLL_THRESHOLD = 50;
@@ -334,17 +334,17 @@ function App() {
 
         {!activeSession ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 px-8 text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/10">
-              <svg viewBox="0 0 24 24" className="h-8 w-8 text-accent" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
+              <svg viewBox="0 0 24 24" className="h-8 w-8 text-primary" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <path d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
               </svg>
             </div>
             <div>
               <h2 className="text-lg font-semibold text-ink-800">Agent Cowork</h2>
-              <p className="mt-1 text-sm text-muted max-w-md">Create a new task to start working with an AI agent. Define steps, set verification criteria, and preview outputs.</p>
+              <p className="mt-1 text-sm text-muted-foreground max-w-md">Create a new task to start working with an AI agent. Define steps, set verification criteria, and preview outputs.</p>
             </div>
             <button
-              className="rounded-full bg-accent px-6 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-accent-hover transition-colors"
+              className="rounded-full bg-primary px-6 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors"
               onClick={handleNewSession}
             >
               + New Task
@@ -366,9 +366,9 @@ function App() {
         {/* Drag handle */}
         <div
           onMouseDown={handleSplitMouseDown}
-          className="shrink-0 h-2 cursor-row-resize relative group border-t border-ink-900/10 hover:bg-accent/10 active:bg-accent/20 transition-colors py-1"
+          className="shrink-0 h-3 cursor-row-resize relative group flex items-center justify-center border-t border-b border-ink-900/8 hover:border-ink-900/15 hover:bg-primary/5 transition-all duration-150"
         >
-          <div className="mx-auto h-1 w-10 rounded-full bg-ink-900/20 group-hover:bg-accent/50 transition-colors" />
+          <div className="h-[3px] w-12 rounded-full bg-ink-900/20 group-hover:bg-primary/40 group-active:bg-primary/50 transition-colors duration-150" />
         </div>
 
         {/* Bottom: chat (messages + prompt) */}
@@ -379,10 +379,10 @@ function App() {
               <span className="text-xs text-success px-2 py-0.5">Copied {copyFeedback}!</span>
             ) : (
               <>
-                <button onClick={() => handleCopyTranscript("markdown")} className="text-xs text-muted hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as Markdown">
+                <button onClick={() => handleCopyTranscript("markdown")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as Markdown">
                   Copy MD
                 </button>
-                <button onClick={() => handleCopyTranscript("json")} className="text-xs text-muted hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as JSON">
+                <button onClick={() => handleCopyTranscript("json")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as JSON">
                   Copy JSON
                 </button>
               </>
@@ -398,7 +398,7 @@ function App() {
 
             {!hasMoreHistory && totalMessages > 0 && (
               <div className="flex items-center justify-center py-2 mb-2">
-                <div className="flex items-center gap-2 text-xs text-muted">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <div className="h-px w-12 bg-ink-900/10" />
                   <span>Beginning of conversation</span>
                   <div className="h-px w-12 bg-ink-900/10" />
@@ -408,7 +408,7 @@ function App() {
 
             {isLoadingHistory && (
               <div className="flex items-center justify-center py-2 mb-2">
-                <div className="flex items-center gap-2 text-xs text-muted">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
@@ -421,43 +421,38 @@ function App() {
             {visibleMessages.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-8 text-center">
                 <div className="text-lg font-medium text-ink-700">No messages yet</div>
-                <p className="mt-2 text-sm text-muted">Start a conversation with agent cowork</p>
+                <p className="mt-2 text-sm text-muted-foreground">Start a conversation with agent cowork</p>
               </div>
             ) : (
               visibleMessages.map((item, idx) => (
-                <ErrorBoundary key={`${activeSessionId}-msg-${item.originalIndex}`}>
-                  <MessageCard
-                    message={item.message}
-                    isLast={idx === visibleMessages.length - 1}
-                    isRunning={isRunning}
-                    permissionRequest={permissionRequests[0]}
-                    onPermissionResult={handlePermissionResult}
-                  />
-                </ErrorBoundary>
+                <div key={`${activeSessionId}-msg-${item.originalIndex}`} className={`message-card ${idx >= visibleMessages.length - 3 && isRunning ? "animate-fade-up" : ""}`}>
+                  <ErrorBoundary>
+                    <MessageCard
+                      message={item.message}
+                      isLast={idx === visibleMessages.length - 1}
+                      isRunning={isRunning}
+                      permissionRequest={permissionRequests[0]}
+                      onPermissionResult={handlePermissionResult}
+                    />
+                  </ErrorBoundary>
+                </div>
               ))
             )}
 
-            {/* Partial message display with skeleton loading */}
+            {/* Partial message display */}
             <div className="partial-message">
-              <MDContent text={partialMessage} />
-              {showPartialMessage && (
-                <div className="mt-3 flex flex-col gap-2 px-1">
-                  <div className="relative h-3 w-2/12 overflow-hidden rounded-full bg-ink-900/10">
-                    <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-ink-900/30 to-transparent animate-shimmer" />
-                  </div>
-                  <div className="relative h-3 w-full overflow-hidden rounded-full bg-ink-900/10">
-                    <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-ink-900/30 to-transparent animate-shimmer" />
-                  </div>
-                  <div className="relative h-3 w-full overflow-hidden rounded-full bg-ink-900/10">
-                    <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-ink-900/30 to-transparent animate-shimmer" />
-                  </div>
-                  <div className="relative h-3 w-full overflow-hidden rounded-full bg-ink-900/10">
-                    <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-ink-900/30 to-transparent animate-shimmer" />
-                  </div>
-                  <div className="relative h-3 w-4/12 overflow-hidden rounded-full bg-ink-900/10">
-                    <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-ink-900/30 to-transparent animate-shimmer" />
-                  </div>
+              {showPartialMessage && !partialMessage.trim() ? (
+                <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+                  <span className="inline-grid grid-cols-2 gap-0.5 opacity-40">
+                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" />
+                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "150ms" }} />
+                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "300ms" }} />
+                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "450ms" }} />
+                  </span>
+                  <span>Thinking...</span>
                 </div>
+              ) : (
+                <MessageResponse isAnimating={showPartialMessage} caret="block">{partialMessage}</MessageResponse>
               )}
             </div>
 
@@ -475,7 +470,7 @@ function App() {
         {hasNewMessages && !shouldAutoScroll && (
           <button
             onClick={scrollToBottom}
-            className="fixed bottom-28 left-1/2 ml-[calc(var(--sidebar-width)/2)] z-40 -translate-x-1/2 flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white shadow-lg transition-all hover:bg-accent-hover hover:scale-105 animate-bounce-subtle"
+            className="fixed bottom-28 left-1/2 ml-[calc(var(--sidebar-width)/2)] z-40 -translate-x-1/2 flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-medium text-white shadow-lg transition-all hover:bg-primary-hover hover:scale-105 animate-bounce-subtle"
           >
             <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M12 5v14M5 12l7 7 7-7" />

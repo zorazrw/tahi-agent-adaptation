@@ -89,14 +89,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-ink-900/20 backdrop-blur-sm" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-ink-900/20 backdrop-blur-sm animate-fade-in" />
         <Dialog.Content className="fixed inset-0 z-50 flex items-center justify-center px-4 py-8">
-          <div className="w-full max-w-lg rounded-2xl border border-ink-900/5 bg-surface p-6 shadow-elevated">
+          <div className="w-full max-w-lg rounded-2xl border border-ink-900/5 bg-surface p-6 shadow-elevated animate-scale-in">
             <div className="flex items-center justify-between">
               <Dialog.Title className="text-base font-semibold text-ink-800">API Configuration</Dialog.Title>
               <Dialog.Close asChild>
                 <button
-                  className="rounded-full p-1.5 text-muted hover:bg-surface-tertiary hover:text-ink-700 transition-colors"
+                  className="rounded-full p-1.5 text-muted-foreground hover:bg-surface-tertiary hover:text-ink-700 transition-colors"
                   aria-label="Close"
                 >
                   <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
@@ -105,19 +105,19 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 </button>
               </Dialog.Close>
             </div>
-            <p className="mt-2 text-sm text-muted">Supports Anthropic's official API as well as third-party APIs compatible with the Anthropic format.</p>
+            <p className="mt-2 text-sm text-muted-foreground">Supports Anthropic's official API as well as third-party APIs compatible with the Anthropic format.</p>
 
             {loading ? (
               <div className="mt-5 flex items-center justify-center py-8">
-                <Spinner className="w-6 h-6 text-accent" color="currentColor" />
+                <Spinner className="w-6 h-6 text-primary" color="currentColor" />
               </div>
             ) : (
               <div className="mt-5 grid gap-4">
                 <label className="grid gap-1.5">
-                  <span className="text-xs font-medium text-muted">Base URL</span>
+                  <span className="text-xs font-medium text-muted-foreground">Base URL</span>
                   <input
                     type="url"
-                    className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-muted-light focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20 transition-colors"
+                    className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
                     placeholder="https://..."
                     value={baseURL}
                     onChange={(e) => setBaseURL(e.target.value)}
@@ -126,10 +126,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 </label>
 
                 <label className="grid gap-1.5">
-                  <span className="text-xs font-medium text-muted">API Key</span>
+                  <span className="text-xs font-medium text-muted-foreground">API Key</span>
                   <input
                     type="password"
-                    className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-muted-light focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20 transition-colors"
+                    className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
                     placeholder="sk-..."
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
@@ -138,10 +138,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 </label>
 
                 <label className="grid gap-1.5">
-                  <span className="text-xs font-medium text-muted">Model Name</span>
+                  <span className="text-xs font-medium text-muted-foreground">Model Name</span>
                   <input
                     type="text"
-                    className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-muted-light focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20 transition-colors"
+                    className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
                     placeholder="claude-3-5-sonnet-20241022"
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
@@ -170,7 +170,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     Cancel
                   </button>
                   <button
-                    className="flex-1 rounded-xl bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-accent-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex-1 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                     onClick={handleSave}
                     disabled={saving || !apiKey.trim() || !baseURL.trim() || !model.trim()}
                   >

@@ -107,7 +107,7 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
         <svg viewBox="0 0 24 24" className="h-10 w-10 text-ink-400 mb-3" fill="none" stroke="currentColor" strokeWidth="1.5">
           <path d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
         </svg>
-        <p className="text-sm text-muted">Output files will appear here when the step runs.</p>
+        <p className="text-sm text-muted-foreground">Output files will appear here when the step runs.</p>
       </div>
     );
   }
@@ -118,13 +118,13 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
   return (
     <div className="flex flex-col h-full min-h-0 rounded-lg border border-ink-900/10 bg-surface-secondary">
       <div className="shrink-0 px-3 py-2 border-b border-ink-900/10">
-        <span className="text-xs font-medium text-muted truncate block" title={filePath}>
+        <span className="text-xs font-medium text-muted-foreground truncate block" title={filePath}>
           {filePath}
         </span>
       </div>
       <div className="flex-1 min-h-0 overflow-auto px-3 py-2">
         {loading && (
-          <div className="flex items-center gap-2 text-sm text-muted">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
@@ -133,7 +133,7 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
           </div>
         )}
         {isNotFound && !loading && (
-          <div className="flex items-center gap-2 text-sm text-muted">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="10" />
               <path d="M12 6v6l4 2" />

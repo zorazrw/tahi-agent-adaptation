@@ -68,13 +68,13 @@ export function DecisionPanel({
 
   if (request.toolName === "AskUserQuestion" && questions.length > 0) {
     return (
-      <div className="rounded-2xl border border-accent/20 bg-accent-subtle p-5">
-        <div className="text-xs font-semibold text-accent">Question from Claude</div>
+      <div className="rounded-2xl border border-primary/20 bg-primary-subtle p-5">
+        <div className="text-xs font-semibold text-primary">Question from Claude</div>
         {questions.map((q, qIndex) => (
           <div key={qIndex} className="mt-4">
             <p className="text-sm text-ink-700">{q.question}</p>
             {q.header && (
-              <span className="mt-2 inline-flex items-center rounded-full bg-surface px-2 py-0.5 text-xs text-muted">
+              <span className="mt-2 inline-flex items-center rounded-full bg-surface px-2 py-0.5 text-xs text-muted-foreground">
                 {q.header}
               </span>
             )}
@@ -101,13 +101,13 @@ export function DecisionPanel({
                     }}
                   >
                     <div className="font-medium">{option.label}</div>
-                    {option.description && <div className="mt-1 text-xs text-muted">{option.description}</div>}
+                    {option.description && <div className="mt-1 text-xs text-muted-foreground">{option.description}</div>}
                   </button>
                 );
               })}
             </div>
             <div className="mt-3">
-              <label className="block text-xs font-medium text-muted">Other</label>
+              <label className="block text-xs font-medium text-muted-foreground">Other</label>
               <input
                 type="text"
                 className="mt-1 w-full rounded-xl border border-ink-900/10 bg-surface px-3 py-2 text-sm text-ink-700 focus:border-info/50 focus:outline-none"
@@ -116,13 +116,13 @@ export function DecisionPanel({
                 onChange={(e) => setOtherInputs((prev) => ({ ...prev, [qIndex]: e.target.value }))}
               />
             </div>
-            {q.multiSelect && <div className="mt-2 text-xs text-muted">Multiple selections allowed.</div>}
+            {q.multiSelect && <div className="mt-2 text-xs text-muted-foreground">Multiple selections allowed.</div>}
           </div>
         ))}
         <div className="mt-5 flex flex-wrap gap-3">
           <button
             className={`rounded-full px-5 py-2 text-sm font-medium text-white shadow-soft transition-colors ${
-              canSubmit ? "bg-accent hover:bg-accent-hover" : "bg-ink-400/40 cursor-not-allowed"
+              canSubmit ? "bg-primary hover:bg-primary-hover" : "bg-ink-400/40 cursor-not-allowed"
             }`}
             onClick={() => {
               if (!canSubmit) return;
@@ -144,8 +144,8 @@ export function DecisionPanel({
   }
 
   return (
-    <div className="rounded-2xl border border-accent/20 bg-accent-subtle p-5">
-      <div className="text-xs font-semibold text-accent">Permission Request</div>
+    <div className="rounded-2xl border border-primary/20 bg-primary-subtle p-5">
+      <div className="text-xs font-semibold text-primary">Permission Request</div>
       <p className="mt-2 text-sm text-ink-700">
         Claude wants to use: <span className="font-medium">{request.toolName}</span>
       </p>
@@ -156,7 +156,7 @@ export function DecisionPanel({
       </div>
       <div className="mt-4 flex flex-wrap gap-3">
         <button
-          className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-white shadow-soft hover:bg-accent-hover transition-colors"
+          className="rounded-full bg-primary px-5 py-2 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors"
           onClick={() => onSubmit({ behavior: "allow", updatedInput: request.input as Record<string, unknown> })}
         >
           Allow

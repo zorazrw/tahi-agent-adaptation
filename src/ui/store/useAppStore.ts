@@ -58,6 +58,9 @@ interface AppState {
 
   toolStatuses: Record<string, "pending" | "success" | "error">;
   setToolStatus: (toolUseId: string, status: "pending" | "success" | "error") => void;
+
+  toolMeta: Record<string, { name: string; info: string | null; editData?: { file_path: string; old_string: string; new_string: string }; writeData?: { file_path: string; content: string } }>;
+  setToolMeta: (toolUseId: string, meta: { name: string; info: string | null; editData?: { file_path: string; old_string: string; new_string: string }; writeData?: { file_path: string; content: string } }) => void;
 }
 
 function createSession(id: string): SessionView {
@@ -91,6 +94,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   toolStatuses: {},
   setToolStatus: (toolUseId, status) => set((state) => ({
     toolStatuses: { ...state.toolStatuses, [toolUseId]: status }
+  })),
+
+  toolMeta: {},
+  setToolMeta: (toolUseId, meta) => set((state) => ({
+    toolMeta: { ...state.toolMeta, [toolUseId]: meta }
   })),
 
   updateSessionSteps: (sessionId, steps) => {
