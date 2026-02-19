@@ -3,7 +3,7 @@
 	"private": true,
 	"version": "0.1.0",
 	"type": "module",
-	"main": "dist-electron/main.js",
+	"main": "dist-electron/electron/main.js",
 	"scripts": {
 		"rebuild": "npx electron-rebuild -f -w better-sqlite3",
 		"dev": "pkill -f vite 2>/dev/null; pkill -f electron 2>/dev/null; sleep 1; bun run dev:react & bun run dev:electron",

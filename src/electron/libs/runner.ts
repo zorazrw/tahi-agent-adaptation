@@ -4,6 +4,7 @@ import type { Session } from "./session-store.js";
 
 import { getCurrentApiConfig, buildEnvForConfig, getClaudeCodePath} from "./claude-settings.js";
 import { getEnhancedEnv } from "./util.js";
+import { syncAppSkills } from "./skill-store.js";
 
 
 export type RunnerOptions = {
@@ -105,6 +106,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         return;
       }
       
+      // Sync app-managed skills into ~/.claude/skills/ for SDK discovery
+      syncAppSkills();
+
       // 使用 Anthropic SDK
       const env = buildEnvForConfig(config);
       const mergedEnv = {
@@ -127,6 +131,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         prompt: promptToSend,
         options: {
           cwd: session.cwd ?? DEFAULT_CWD,
+          settingSources: ["user", "project"],
           resume: resumeSessionId,
           abortController,
           env: mergedEnv,

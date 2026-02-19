@@ -496,6 +496,7 @@ function App() {
         <SettingsModal onClose={() => setShowSettingsModal(false)} />
       )}
 
+
       {globalError && (
         <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-xl border border-error/20 bg-error-light px-4 py-3 shadow-lg">
           <div className="flex items-center gap-3">

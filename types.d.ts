@@ -27,6 +27,14 @@ type PreviewFileResult =
     | { kind: "audio"; dataUrl: string }
     | { error: string };
 
+type SkillInfo = {
+    name: string;
+    description: string;
+    dirName: string;
+    source: "app" | "user";
+    path: string;
+}
+
 type EventPayloadMapping = {
     statistics: Statistics;
     getStaticData: StaticData;
@@ -37,6 +45,10 @@ type EventPayloadMapping = {
     "save-api-config": { success: boolean; error?: string };
     "check-api-config": { hasConfig: boolean; config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null };
     "preview-file": PreviewFileResult;
+    "list-skills": SkillInfo[];
+    "remove-skill": { success: boolean; error?: string };
+    "get-skill-content": { content: string } | { error: string };
+    "get-skills-dir": string;
 }
 
 interface Window {
@@ -53,5 +65,9 @@ interface Window {
         saveApiConfig: (config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" }) => Promise<{ success: boolean; error?: string }>;
         checkApiConfig: () => Promise<{ hasConfig: boolean; config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null }>;
         previewFile: (filePath: string, cwd?: string | null) => Promise<PreviewFileResult>;
+        listSkills: () => Promise<SkillInfo[]>;
+        removeSkill: (dirName: string) => Promise<{ success: boolean; error?: string }>;
+        getSkillContent: (path: string) => Promise<{ content: string } | { error: string }>;
+        getSkillsDir: () => Promise<string>;
     }
 }

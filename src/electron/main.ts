@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, globalShortcut, Menu } from "electron"
+import { app, BrowserWindow, ipcMain, dialog, globalShortcut, Menu, shell } from "electron"
 import { execSync } from "child_process";
 import { readFile } from "fs/promises";
 import { resolve, isAbsolute } from "path";
@@ -13,6 +13,7 @@ import { saveApiConfig } from "./libs/config-store.js";
 import { getCurrentApiConfig } from "./libs/claude-settings.js";
 import type { ClientEvent } from "./types.js";
 import "./libs/claude-settings.js";
+import { ensureAppSkillsDir, listSkills, removeAppSkill, getSkillContent, getAppSkillsDir } from "./libs/skill-store.js";
 
 let cleanupComplete = false;
 let mainWindow: BrowserWindow | null = null;
@@ -48,6 +49,7 @@ function handleSignal(): void {
 // Initialize everything when app is ready
 app.on("ready", () => {
     Menu.setApplicationMenu(null);
+    ensureAppSkillsDir();
     // Setup event handlers
     app.on("before-quit", cleanup);
     app.on("will-quit", cleanup);
@@ -138,6 +140,25 @@ app.on("ready", () => {
                 error: error instanceof Error ? error.message : String(error) 
             };
         }
+    });
+
+    // Skills management
+    ipcMainHandle("list-skills", () => {
+        return listSkills();
+    });
+
+    ipcMainHandle("remove-skill", (_: any, dirName: string) => {
+        return removeAppSkill(dirName);
+    });
+
+    ipcMainHandle("get-skill-content", (_: any, skillPath: string) => {
+        return getSkillContent(skillPath);
+    });
+
+    ipcMainHandle("get-skills-dir", () => {
+        const dir = getAppSkillsDir();
+        shell.openPath(dir);
+        return dir;
     });
 
     const IMAGE_MIME: Record<string, string> = {

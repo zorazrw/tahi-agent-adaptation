@@ -36,7 +36,15 @@ electron.contextBridge.exposeInMainWorld("electron", {
     checkApiConfig: () =>
         ipcInvoke("check-api-config"),
     previewFile: (filePath: string, cwd?: string | null) =>
-        ipcInvoke("preview-file", filePath, cwd ?? undefined)
+        ipcInvoke("preview-file", filePath, cwd ?? undefined),
+    listSkills: () =>
+        ipcInvoke("list-skills"),
+    removeSkill: (dirName: string) =>
+        ipcInvoke("remove-skill", dirName),
+    getSkillContent: (path: string) =>
+        ipcInvoke("get-skill-content", path),
+    getSkillsDir: () =>
+        ipcInvoke("get-skills-dir")
 } satisfies Window['electron'])
 
 function ipcInvoke<Key extends keyof EventPayloadMapping>(key: Key, ...args: any[]): Promise<EventPayloadMapping[Key]> {
