@@ -47,6 +47,10 @@
   --shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.12);
 }
 
+:root {
+  --sidebar-width: 280px;
+}
+
 pre code.hljs {
   background: transparent;
   padding: 0;
@@ -110,6 +114,20 @@ code, pre, textarea.mono, input.mono {
 
 .animate-shimmer {
   animation: shimmer 1.4s linear infinite;
+}
+
+@keyframes bounce-subtle {
+  0%,
+  100% {
+    transform: translateX(-50%) translateY(0);
+  }
+  50% {
+    transform: translateX(-50%) translateY(-4px);
+  }
+}
+
+.animate-bounce-subtle {
+  animation: bounce-subtle 1.5s ease-in-out infinite;
 }
 
 /* Step progress circle: completed state (orange) */

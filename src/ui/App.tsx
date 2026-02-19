@@ -11,6 +11,7 @@ import { PromptInput, usePromptActions } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
 import MDContent from "./render/markdown";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const SCROLL_THRESHOLD = 50;
 
@@ -115,7 +116,7 @@ function App() {
     totalMessages,
   } = useMessageWindow(messages, permissionRequests, activeSessionId);
 
-  // 启动时检查 API 配置
+  // Check API configuration on startup
   useEffect(() => {
     if (!apiConfigChecked) {
       window.electron.checkApiConfig().then((result) => {
@@ -323,7 +324,7 @@ function App() {
         onDeleteSession={handleDeleteSession}
       />
 
-      <main className="flex flex-1 flex-col ml-[280px] min-h-0 bg-surface-cream" style={{ marginRight: 0 }}>
+      <main className="flex flex-1 flex-col ml-[var(--sidebar-width)] min-h-0 bg-surface-cream" style={{ marginRight: 0 }}>
         <div
           className="flex shrink-0 items-center justify-center h-12 border-b border-ink-900/10 bg-surface-cream select-none"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
@@ -331,21 +332,44 @@ function App() {
           <span className="text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
         </div>
 
+        {!activeSession ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 px-8 text-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/10">
+              <svg viewBox="0 0 24 24" className="h-8 w-8 text-accent" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-ink-800">Agent Cowork</h2>
+              <p className="mt-1 text-sm text-muted max-w-md">Create a new task to start working with an AI agent. Define steps, set verification criteria, and preview outputs.</p>
+            </div>
+            <button
+              className="rounded-full bg-accent px-6 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-accent-hover transition-colors"
+              onClick={handleNewSession}
+            >
+              + New Task
+            </button>
+          </div>
+        ) : (
         <div ref={splitContainerRef} className="flex flex-1 flex-col min-h-0">
         {/* Top: file preview (file from Files section for selected workflow step) */}
         <div className="min-h-0 flex flex-col p-4 bg-surface-cream" style={{ height: `${splitPercent}%` }}>
-          <FilePreview
-            filePath={getPreviewFileForStep(activeSession?.outputFiles, selectedStepIndex)}
-            cwd={activeSession?.cwd}
-            stepCompleted={activeSession?.completedStepIndices?.includes(selectedStepIndex) ?? false}
-          />
+          <ErrorBoundary>
+            <FilePreview
+              filePath={getPreviewFileForStep(activeSession?.outputFiles, selectedStepIndex)}
+              cwd={activeSession?.cwd}
+              stepCompleted={activeSession?.completedStepIndices?.includes(selectedStepIndex) ?? false}
+            />
+          </ErrorBoundary>
         </div>
 
         {/* Drag handle */}
         <div
           onMouseDown={handleSplitMouseDown}
-          className="shrink-0 h-1.5 cursor-row-resize relative group border-t border-ink-900/10 hover:bg-accent/20 active:bg-accent/30 transition-colors"
-        />
+          className="shrink-0 h-2 cursor-row-resize relative group border-t border-ink-900/10 hover:bg-accent/10 active:bg-accent/20 transition-colors py-1"
+        >
+          <div className="mx-auto h-1 w-10 rounded-full bg-ink-900/20 group-hover:bg-accent/50 transition-colors" />
+        </div>
 
         {/* Bottom: chat (messages + prompt) */}
         <div className="min-h-0 flex flex-col bg-surface-cream" style={{ height: `${100 - splitPercent}%` }}>
@@ -401,14 +425,15 @@ function App() {
               </div>
             ) : (
               visibleMessages.map((item, idx) => (
-                <MessageCard
-                  key={`${activeSessionId}-msg-${item.originalIndex}`}
-                  message={item.message}
-                  isLast={idx === visibleMessages.length - 1}
-                  isRunning={isRunning}
-                  permissionRequest={permissionRequests[0]}
-                  onPermissionResult={handlePermissionResult}
-                />
+                <ErrorBoundary key={`${activeSessionId}-msg-${item.originalIndex}`}>
+                  <MessageCard
+                    message={item.message}
+                    isLast={idx === visibleMessages.length - 1}
+                    isRunning={isRunning}
+                    permissionRequest={permissionRequests[0]}
+                    onPermissionResult={handlePermissionResult}
+                  />
+                </ErrorBoundary>
               ))
             )}
 
@@ -444,12 +469,13 @@ function App() {
           <div className="h-24 shrink-0 lg:h-28" aria-hidden />
           <PromptInput sendEvent={sendEvent} onSendMessage={handleSendMessage} disabled={visibleMessages.length === 0} />
         </div>
-        </div>{/* end splitContainerRef */}
+        </div>
+        )}
 
         {hasNewMessages && !shouldAutoScroll && (
           <button
             onClick={scrollToBottom}
-            className="fixed bottom-28 left-1/2 ml-[140px] z-40 -translate-x-1/2 flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white shadow-lg transition-all hover:bg-accent-hover hover:scale-105 animate-bounce-subtle"
+            className="fixed bottom-28 left-1/2 ml-[calc(var(--sidebar-width)/2)] z-40 -translate-x-1/2 flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white shadow-lg transition-all hover:bg-accent-hover hover:scale-105 animate-bounce-subtle"
           >
             <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M12 5v14M5 12l7 7 7-7" />

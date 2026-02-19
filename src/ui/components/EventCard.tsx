@@ -17,8 +17,6 @@ import { hasWorkflowPattern, extractPreWorkflowText } from "../../shared/workflo
 type MessageContent = SDKAssistantMessage["message"]["content"][number];
 type ToolResultContent = SDKUserMessage["message"]["content"][number];
 type ToolStatus = "pending" | "success" | "error";
-const toolStatusMap = new Map<string, ToolStatus>();
-const toolStatusListeners = new Set<() => void>();
 const MAX_VISIBLE_LINES = 3;
 
 type AskUserQuestionInput = {
@@ -38,23 +36,8 @@ const getAskUserQuestionSignature = (input?: AskUserQuestionInput | null) => {
   }).join("||");
 };
 
-const setToolStatus = (toolUseId: string | undefined, status: ToolStatus) => {
-  if (!toolUseId) return;
-  toolStatusMap.set(toolUseId, status);
-  toolStatusListeners.forEach((listener) => listener());
-};
-
 const useToolStatus = (toolUseId: string | undefined) => {
-  const [status, setStatus] = useState<ToolStatus | undefined>(() =>
-    toolUseId ? toolStatusMap.get(toolUseId) : undefined
-  );
-  useEffect(() => {
-    if (!toolUseId) return;
-    const handleUpdate = () => setStatus(toolStatusMap.get(toolUseId));
-    toolStatusListeners.add(handleUpdate);
-    return () => { toolStatusListeners.delete(handleUpdate); };
-  }, [toolUseId]);
-  return status;
+  return useAppStore((s) => toolUseId ? s.toolStatuses[toolUseId] : undefined);
 };
 
 const StatusDot = ({ variant = "accent", isActive = false, isVisible = true }: {
@@ -135,7 +118,8 @@ const ToolResult = ({ messageContent }: { messageContent: ToolResultContent }) =
   const hasMoreLines = lines.length > MAX_VISIBLE_LINES;
   const visibleContent = hasMoreLines && !isExpanded ? lines.slice(0, MAX_VISIBLE_LINES).join("\n") : lines.join("\n");
 
-  useEffect(() => { setToolStatus(toolUseId, status); }, [toolUseId, status]);
+  const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
+  useEffect(() => { storeSetToolStatus(toolUseId, status); }, [toolUseId, status, storeSetToolStatus]);
   useEffect(() => {
     if (!hasMoreLines || isFirstRender.current) { isFirstRender.current = false; return; }
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -200,9 +184,11 @@ const ToolUseCard = ({ messageContent, showIndicator = false }: { messageContent
   const isPending = !toolStatus || toolStatus === "pending";
   const shouldShowDot = toolStatus === "success" || toolStatus === "error" || showIndicator;
 
+  const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
+  const toolStatuses = useAppStore((s) => s.toolStatuses);
   useEffect(() => {
-    if (messageContent?.id && !toolStatusMap.has(messageContent.id)) setToolStatus(messageContent.id, "pending");
-  }, [messageContent?.id]);
+    if (messageContent?.id && !toolStatuses[messageContent.id]) storeSetToolStatus(messageContent.id, "pending");
+  }, [messageContent?.id, storeSetToolStatus, toolStatuses]);
 
   const getToolInfo = (): string | null => {
     const input = messageContent.input as Record<string, any>;

@@ -55,6 +55,9 @@ interface AppState {
   updateSessionVerifierMarks: (sessionId: string, verifierMarks: VerifierMark[][]) => void;
   updateSessionTitle: (sessionId: string, title: string) => void;
   handleServerEvent: (event: ServerEvent) => void;
+
+  toolStatuses: Record<string, "pending" | "success" | "error">;
+  setToolStatus: (toolUseId: string, status: "pending" | "success" | "error") => void;
 }
 
 function createSession(id: string): SessionView {
@@ -84,6 +87,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0 }),
   setSelectedStepIndex: (index) => set({ selectedStepIndex: index }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
+
+  toolStatuses: {},
+  setToolStatus: (toolUseId, status) => set((state) => ({
+    toolStatuses: { ...state.toolStatuses, [toolUseId]: status }
+  })),
 
   updateSessionSteps: (sessionId, steps) => {
     set((state) => {
