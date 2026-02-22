@@ -5,6 +5,7 @@ import type { Session } from "./session-store.js";
 import { getCurrentApiConfig, buildEnvForConfig, getClaudeCodePath} from "./claude-settings.js";
 import { getEnhancedEnv } from "./util.js";
 import { syncAppSkills } from "./skill-store.js";
+import { createWorkflowMcpServer, flattenWorkflowPlan } from "./workflow-mcp-server.js";
 
 
 export type RunnerOptions = {
@@ -21,36 +22,14 @@ export type RunnerHandle = {
 
 const DEFAULT_CWD = process.cwd();
 
-/** Appended to the user's first message so the model produces workflow steps, file names, and verifiers. */
-const TODO_LIST_INSTRUCTION = [
+/** Appended to the user's first message so the model calls the WorkflowPlan MCP tool. */
+const WORKFLOW_PLAN_INSTRUCTION = [
   "",
-  "For a given task, you must produce exactly three outputs:",
-  "  1. Workflow steps (short action/outcome per step)",
-  "  2. File name(s) for each step (the expected output file name or path per step)",
-  "  3. Verifiers (what to check per step: file exists, content correct, etc.)",
-  "",
-  "Rules:",
-  "- Each step must be within 10 words; ideally use 4 steps or fewer.",
-  "- Each step must have clear, tangible file output. In the workflow list describe only the action (e.g. 'Create summary report')—do NOT put file names in the step text.",
-  "- Output in this exact format:",
-  "",
-  "  1. First step (action/outcome only)",
-  "  2. Second step",
-  "  ...",
-  "",
-  "OUTPUT FILES:",
-  "Step 1: file1.xlsx",
-  "Step 2: path/to/file2.png",
-  "...",
-  "",
-  "VERIFIERS:",
-  "Step 1:",
-  "- Output file exists",
-  "- [Optional: main quality check]",
-  "Step 2:",
-  "- ...",
-  "",
-  "In OUTPUT FILES you must list the output file name (or path) for each step—one line per step; multiple files on one line separated by commas. In VERIFIERS list only what to check (e.g. 'Output file exists', 'Data is correct'). Use the exact headers OUTPUT FILES:, Step N:, and VERIFIERS:.",
+  "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
+  "Do NOT write out steps as text. Use the tool with structured JSON input.",
+  "Each step needs: a short description (under 10 words), expected output file(s), and verification criteria.",
+  "Aim for 4 steps or fewer. After calling the tool, STOP. Do NOT execute any steps yourself.",
+  "The human operator will trigger each step individually.",
   "",
   "Task instruction:"
 ].join("\n");
@@ -59,17 +38,13 @@ function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): strin
   const trimmed = userPrompt.trim();
   if (!trimmed) return trimmed;
   if (!isFirstMessage) return trimmed;
-  return TODO_LIST_INSTRUCTION + trimmed;
+  return WORKFLOW_PLAN_INSTRUCTION + trimmed;
 }
 
-/** Builds the user prompt for solving a single workflow step (used for task-solving LLM calls). */
+/** Builds the resume prompt for executing a single workflow step. */
 export function buildPromptForStep(stepDescription: string, stepIndex: number, totalSteps: number): string {
   const oneBased = stepIndex + 1;
-  return [
-    `Execute step ${oneBased} of ${totalSteps} of the workflow. Complete only this sub-task. Save the output files in the current working directory.`,
-    "",
-    `Step: ${stepDescription}`
-  ].join("\n");
+  return `Proceed with step ${oneBased} of ${totalSteps}: ${stepDescription}`;
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
@@ -119,13 +94,31 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       // Build tools list: default Claude Code tools + CodeExecution (if not already present)
       const defaultTools = [
         "Task", "TaskOutput", "Bash", "Glob", "Grep", "ExitPlanMode", "Read", "Edit", "Write",
-        "NotebookEdit", "WebFetch", "TodoWrite", "WebSearch", "KillShell", "AskUserQuestion",
+        "NotebookEdit", "WebFetch", "WebSearch", "KillShell", "AskUserQuestion",
         "Skill", "EnterPlanMode"
       ];
       const codeExecutionTool = "CodeExecution";
       const toolsList = defaultTools.includes(codeExecutionTool)
         ? defaultTools
         : [...defaultTools, codeExecutionTool];
+
+      // Only provide the workflow MCP server on the first message (planning phase).
+      // The agent is instructed to call WorkflowPlan then stop naturally.
+      // On resume (step execution), omit it so the agent focuses on the step.
+      let planRegistered = false;
+      let mcpServers: Record<string, ReturnType<typeof createWorkflowMcpServer>> | undefined;
+      if (isFirstMessage) {
+        mcpServers = {
+          workflow: createWorkflowMcpServer((input) => {
+            const { steps, outputFiles, verificationCriteria } = flattenWorkflowPlan(input);
+            onEvent({
+              type: "workflow.plan",
+              payload: { sessionId: session.id, steps, outputFiles, verificationCriteria }
+            });
+            planRegistered = true;
+          })
+        };
+      }
 
       const q = query({
         prompt: promptToSend,
@@ -140,6 +133,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           includePartialMessages: true,
           allowDangerouslySkipPermissions: true,
           tools: toolsList,
+          mcpServers,
           canUseTool: async (toolName, input, { signal }) => {
             // For AskUserQuestion, we need to wait for user response
             if (toolName === "AskUserQuestion") {
@@ -174,9 +168,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         }
       });
 
-      // Capture session_id from init message
       for await (const message of q) {
-        // Extract session_id from system init message
         if (message.type === "system" && "subtype" in message && message.subtype === "init") {
           const sdkSessionId = message.session_id;
           if (sdkSessionId) {
@@ -185,11 +177,11 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           }
         }
 
-        // Send message to frontend
         sendMessage(message);
 
-        // Check for result to update session status
-        if (message.type === "result") {
+        // When the agent finishes a turn, update status — but skip if
+        // a plan was just registered (the workflow.plan handler already set "idle").
+        if (message.type === "result" && !planRegistered) {
           const status = message.subtype === "success" ? "completed" : "error";
           onEvent({
             type: "session.status",
@@ -197,17 +189,8 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           });
         }
       }
-
-      // Query completed normally
-      if (session.status === "running") {
-        onEvent({
-          type: "session.status",
-          payload: { sessionId: session.id, status: "completed", title: session.title }
-        });
-      }
     } catch (error) {
       if ((error as Error).name === "AbortError") {
-        // Session was aborted, don't treat as error
         return;
       }
       onEvent({

@@ -4,7 +4,6 @@ import { runClaude, buildPromptForStep, type RunnerHandle } from "./libs/runner.
 import { SessionStore } from "./libs/session-store.js";
 import { app } from "electron";
 import { join } from "path";
-import { parseNumberedSteps, parseOutputFilesBlock, parseVerifiersBlock } from "../shared/workflow-parser.js";
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
@@ -34,17 +33,6 @@ function hasLiveSession(sessionId: string): boolean {
 }
 
 
-/** Extract full text from an assistant message's content blocks. */
-function getAssistantMessageText(message: unknown): string {
-  const m = message as { type?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
-  if (m?.type !== "assistant" || !Array.isArray(m?.message?.content)) return "";
-  const parts: string[] = [];
-  for (const block of m.message.content) {
-    if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
-  }
-  return parts.join("\n");
-}
-
 function emit(event: ServerEvent) {
   // If a session was deleted, drop late events that would resurrect it in the UI.
   // (Session history lookups are DB-backed, so these late events commonly lead to "Unknown session".)
@@ -61,24 +49,28 @@ function emit(event: ServerEvent) {
   if (event.type === "session.status") {
     sessions.updateSession(event.payload.sessionId, { status: event.payload.status });
   }
+  if (event.type === "workflow.plan") {
+    const { sessionId, steps, outputFiles, verificationCriteria } = event.payload;
+    const session = sessions.getSession(sessionId);
+    if (session && !session.steps?.length) {
+      sessions.updateSession(sessionId, { steps, outputFiles, verificationCriteria });
+      broadcast({ type: "session.steps", payload: { sessionId, steps } });
+      broadcast({ type: "session.outputFiles", payload: { sessionId, outputFiles } });
+      broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
+
+      // Transition to idle so the human can drive step-by-step execution.
+      // The runner will abort itself after the tool result is committed to the session.
+      sessions.updateSession(sessionId, { status: "idle" });
+      broadcast({
+        type: "session.status",
+        payload: { sessionId, status: "idle", title: session.title, cwd: session.cwd }
+      });
+    }
+    return;
+  }
   if (event.type === "stream.message") {
     const { sessionId, message } = event.payload;
     sessions.recordMessage(sessionId, message);
-    const text = getAssistantMessageText(message);
-    if (text) {
-      const steps = parseNumberedSteps(text);
-      if (steps.length >= 2) {
-        const session = sessions.getSession(sessionId);
-        if (session && !session.steps?.length) {
-          const outputFiles = parseOutputFilesBlock(text, steps.length);
-          const verificationCriteria = parseVerifiersBlock(text, steps.length);
-          sessions.updateSession(sessionId, { steps, outputFiles, verificationCriteria });
-          broadcast({ type: "session.steps", payload: { sessionId, steps } });
-          broadcast({ type: "session.outputFiles", payload: { sessionId, outputFiles } });
-          broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
-        }
-      }
-    }
     // When a step-solving run completes, mark that step as completed and persist.
     const m = message as { type?: string; subtype?: string };
     if (m.type === "result") {

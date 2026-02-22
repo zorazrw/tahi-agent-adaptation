@@ -28,6 +28,7 @@ function App() {
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const prevMessagesLengthRef = useRef(0);
+  const animatedIndicesRef = useRef(new Set<number>());
   const scrollHeightBeforeLoadRef = useRef(0);
   const shouldRestoreScrollRef = useRef(false);
 
@@ -50,7 +51,7 @@ function App() {
   const pendingStart = useAppStore((s) => s.pendingStart);
   const apiConfigChecked = useAppStore((s) => s.apiConfigChecked);
   const setApiConfigChecked = useAppStore((s) => s.setApiConfigChecked);
-  const selectedStepIndex = useAppStore((s) => s.selectedStepIndex);
+  const previewStepIndex = useAppStore((s) => s.previewStepIndex);
 
   // Helper function to extract partial message content
   const getPartialMessageContent = (eventMessage: any) => {
@@ -77,21 +78,16 @@ function App() {
     if (message.event.type === "content_block_delta") {
       partialMessageRef.current += getPartialMessageContent(message.event) || "";
       setPartialMessage(partialMessageRef.current);
-      if (shouldAutoScroll) {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      } else {
-        setHasNewMessages(true);
-      }
     }
 
     if (message.event.type === "content_block_stop") {
+      // Clear immediately — the finalized message will be appended to the
+      // store by the next non-stream_event SDK message, so there's no gap.
       setShowPartialMessage(false);
-      setTimeout(() => {
-        partialMessageRef.current = "";
-        setPartialMessage(partialMessageRef.current);
-      }, 500);
+      partialMessageRef.current = "";
+      setPartialMessage("");
     }
-  }, [shouldAutoScroll]);
+  }, []);
 
   // Combined event handler
   const onEvent = useCallback((event: ServerEvent) => {
@@ -206,11 +202,13 @@ function App() {
     setShouldAutoScroll(true);
     setHasNewMessages(false);
     prevMessagesLengthRef.current = 0;
+    animatedIndicesRef.current = new Set();
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, 100);
   }, [activeSessionId]);
 
+  // Track new finalized messages for badge / auto-scroll
   useEffect(() => {
     if (shouldAutoScroll) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -218,7 +216,14 @@ function App() {
       setHasNewMessages(true);
     }
     prevMessagesLengthRef.current = messages.length;
-  }, [messages, partialMessage, shouldAutoScroll]);
+  }, [messages, shouldAutoScroll]);
+
+  // Auto-scroll during streaming partial updates (lightweight, no state changes)
+  useEffect(() => {
+    if (shouldAutoScroll && partialMessage) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [partialMessage, shouldAutoScroll]);
 
   const scrollToBottom = useCallback(() => {
     setShouldAutoScroll(true);
@@ -356,9 +361,9 @@ function App() {
         <div className="min-h-0 flex flex-col p-4 bg-surface-cream" style={{ height: `${splitPercent}%` }}>
           <ErrorBoundary>
             <FilePreview
-              filePath={getPreviewFileForStep(activeSession?.outputFiles, selectedStepIndex)}
+              filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
               cwd={activeSession?.cwd}
-              stepCompleted={activeSession?.completedStepIndices?.includes(selectedStepIndex) ?? false}
+              stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
             />
           </ErrorBoundary>
         </div>
@@ -424,19 +429,24 @@ function App() {
                 <p className="mt-2 text-sm text-muted-foreground">Start a conversation with agent cowork</p>
               </div>
             ) : (
-              visibleMessages.map((item, idx) => (
-                <div key={`${activeSessionId}-msg-${item.originalIndex}`} className={`message-card ${idx >= visibleMessages.length - 3 && isRunning ? "animate-fade-up" : ""}`}>
-                  <ErrorBoundary>
-                    <MessageCard
-                      message={item.message}
-                      isLast={idx === visibleMessages.length - 1}
-                      isRunning={isRunning}
-                      permissionRequest={permissionRequests[0]}
-                      onPermissionResult={handlePermissionResult}
-                    />
-                  </ErrorBoundary>
-                </div>
-              ))
+              visibleMessages.map((item, idx) => {
+                // Animate only truly new messages, once
+                const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.originalIndex) && item.originalIndex >= prevMessagesLengthRef.current - 1;
+                if (shouldAnimate) animatedIndicesRef.current.add(item.originalIndex);
+                return (
+                  <div key={`${activeSessionId}-msg-${item.originalIndex}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
+                    <ErrorBoundary>
+                      <MessageCard
+                        message={item.message}
+                        isLast={idx === visibleMessages.length - 1}
+                        isRunning={isRunning}
+                        permissionRequest={permissionRequests[0]}
+                        onPermissionResult={handlePermissionResult}
+                      />
+                    </ErrorBoundary>
+                  </div>
+                );
+              })
             )}
 
             {/* Partial message display */}

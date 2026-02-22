@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   PermissionResult,
   SDKAssistantMessage,
@@ -11,7 +11,6 @@ import { useAppStore } from "../store/useAppStore";
 import type { PermissionRequest } from "../store/useAppStore";
 import { DecisionPanel } from "./DecisionPanel";
 import { WorkflowCard } from "./WorkflowCard";
-import { hasWorkflowPattern, extractPreWorkflowText } from "../../shared/workflow-parser";
 
 // ai-elements
 import { MessageResponse } from "../../components/ai-elements/message";
@@ -356,6 +355,9 @@ const ToolResult = ({ messageContent }: { messageContent: ToolResultBlock }) => 
   if (messageContent.type !== "tool_result") return null;
 
   const toolName = toolMeta?.name ?? "Tool";
+
+  // Suppress rendering for WorkflowPlan tool results (just "plan registered" text)
+  if (toolName.includes("WorkflowPlan")) return null;
   const toolInfo = toolMeta?.info;
   const editData = toolMeta?.editData;
   const writeData = toolMeta?.writeData;
@@ -408,21 +410,32 @@ const AssistantTextBlock = ({ text, showIndicator = false }: { text: string; sho
   </div>
 );
 
-/* ── Workflow Block ── */
-const WorkflowAssistantBlock = ({ text, showIndicator = false }: { text: string; showIndicator?: boolean }) => {
-  const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const session = useAppStore((s) => activeSessionId ? s.sessions[activeSessionId] : undefined);
-  const preText = useMemo(() => extractPreWorkflowText(text), [text]);
-  const steps = session?.steps ?? [];
-  const outputFiles = session?.outputFiles ?? [];
-  const verifiers = session?.verificationCriteria ?? [];
+/* ── WorkflowPlan Tool Use Card ── */
+const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AssistantContentBlock }) => {
+  if (messageContent.type !== "tool_use") return null;
+
+  const setToolMeta = useAppStore((s) => s.setToolMeta);
+  const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
+
+  const input = messageContent.input as { steps?: Array<{ description: string; outputFiles: string[]; verifiers: string[] }> } | null;
+  const steps = input?.steps ?? [];
+
+  useEffect(() => {
+    if (messageContent.id) {
+      setToolMeta(messageContent.id, { name: "WorkflowPlan", info: null });
+      storeSetToolStatus(messageContent.id, "success");
+    }
+  }, [messageContent.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (steps.length === 0) return null;
 
   return (
     <div className="mt-4">
-      {preText && <MessageResponse isAnimating={showIndicator} caret="block">{preText}</MessageResponse>}
-      {steps.length > 0 && (
-        <WorkflowCard steps={steps} outputFiles={outputFiles} verifiers={verifiers} />
-      )}
+      <WorkflowCard
+        steps={steps.map((s) => s.description)}
+        outputFiles={steps.map((s) => s.outputFiles)}
+        verifiers={steps.map((s) => s.verifiers)}
+      />
     </div>
   );
 };
@@ -624,14 +637,14 @@ export function MessageCard({
             return <ThinkingBlock key={idx} text={content.thinking} isStreaming={isLastContent && showIndicator} />;
           }
           if (content.type === "text") {
-            if (hasWorkflowPattern(content.text)) {
-              return <WorkflowAssistantBlock key={idx} text={content.text} showIndicator={isLastContent && showIndicator} />;
-            }
             return <AssistantTextBlock key={idx} text={content.text} showIndicator={isLastContent && showIndicator} />;
           }
           if (content.type === "tool_use") {
             if (content.name === "AskUserQuestion") {
               return <AskUserQuestionCard key={idx} messageContent={content} permissionRequest={permissionRequest} onPermissionResult={onPermissionResult} />;
+            }
+            if (content.name.includes("WorkflowPlan")) {
+              return <WorkflowPlanToolUseCard key={idx} messageContent={content} />;
             }
             return <ToolUseCard key={idx} messageContent={content} />;
           }

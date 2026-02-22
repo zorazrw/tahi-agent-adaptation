@@ -55,6 +55,7 @@
 		"tailwindcss": "^4.1.18",
 		"vite-tsconfig-paths": "^6.0.3",
 		"xlsx": "^0.18.5",
+		"zod": "^4.0.0",
 		"zustand": "^5.0.10"
 	},
 	"devDependencies": {

@@ -29,6 +29,7 @@ interface AppState {
   sessions: Record<string, SessionView>;
   activeSessionId: string | null;
   selectedStepIndex: number;
+  previewStepIndex: number;
   prompt: string;
   cwd: string;
   pendingStart: boolean;
@@ -47,6 +48,7 @@ interface AppState {
   setShowSettingsModal: (show: boolean) => void;
   setActiveSessionId: (id: string | null) => void;
   setSelectedStepIndex: (index: number) => void;
+  setPreviewStepIndex: (index: number) => void;
   setApiConfigChecked: (checked: boolean) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
@@ -71,6 +73,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessions: {},
   activeSessionId: null,
   selectedStepIndex: 0,
+  previewStepIndex: 0,
   prompt: "",
   cwd: "",
   pendingStart: false,
@@ -87,8 +90,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setGlobalError: (globalError) => set({ globalError }),
   setShowStartModal: (showStartModal) => set({ showStartModal }),
   setShowSettingsModal: (showSettingsModal) => set({ showSettingsModal }),
-  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0 }),
-  setSelectedStepIndex: (index) => set({ selectedStepIndex: index }),
+  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0, previewStepIndex: 0 }),
+  setSelectedStepIndex: (index) => set({ selectedStepIndex: index, previewStepIndex: index }),
+  setPreviewStepIndex: (index) => set({ previewStepIndex: index }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
 
   toolStatuses: {},
@@ -332,10 +336,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           const completed = existing.completedStepIndices ?? [];
           if (completed.includes(stepIndex)) return {};
           const nextCompleted = [...completed, stepIndex].sort((a, b) => a - b);
-          // Auto-advance preview to the next step (or stay on last if all done)
+          const isActive = sessionId === state.activeSessionId;
           const nextStepIndex = Math.min(stepIndex + 1, (existing.steps?.length ?? 1) - 1);
           return {
-            selectedStepIndex: sessionId === state.activeSessionId ? nextStepIndex : state.selectedStepIndex,
+            selectedStepIndex: isActive ? nextStepIndex : state.selectedStepIndex,
+            previewStepIndex: isActive ? stepIndex : state.previewStepIndex,
             sessions: {
               ...state.sessions,
               [sessionId]: { ...existing, completedStepIndices: nextCompleted }
@@ -399,6 +404,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       case "stream.message": {
         const { sessionId, message } = event.payload;
+        // Skip intermediate stream events (content_block_delta, etc.)
+        // These are handled by partial message state in App.tsx
+        if ((message as any).type === "stream_event") break;
+
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
