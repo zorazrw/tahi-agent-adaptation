@@ -55,7 +55,7 @@ export function ImageRenderer({ data }: { data: { kind: "image"; dataUrl: string
   const zoomOut = () => setScale((s) => clampScale(s - ZOOM_STEP));
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex-1 flex flex-col min-h-0">
       {/* Toolbar */}
       <div className="shrink-0 flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2">
         <button

@@ -116,13 +116,13 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
   const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
 
   return (
-    <div className="rounded-lg border border-ink-900/10 bg-surface-secondary overflow-hidden">
+    <div className="flex-1 flex flex-col rounded-lg border border-ink-900/10 bg-surface-secondary overflow-hidden">
       <div className="px-3 py-2 border-b border-ink-900/10">
         <span className="text-xs font-medium text-muted-foreground truncate block" title={filePath}>
           {filePath}
         </span>
       </div>
-      <div className="px-3 py-2">
+      <div className="flex-1 flex flex-col px-3 py-2">
         {loading && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">

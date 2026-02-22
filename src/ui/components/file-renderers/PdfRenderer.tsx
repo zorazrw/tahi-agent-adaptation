@@ -79,7 +79,7 @@ export function PdfRenderer({ data }: { data: { kind: "pdf"; data: string } }) {
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex-1 flex flex-col min-h-0">
       {/* Toolbar */}
       <div className="shrink-0 flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2">
         {/* Page navigation */}

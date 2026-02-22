@@ -528,6 +528,7 @@ function App() {
             <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
               <PreviewPanelHeader />
               <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4">
+                <div className="flex flex-col min-h-full">
                 <ErrorBoundary>
                   <FilePreview
                     filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
@@ -535,6 +536,7 @@ function App() {
                     stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
                   />
                 </ErrorBoundary>
+                </div>
               </div>
             </div>
           )}
