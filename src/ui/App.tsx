@@ -9,6 +9,8 @@ import { StartSessionModal } from "./components/StartSessionModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { PromptInput, usePromptActions } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
+import { TaskToolCard } from "./components/TaskToolCard";
+import { useGroupedMessages } from "./hooks/useGroupedMessages";
 import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
 import { PreviewPanelHeader } from "./components/PreviewPanelHeader";
 import { MessageResponse } from "../components/ai-elements/message";
@@ -122,6 +124,8 @@ function App() {
     resetToLatest,
     totalMessages,
   } = useMessageWindow(messages, permissionRequests, activeSessionId);
+
+  const groupedItems = useGroupedMessages(visibleMessages);
 
   // Check API configuration on startup
   useEffect(() => {
@@ -441,8 +445,24 @@ function App() {
                     <p className="mt-2 text-sm text-muted-foreground">Start a conversation with agent cowork</p>
                   </div>
                 ) : (
-                  visibleMessages.map((item, idx) => {
-                    // Animate only truly new messages, once
+                  groupedItems.map((item, idx) => {
+                    if (item.kind === "task_group") {
+                      const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.parentMessageIndex) && item.parentMessageIndex >= prevMessagesLengthRef.current - 1;
+                      if (shouldAnimate) animatedIndicesRef.current.add(item.parentMessageIndex);
+                      return (
+                        <div key={`${activeSessionId}-task-${item.taskToolUseId}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
+                          <ErrorBoundary>
+                            <TaskToolCard
+                              group={item}
+                              isRunning={isRunning}
+                              permissionRequest={permissionRequests[0]}
+                              onPermissionResult={handlePermissionResult}
+                            />
+                          </ErrorBoundary>
+                        </div>
+                      );
+                    }
+                    // kind: "message"
                     const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.originalIndex) && item.originalIndex >= prevMessagesLengthRef.current - 1;
                     if (shouldAnimate) animatedIndicesRef.current.add(item.originalIndex);
                     return (
@@ -450,10 +470,11 @@ function App() {
                         <ErrorBoundary>
                           <MessageCard
                             message={item.message}
-                            isLast={idx === visibleMessages.length - 1}
+                            isLast={idx === groupedItems.length - 1}
                             isRunning={isRunning}
                             permissionRequest={permissionRequests[0]}
                             onPermissionResult={handlePermissionResult}
+                            skipTaskToolUse
                           />
                         </ErrorBoundary>
                       </div>

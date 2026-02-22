@@ -594,13 +594,15 @@ export function MessageCard({
   isLast = false,
   isRunning = false,
   permissionRequest,
-  onPermissionResult
+  onPermissionResult,
+  skipTaskToolUse = false,
 }: {
   message: StreamMessage;
   isLast?: boolean;
   isRunning?: boolean;
   permissionRequest?: PermissionRequest;
   onPermissionResult?: (toolUseId: string, result: PermissionResult) => void;
+  skipTaskToolUse?: boolean;
 }) {
   const showIndicator = isLast && isRunning;
 
@@ -633,7 +635,13 @@ export function MessageCard({
   }
 
   if (sdkMessage.type === "assistant") {
-    const contents = sdkMessage.message.content;
+    let contents = sdkMessage.message.content;
+    if (skipTaskToolUse) {
+      contents = contents.filter(
+        (block: AssistantContentBlock) => !(block.type === "tool_use" && block.name === "Task")
+      );
+      if (contents.length === 0) return null;
+    }
     return (
       <>
         {contents.map((content: AssistantContentBlock, idx: number) => {
