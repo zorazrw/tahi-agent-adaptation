@@ -5,7 +5,13 @@ export type UserPromptMessage = {
   prompt: string;
 };
 
-export type StreamMessage = SDKMessage | UserPromptMessage;
+export type StepCompletedMessage = {
+  type: "step_completed";
+  stepIndex: number;
+  stepLabel: string;
+};
+
+export type StreamMessage = SDKMessage | UserPromptMessage | StepCompletedMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ServerEvent, SessionStatus, StreamMessage, VerifierMark } from "../types";
+import type { ServerEvent, SessionStatus, StreamMessage, StepCompletedMessage, VerifierMark } from "../types";
 
 export type PermissionRequest = {
   toolUseId: string;
@@ -30,6 +30,7 @@ interface AppState {
   activeSessionId: string | null;
   selectedStepIndex: number;
   previewStepIndex: number;
+  previewPanelOpen: boolean;
   prompt: string;
   cwd: string;
   pendingStart: boolean;
@@ -49,6 +50,7 @@ interface AppState {
   setActiveSessionId: (id: string | null) => void;
   setSelectedStepIndex: (index: number) => void;
   setPreviewStepIndex: (index: number) => void;
+  setPreviewPanelOpen: (open: boolean) => void;
   setApiConfigChecked: (checked: boolean) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
@@ -74,6 +76,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeSessionId: null,
   selectedStepIndex: 0,
   previewStepIndex: 0,
+  previewPanelOpen: false,
   prompt: "",
   cwd: "",
   pendingStart: false,
@@ -90,9 +93,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   setGlobalError: (globalError) => set({ globalError }),
   setShowStartModal: (showStartModal) => set({ showStartModal }),
   setShowSettingsModal: (showSettingsModal) => set({ showSettingsModal }),
-  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0, previewStepIndex: 0 }),
+  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0, previewStepIndex: 0, previewPanelOpen: false }),
   setSelectedStepIndex: (index) => set({ selectedStepIndex: index, previewStepIndex: index }),
   setPreviewStepIndex: (index) => set({ previewStepIndex: index }),
+  setPreviewPanelOpen: (previewPanelOpen) => set({ previewPanelOpen }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
 
   toolStatuses: {},
@@ -338,12 +342,21 @@ export const useAppStore = create<AppState>((set, get) => ({
           const nextCompleted = [...completed, stepIndex].sort((a, b) => a - b);
           const isActive = sessionId === state.activeSessionId;
           const nextStepIndex = Math.min(stepIndex + 1, (existing.steps?.length ?? 1) - 1);
+          const stepLabel = existing.steps?.[stepIndex] ?? `Step ${stepIndex + 1}`;
+          const hasOutputFiles = (existing.outputFiles?.[stepIndex]?.length ?? 0) > 0;
+
+          // Inject synthetic step_completed message into chat
+          const syntheticMsg: StepCompletedMessage = { type: "step_completed", stepIndex, stepLabel };
+          const nextMessages = [...existing.messages, syntheticMsg];
+
           return {
             selectedStepIndex: isActive ? nextStepIndex : state.selectedStepIndex,
             previewStepIndex: isActive ? stepIndex : state.previewStepIndex,
+            // Auto-open preview panel when step has output files
+            previewPanelOpen: isActive && hasOutputFiles ? true : state.previewPanelOpen,
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, completedStepIndices: nextCompleted }
+              [sessionId]: { ...existing, completedStepIndices: nextCompleted, messages: nextMessages }
             }
           };
         });

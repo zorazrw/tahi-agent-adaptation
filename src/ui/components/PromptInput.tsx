@@ -11,6 +11,7 @@ interface PromptInputProps {
   sendEvent: (event: ClientEvent) => void;
   onSendMessage?: () => void;
   disabled?: boolean;
+  rightOffset?: string;
 }
 
 export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
@@ -69,7 +70,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   return { prompt, setPrompt, isRunning, handleSend, handleStop, handleStartFromModal };
 }
 
-export function PromptInput({ sendEvent, onSendMessage, disabled = false }: PromptInputProps) {
+export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightOffset }: PromptInputProps) {
   const { prompt, setPrompt, isRunning, handleSend, handleStop } = usePromptActions(sendEvent);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -119,8 +120,8 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false }: Prom
   }, [prompt]);
 
   return (
-    <section className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 px-2 lg:pb-8 pt-8 lg:ml-[var(--sidebar-width)]">
-      <div className="mx-auto flex w-full max-w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-surface px-4 py-3 shadow-card lg:max-w-3xl transition-[border-color,box-shadow] duration-150 ease-out focus-within:border-ink-900/25 focus-within:shadow-[0_4px_16px_rgba(0,0,0,0.08),0_0_0_3px_rgba(217,119,87,0.08)]">
+    <section className={`fixed bottom-0 left-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 lg:pb-8 pt-8 lg:ml-[var(--sidebar-width)] ${rightOffset ? "px-4" : "px-2"}`} style={{ right: rightOffset ?? 0 }}>
+      <div className={`mx-auto flex w-full max-w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-surface px-4 py-3 shadow-card transition-[border-color,box-shadow] duration-150 ease-out focus-within:border-ink-900/25 focus-within:shadow-[0_4px_16px_rgba(0,0,0,0.08),0_0_0_3px_rgba(217,119,87,0.08)] ${rightOffset ? "" : "lg:max-w-3xl"}`}>
         <textarea
           rows={1}
           className="flex-1 resize-none bg-transparent py-1.5 text-sm text-ink-800 placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"

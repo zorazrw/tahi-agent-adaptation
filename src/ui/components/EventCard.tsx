@@ -6,11 +6,12 @@ import type {
   SDKResultMessage,
   SDKUserMessage
 } from "@anthropic-ai/claude-agent-sdk";
-import type { StreamMessage } from "../types";
+import type { StreamMessage, StepCompletedMessage } from "../types";
 import { useAppStore } from "../store/useAppStore";
 import type { PermissionRequest } from "../store/useAppStore";
 import { DecisionPanel } from "./DecisionPanel";
 import { WorkflowCard } from "./WorkflowCard";
+import { StepOutputSnippet } from "./StepOutputSnippet";
 
 // ai-elements
 import { MessageResponse } from "../../components/ai-elements/message";
@@ -605,6 +606,10 @@ export function MessageCard({
 
   if (message.type === "user_prompt") {
     return <UserMessageCard message={message} />;
+  }
+
+  if (message.type === "step_completed") {
+    return <StepOutputSnippet message={message as StepCompletedMessage} />;
   }
 
   const sdkMessage = message as SDKMessage;

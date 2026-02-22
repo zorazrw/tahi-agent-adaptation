@@ -22,7 +22,7 @@ const PREVIEW_EXTENSIONS = [
   ".r", ".lua", ".dart", ".scala", ".ex", ".exs", ".hs", ".ml",
 ];
 
-function pathHasPreviewExt(path: string): boolean {
+export function pathHasPreviewExt(path: string): boolean {
   const lower = path.toLowerCase();
   return PREVIEW_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
@@ -116,13 +116,13 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
   const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
 
   return (
-    <div className="flex flex-col h-full min-h-0 rounded-lg border border-ink-900/10 bg-surface-secondary">
-      <div className="shrink-0 px-3 py-2 border-b border-ink-900/10">
+    <div className="rounded-lg border border-ink-900/10 bg-surface-secondary overflow-hidden">
+      <div className="px-3 py-2 border-b border-ink-900/10">
         <span className="text-xs font-medium text-muted-foreground truncate block" title={filePath}>
           {filePath}
         </span>
       </div>
-      <div className="flex-1 min-h-0 overflow-auto px-3 py-2">
+      <div className="px-3 py-2">
         {loading && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">

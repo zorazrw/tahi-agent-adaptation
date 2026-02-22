@@ -18,26 +18,24 @@ export function MarkdownRenderer({ data }: { data: { kind: "md"; content: string
   }, [mode, data.content]);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
-      <div className="shrink-0 flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2">
+    <div>
+      <div className="flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2">
         <ViewToggle mode={mode} onChange={setMode} />
         <span className="text-xs text-muted-foreground">Markdown</span>
       </div>
-      <div className="flex-1 min-h-0 overflow-auto">
-        {mode === "preview" ? (
-          <div className="md-prose max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight, rehypeRaw]}>
-              {data.content}
-            </ReactMarkdown>
-          </div>
-        ) : (
-          <pre className="text-sm overflow-auto">
-            <code ref={codeRef} className="language-markdown">
-              {data.content}
-            </code>
-          </pre>
-        )}
-      </div>
+      {mode === "preview" ? (
+        <div className="md-prose">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight, rehypeRaw]}>
+            {data.content}
+          </ReactMarkdown>
+        </div>
+      ) : (
+        <pre className="text-sm overflow-x-auto">
+          <code ref={codeRef} className="language-markdown">
+            {data.content}
+          </code>
+        </pre>
+      )}
     </div>
   );
 }

@@ -3,15 +3,17 @@ import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
-import type { ServerEvent } from "./types";
+import type { ServerEvent, StreamMessage } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { StartSessionModal } from "./components/StartSessionModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { PromptInput, usePromptActions } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
+import { PreviewPanelHeader } from "./components/PreviewPanelHeader";
 import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PanelRightOpenIcon, PanelRightCloseIcon } from "lucide-react";
 
 const SCROLL_THRESHOLD = 50;
 
@@ -24,7 +26,7 @@ function App() {
   const [showPartialMessage, setShowPartialMessage] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [hasNewMessages, setHasNewMessages] = useState(false);
-  const [splitPercent, setSplitPercent] = useState(66); // file preview takes 66% by default
+  const [previewWidthPct, setPreviewWidthPct] = useState(45);
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const prevMessagesLengthRef = useRef(0);
@@ -52,6 +54,8 @@ function App() {
   const apiConfigChecked = useAppStore((s) => s.apiConfigChecked);
   const setApiConfigChecked = useAppStore((s) => s.setApiConfigChecked);
   const previewStepIndex = useAppStore((s) => s.previewStepIndex);
+  const previewPanelOpen = useAppStore((s) => s.previewPanelOpen);
+  const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
 
   // Helper function to extract partial message content
   const getPartialMessageContent = (eventMessage: any) => {
@@ -81,8 +85,6 @@ function App() {
     }
 
     if (message.event.type === "content_block_stop") {
-      // Clear immediately — the finalized message will be appended to the
-      // store by the next non-stream_event SDK message, so there's no gap.
       setShowPartialMessage(false);
       partialMessageRef.current = "";
       setPartialMessage("");
@@ -102,6 +104,15 @@ function App() {
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
+
+  // Determine if any step has output files (for toggle button visibility)
+  const hasAnyPreviewFiles = useMemo(() => {
+    const outputFiles = activeSession?.outputFiles;
+    if (!outputFiles) return false;
+    return outputFiles.some((files) => files?.length > 0);
+  }, [activeSession?.outputFiles]);
+
+  const showPreviewPanel = previewPanelOpen && hasAnyPreviewFiles;
 
   const {
     visibleMessages,
@@ -253,6 +264,7 @@ function App() {
     resetToLatest();
   }, [resetToLatest]);
 
+  // Horizontal drag handler for resizing chat / preview columns
   const handleSplitMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDraggingRef.current = true;
@@ -262,9 +274,10 @@ function App() {
     const onMouseMove = (ev: MouseEvent) => {
       if (!isDraggingRef.current) return;
       const rect = container.getBoundingClientRect();
-      const y = ev.clientY - rect.top;
-      const pct = Math.min(85, Math.max(15, (y / rect.height) * 100));
-      setSplitPercent(pct);
+      const x = ev.clientX - rect.left;
+      // Preview is on the right, so previewWidthPct = 100 - chatPct
+      const chatPct = Math.min(85, Math.max(30, (x / rect.width) * 100));
+      setPreviewWidthPct(100 - chatPct);
     };
     const onMouseUp = () => {
       isDraggingRef.current = false;
@@ -273,7 +286,7 @@ function App() {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
-    document.body.style.cursor = "row-resize";
+    document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
@@ -283,14 +296,16 @@ function App() {
 
   // Filter to only high-level messages (skip raw stream events)
   const transcriptMessages = useMemo(() => {
-    const validTypes = new Set(["user_prompt", "assistant", "user", "system", "result"]);
+    const validTypes = new Set(["user_prompt", "assistant", "user", "system", "result", "step_completed"]);
     return messages.filter((m) => validTypes.has(m.type));
   }, [messages]);
 
-  const messagesToMarkdown = useCallback((msgs: typeof transcriptMessages) => {
+  const messagesToMarkdown = useCallback((msgs: StreamMessage[]) => {
     const lines: string[] = [];
     for (const msg of msgs) {
-      if (msg.type === "user_prompt") {
+      if (msg.type === "step_completed") {
+        lines.push(`---\n**Step ${msg.stepIndex + 1} completed:** ${msg.stepLabel}\n`);
+      } else if (msg.type === "user_prompt") {
         lines.push(`## User\n\n${msg.prompt}\n`);
       } else if (msg.type === "assistant") {
         for (const block of (msg as any).message.content) {
@@ -329,12 +344,42 @@ function App() {
         onDeleteSession={handleDeleteSession}
       />
 
-      <main className="flex flex-1 flex-col ml-[var(--sidebar-width)] min-h-0 bg-surface-cream" style={{ marginRight: 0 }}>
+      <main className="flex flex-1 flex-col ml-[var(--sidebar-width)] min-h-0 overflow-hidden bg-surface-cream">
         <div
-          className="flex shrink-0 items-center justify-center h-12 border-b border-ink-900/10 bg-surface-cream select-none"
+          className="flex shrink-0 items-center justify-between h-12 px-4 border-b border-ink-900/10 bg-surface-cream select-none"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
           <span className="text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
+          {activeSession && (
+            <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+              {copyFeedback ? (
+                <span className="text-xs text-success px-2 py-0.5">Copied {copyFeedback}!</span>
+              ) : (
+                <>
+                  <button onClick={() => handleCopyTranscript("markdown")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as Markdown">
+                    Copy MD
+                  </button>
+                  <button onClick={() => handleCopyTranscript("json")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as JSON">
+                    Copy JSON
+                  </button>
+                </>
+              )}
+              {hasAnyPreviewFiles && (
+                <button
+                  onClick={() => setPreviewPanelOpen(!previewPanelOpen)}
+                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
+                  title={previewPanelOpen ? "Close preview" : "Open preview"}
+                >
+                  {previewPanelOpen ? (
+                    <PanelRightCloseIcon className="size-3.5" />
+                  ) : (
+                    <PanelRightOpenIcon className="size-3.5" />
+                  )}
+                  Preview
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {!activeSession ? (
@@ -356,124 +401,122 @@ function App() {
             </button>
           </div>
         ) : (
-        <div ref={splitContainerRef} className="flex flex-1 flex-col min-h-0">
-        {/* Top: file preview (file from Files section for selected workflow step) */}
-        <div className="min-h-0 flex flex-col p-4 bg-surface-cream" style={{ height: `${splitPercent}%` }}>
-          <ErrorBoundary>
-            <FilePreview
-              filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
-              cwd={activeSession?.cwd}
-              stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
-            />
-          </ErrorBoundary>
-        </div>
+        <div ref={splitContainerRef} className="flex flex-1 flex-row min-h-0 overflow-hidden">
+          {/* Left column: chat */}
+          <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${100 - previewWidthPct} 1 0px` }}>
+            {/* Messages */}
+            <div
+              ref={scrollContainerRef}
+              onScroll={handleScroll}
+              className="flex-1 min-h-0 overflow-y-auto pb-4 pt-4 px-8"
+            >
+              <div className="mx-auto max-w-3xl">
+                <div ref={topSentinelRef} className="h-1" />
 
-        {/* Drag handle */}
-        <div
-          onMouseDown={handleSplitMouseDown}
-          className="shrink-0 h-3 cursor-row-resize relative group flex items-center justify-center border-t border-b border-ink-900/8 hover:border-ink-900/15 hover:bg-primary/5 transition-all duration-150"
-        >
-          <div className="h-[3px] w-12 rounded-full bg-ink-900/20 group-hover:bg-primary/40 group-active:bg-primary/50 transition-colors duration-150" />
-        </div>
-
-        {/* Bottom: chat (messages + prompt) */}
-        <div className="min-h-0 flex flex-col bg-surface-cream" style={{ height: `${100 - splitPercent}%` }}>
-          {/* Chat toolbar */}
-          <div className="shrink-0 flex items-center justify-end gap-1 px-4 py-1 border-b border-ink-900/10">
-            {copyFeedback ? (
-              <span className="text-xs text-success px-2 py-0.5">Copied {copyFeedback}!</span>
-            ) : (
-              <>
-                <button onClick={() => handleCopyTranscript("markdown")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as Markdown">
-                  Copy MD
-                </button>
-                <button onClick={() => handleCopyTranscript("json")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as JSON">
-                  Copy JSON
-                </button>
-              </>
-            )}
-          </div>
-          <div
-            ref={scrollContainerRef}
-            onScroll={handleScroll}
-            className="flex-1 min-h-0 overflow-y-auto border-b border-ink-900/10 px-8 pb-4 pt-4"
-          >
-          <div className="mx-auto max-w-3xl">
-            <div ref={topSentinelRef} className="h-1" />
-
-            {!hasMoreHistory && totalMessages > 0 && (
-              <div className="flex items-center justify-center py-2 mb-2">
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <div className="h-px w-12 bg-ink-900/10" />
-                  <span>Beginning of conversation</span>
-                  <div className="h-px w-12 bg-ink-900/10" />
-                </div>
-              </div>
-            )}
-
-            {isLoadingHistory && (
-              <div className="flex items-center justify-center py-2 mb-2">
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                  </svg>
-                  <span>Loading...</span>
-                </div>
-              </div>
-            )}
-
-            {visibleMessages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-8 text-center">
-                <div className="text-lg font-medium text-ink-700">No messages yet</div>
-                <p className="mt-2 text-sm text-muted-foreground">Start a conversation with agent cowork</p>
-              </div>
-            ) : (
-              visibleMessages.map((item, idx) => {
-                // Animate only truly new messages, once
-                const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.originalIndex) && item.originalIndex >= prevMessagesLengthRef.current - 1;
-                if (shouldAnimate) animatedIndicesRef.current.add(item.originalIndex);
-                return (
-                  <div key={`${activeSessionId}-msg-${item.originalIndex}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
-                    <ErrorBoundary>
-                      <MessageCard
-                        message={item.message}
-                        isLast={idx === visibleMessages.length - 1}
-                        isRunning={isRunning}
-                        permissionRequest={permissionRequests[0]}
-                        onPermissionResult={handlePermissionResult}
-                      />
-                    </ErrorBoundary>
+                {!hasMoreHistory && totalMessages > 0 && (
+                  <div className="flex items-center justify-center py-2 mb-2">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <div className="h-px w-12 bg-ink-900/10" />
+                      <span>Beginning of conversation</span>
+                      <div className="h-px w-12 bg-ink-900/10" />
+                    </div>
                   </div>
-                );
-              })
-            )}
+                )}
 
-            {/* Partial message display */}
-            <div className="partial-message">
-              {showPartialMessage && !partialMessage.trim() ? (
-                <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
-                  <span className="inline-grid grid-cols-2 gap-0.5 opacity-40">
-                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" />
-                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "150ms" }} />
-                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "300ms" }} />
-                    <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "450ms" }} />
-                  </span>
-                  <span>Thinking...</span>
+                {isLoadingHistory && (
+                  <div className="flex items-center justify-center py-2 mb-2">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      <span>Loading...</span>
+                    </div>
+                  </div>
+                )}
+
+                {visibleMessages.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 text-center">
+                    <div className="text-lg font-medium text-ink-700">No messages yet</div>
+                    <p className="mt-2 text-sm text-muted-foreground">Start a conversation with agent cowork</p>
+                  </div>
+                ) : (
+                  visibleMessages.map((item, idx) => {
+                    // Animate only truly new messages, once
+                    const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.originalIndex) && item.originalIndex >= prevMessagesLengthRef.current - 1;
+                    if (shouldAnimate) animatedIndicesRef.current.add(item.originalIndex);
+                    return (
+                      <div key={`${activeSessionId}-msg-${item.originalIndex}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
+                        <ErrorBoundary>
+                          <MessageCard
+                            message={item.message}
+                            isLast={idx === visibleMessages.length - 1}
+                            isRunning={isRunning}
+                            permissionRequest={permissionRequests[0]}
+                            onPermissionResult={handlePermissionResult}
+                          />
+                        </ErrorBoundary>
+                      </div>
+                    );
+                  })
+                )}
+
+                {/* Partial message display */}
+                <div className="partial-message">
+                  {showPartialMessage && !partialMessage.trim() ? (
+                    <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+                      <span className="inline-grid grid-cols-2 gap-0.5 opacity-40">
+                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" />
+                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "150ms" }} />
+                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "300ms" }} />
+                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "450ms" }} />
+                      </span>
+                      <span>Thinking...</span>
+                    </div>
+                  ) : (
+                    <MessageResponse isAnimating={showPartialMessage} caret="block">{partialMessage}</MessageResponse>
+                  )}
                 </div>
-              ) : (
-                <MessageResponse isAnimating={showPartialMessage} caret="block">{partialMessage}</MessageResponse>
-              )}
+
+                <div ref={messagesEndRef} />
+              </div>
             </div>
 
-            <div ref={messagesEndRef} />
+            {/* Spacer for fixed PromptInput */}
+            <div className="h-24 shrink-0 lg:h-28" aria-hidden />
+            <PromptInput
+              sendEvent={sendEvent}
+              onSendMessage={handleSendMessage}
+              disabled={visibleMessages.length === 0}
+              rightOffset={showPreviewPanel ? `calc(${previewWidthPct}% - var(--sidebar-width) * ${previewWidthPct} / 100 + 12px)` : undefined}
+            />
           </div>
-        </div>
 
-          {/* Spacer so chat region lower boundary sits on top of query region; PromptInput is fixed and overlays this */}
-          <div className="h-24 shrink-0 lg:h-28" aria-hidden />
-          <PromptInput sendEvent={sendEvent} onSendMessage={handleSendMessage} disabled={visibleMessages.length === 0} />
-        </div>
+          {/* Vertical drag handle (only when preview panel is open) */}
+          {showPreviewPanel && (
+            <div
+              onMouseDown={handleSplitMouseDown}
+              className="shrink-0 w-3 cursor-col-resize relative group flex items-center justify-center border-l border-r border-ink-900/8 hover:border-ink-900/15 hover:bg-primary/5 transition-all duration-150"
+            >
+              <div className="w-[3px] h-12 rounded-full bg-ink-900/20 group-hover:bg-primary/40 group-active:bg-primary/50 transition-colors duration-150" />
+            </div>
+          )}
+
+          {/* Right column: preview panel (only when open) */}
+          {showPreviewPanel && (
+            <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
+              <PreviewPanelHeader />
+              <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4">
+                <ErrorBoundary>
+                  <FilePreview
+                    filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
+                    cwd={activeSession?.cwd}
+                    stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
+                  />
+                </ErrorBoundary>
+              </div>
+            </div>
+          )}
         </div>
         )}
 
@@ -505,7 +548,6 @@ function App() {
       {showSettingsModal && (
         <SettingsModal onClose={() => setShowSettingsModal(false)} />
       )}
-
 
       {globalError && (
         <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-xl border border-error/20 bg-error-light px-4 py-3 shadow-lg">

@@ -221,6 +221,8 @@ code, pre, textarea.mono, input.mono {
   color: var(--color-ink-900);
   line-height: 1.7;
   font-size: 0.9375rem;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 .md-prose > *:first-child { margin-top: 0; }
 .md-prose > *:last-child { margin-bottom: 0; }
