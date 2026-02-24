@@ -13,7 +13,7 @@ import { VideoRenderer } from "./VideoRenderer";
 import { AudioRenderer } from "./AudioRenderer";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type RendererComponent = ComponentType<{ data: any }>;
+type RendererComponent = ComponentType<{ data: any; zoom?: number }>;
 
 const renderers: Record<string, RendererComponent> = {
   txt: TextRenderer,

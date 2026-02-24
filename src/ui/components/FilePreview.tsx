@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
 import { getRenderer } from "./file-renderers";
+import { ZoomControls } from "./file-renderers/DocxRenderer";
 
 const FILE_TOOL_NAMES = new Set(["Read", "Write", "Edit"]);
 const PREVIEW_EXTENSIONS = [
@@ -59,8 +60,8 @@ export function getPreviewFileForStep(
 
 type PreviewFileResult =
   | { kind: "txt"; content: string }
-  | { kind: "xlsx"; data: unknown[][] }
-  | { kind: "docx"; html: string }
+  | { kind: "xlsx"; sheets: { name: string; html: string }[] }
+  | { kind: "docx"; data: string }
   | { kind: "image"; dataUrl: string }
   | { kind: "pdf"; data: string }
   | { kind: "md"; content: string }
@@ -82,9 +83,14 @@ type FilePreviewProps = {
   stepCompleted?: boolean;
 };
 
+const ZOOM_STEP = 0.1;
+const ZOOM_MIN = 0.3;
+const ZOOM_MAX = 2.0;
+
 export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) {
   const [result, setResult] = useState<PreviewFileResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [zoom, setZoom] = useState(0.6);
 
   useEffect(() => {
     if (!filePath) {
@@ -114,15 +120,25 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
 
   const isNotFound = result && "error" in result && isFileNotFoundError(result.error);
   const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
+  const showZoom = result && "kind" in result && result.kind === "docx";
 
   return (
     <div className="flex-1 flex flex-col rounded-lg border border-ink-900/10 bg-surface-secondary overflow-hidden">
-      <div className="px-3 py-2 border-b border-ink-900/10">
-        <span className="text-xs font-medium text-muted-foreground truncate block" title={filePath}>
+      <div className="px-3 py-1.5 border-b border-ink-900/10 flex items-center gap-2 shrink-0">
+        <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}
         </span>
+        {showZoom && (
+          <ZoomControls
+            zoom={zoom}
+            onZoomIn={() => setZoom((z) => Math.min(ZOOM_MAX, +(z + ZOOM_STEP).toFixed(1)))}
+            onZoomOut={() => setZoom((z) => Math.max(ZOOM_MIN, +(z - ZOOM_STEP).toFixed(1)))}
+            min={ZOOM_MIN}
+            max={ZOOM_MAX}
+          />
+        )}
       </div>
-      <div className="flex-1 flex flex-col px-3 py-2">
+      <div className="flex-1 flex flex-col min-h-0 px-3 py-2">
         {loading && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -144,7 +160,7 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
         {result && "error" in result && !isNotFound && !loading && (
           <p className="text-sm text-error">{result.error}</p>
         )}
-        {Renderer && !loading && <Renderer data={result} />}
+        {Renderer && !loading && <Renderer data={result} zoom={showZoom ? zoom : undefined} />}
       </div>
     </div>
   );

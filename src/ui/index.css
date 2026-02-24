@@ -422,6 +422,52 @@ code, pre, textarea.mono, input.mono {
 /* Images */
 .md-chat img { max-width: 100%; border-radius: 6px; margin: 0.75rem 0; }
 
+/* ── DOCX preview (docx-preview library output) ── */
+.docx-wrapper .docx-wrapper-document {
+  background: var(--color-surface) !important;
+  padding: 1rem !important;
+}
+.docx-wrapper table {
+  border-collapse: collapse;
+  width: auto;
+}
+.docx-wrapper td, .docx-wrapper th {
+  border: 1px solid var(--color-bg-400);
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+  color: var(--color-ink-700);
+}
+.docx-wrapper th {
+  font-weight: 600;
+  background: var(--color-bg-200);
+}
+.docx-wrapper p {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--color-ink-700);
+}
+
+/* ── Spreadsheet preview (xlsx sheet_to_html output) ── */
+.spreadsheet-preview table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.8125rem;
+  color: var(--color-ink-700);
+}
+.spreadsheet-preview td, .spreadsheet-preview th {
+  border: 1px solid var(--color-bg-400);
+  padding: 0.35rem 0.625rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.spreadsheet-preview tr:first-child td,
+.spreadsheet-preview tr:first-child th,
+.spreadsheet-preview thead th {
+  font-weight: 600;
+  background: var(--color-bg-200);
+  color: var(--color-ink-800);
+}
+
 /* ── Source view for markdown/html ── */
 .source-view {
   font-family: "Söhne Mono", ui-monospace, SFMono-Regular, Menlo, monospace;

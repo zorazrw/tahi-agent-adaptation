@@ -3,7 +3,7 @@ import { execSync } from "child_process";
 import { readFile } from "fs/promises";
 import { resolve, isAbsolute } from "path";
 import * as XLSX from "xlsx";
-import mammoth from "mammoth";
+
 import { ipcMainHandle, isDev, DEV_PORT } from "./util.js";
 import { getPreloadPath, getUIPath, getIconPath } from "./pathResolver.js";
 import { getStaticData, pollResources, stopPolling } from "./test.js";
@@ -83,6 +83,11 @@ app.on("ready", () => {
     globalShortcut.register('CommandOrControl+Q', () => {
         cleanup();
         app.quit();
+    });
+
+    // Enable DevTools via Cmd+Option+I
+    globalShortcut.register('CommandOrControl+Alt+I', () => {
+        mainWindow?.webContents.toggleDevTools();
     });
 
     pollResources(mainWindow);
@@ -238,17 +243,14 @@ app.on("ready", () => {
             }
             if (ext === ".xlsx" || ext === ".xls") {
                 const workbook = XLSX.read(buffer, { type: "buffer" });
-                const firstSheetName = workbook.SheetNames[0];
-                const worksheet = firstSheetName ? workbook.Sheets[firstSheetName] : null;
-                if (!worksheet) {
-                    return { error: "Workbook has no sheets" };
-                }
-                const data = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: "" });
-                return { kind: "xlsx", data };
+                const sheets = workbook.SheetNames.map((name) => ({
+                    name,
+                    html: XLSX.utils.sheet_to_html(workbook.Sheets[name]!),
+                }));
+                return { kind: "xlsx", sheets };
             }
             if (ext === ".docx") {
-                const result = await mammoth.convertToHtml({ buffer });
-                return { kind: "docx", html: result.value };
+                return { kind: "docx", data: buffer.toString("base64") };
             }
 
             return { error: "Unsupported file type" };

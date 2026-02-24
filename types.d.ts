@@ -14,8 +14,8 @@ type UnsubscribeFunction = () => void;
 
 type PreviewFileResult =
     | { kind: "txt"; content: string }
-    | { kind: "xlsx"; data: unknown[][] }
-    | { kind: "docx"; html: string }
+    | { kind: "xlsx"; sheets: { name: string; html: string }[] }
+    | { kind: "docx"; data: string }
     | { kind: "image"; dataUrl: string }
     | { kind: "pdf"; data: string }
     | { kind: "md"; content: string }

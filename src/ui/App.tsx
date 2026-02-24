@@ -536,8 +536,8 @@ function App() {
           {showPreviewPanel && (
             <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
               <PreviewPanelHeader />
-              <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4">
-                <div className="flex flex-col min-h-full">
+              <div className="flex-1 min-h-0 overflow-hidden p-4">
+                <div className="flex flex-col h-full">
                 <ErrorBoundary>
                   <FilePreview
                     filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
