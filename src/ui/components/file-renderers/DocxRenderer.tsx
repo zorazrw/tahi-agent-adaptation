@@ -73,7 +73,7 @@ export function DocxRenderer({ data, zoom }: { data: { kind: "docx"; data: strin
   }, [data.data]);
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto">
+    <div>
       {loading && (
         <div className="flex items-center gap-2 text-sm text-muted-foreground p-2">
           <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
