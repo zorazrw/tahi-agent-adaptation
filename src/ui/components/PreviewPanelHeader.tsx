@@ -1,4 +1,4 @@
-import { XIcon } from "lucide-react";
+import { FolderOpenIcon, XIcon } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { getPreviewFileForStep } from "./FilePreview";
 import {
@@ -19,6 +19,7 @@ export function PreviewPanelHeader() {
   const session = activeSessionId ? sessions[activeSessionId] : undefined;
   const steps = session?.steps ?? [];
   const outputFiles = session?.outputFiles;
+  const cwd = session?.cwd;
 
   // Only show steps that have output files
   const stepsWithFiles = steps
@@ -57,6 +58,17 @@ export function PreviewPanelHeader() {
         <span className="text-xs text-muted-foreground truncate ml-auto mr-2" title={currentFile}>
           {currentFile.split("/").pop()}
         </span>
+      )}
+
+      {currentFile && (
+        <button
+          onClick={() => window.electron.showItemInFolder(currentFile, cwd)}
+          className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors"
+          aria-label="Open in Finder"
+          title="Open in Finder"
+        >
+          <FolderOpenIcon className="size-4" />
+        </button>
       )}
 
       <button

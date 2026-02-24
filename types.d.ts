@@ -49,6 +49,7 @@ type EventPayloadMapping = {
     "remove-skill": { success: boolean; error?: string };
     "get-skill-content": { content: string } | { error: string };
     "get-skills-dir": string;
+    "show-item-in-folder": void;
 }
 
 interface Window {
@@ -69,5 +70,6 @@ interface Window {
         removeSkill: (dirName: string) => Promise<{ success: boolean; error?: string }>;
         getSkillContent: (path: string) => Promise<{ content: string } | { error: string }>;
         getSkillsDir: () => Promise<string>;
+        showItemInFolder: (filePath: string, cwd?: string | null) => Promise<void>;
     }
 }

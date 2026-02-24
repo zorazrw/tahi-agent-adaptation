@@ -44,7 +44,9 @@ electron.contextBridge.exposeInMainWorld("electron", {
     getSkillContent: (path: string) =>
         ipcInvoke("get-skill-content", path),
     getSkillsDir: () =>
-        ipcInvoke("get-skills-dir")
+        ipcInvoke("get-skills-dir"),
+    showItemInFolder: (filePath: string, cwd?: string | null) =>
+        ipcInvoke("show-item-in-folder", filePath, cwd ?? undefined),
 } satisfies Window['electron'])
 
 function ipcInvoke<Key extends keyof EventPayloadMapping>(key: Key, ...args: any[]): Promise<EventPayloadMapping[Key]> {

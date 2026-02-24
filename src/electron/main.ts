@@ -257,4 +257,14 @@ app.on("ready", () => {
             return { error: message };
         }
     });
+
+    ipcMainHandle("show-item-in-folder", async (_: any, filePath: string, cwd?: string | null) => {
+        try {
+            if (!filePath || typeof filePath !== "string") return;
+            const resolved = isAbsolute(filePath) ? filePath : resolve(cwd ?? process.cwd(), filePath);
+            shell.showItemInFolder(resolved);
+        } catch {
+            // silently ignore
+        }
+    });
 })
