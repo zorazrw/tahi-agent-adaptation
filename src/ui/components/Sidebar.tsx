@@ -25,6 +25,8 @@ export function Sidebar({
   const updateSessionVerificationCriteria = useAppStore((state) => state.updateSessionVerificationCriteria);
   const updateSessionVerifierMarks = useAppStore((state) => state.updateSessionVerifierMarks);
   const updateSessionTitle = useAppStore((state) => state.updateSessionTitle);
+  const runningStepIndex = useAppStore((state) => state.runningStepIndex);
+  const setRunningStepIndex = useAppStore((state) => state.setRunningStepIndex);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -432,6 +434,7 @@ export function Sidebar({
                 {progressSteps.map((label, i) => {
                   const isCompleted = activeSession?.completedStepIndices?.includes(i);
                   const isSelected = selectedStepIndex === i;
+                  const isRunning = runningStepIndex === i && activeSession?.status === "running";
                   return (
                     <div key={i} className="flex gap-2.5 min-w-0">
                       {/* Timeline column: dot + connector */}
@@ -442,13 +445,17 @@ export function Sidebar({
                           onClick={() => { setSelectedStepIndex(i); setEditingIndex(null); }}
                           aria-label={`Select step ${i + 1}`}
                         >
-                          <div className={`h-3 w-3 rounded-full border-2 transition-colors ${
-                            isCompleted
-                              ? "step-circle-completed"
-                              : isSelected
-                                ? "border-primary bg-primary/20"
-                                : "border-ink-900/25 bg-surface"
-                          }`} />
+                          {isRunning ? (
+                            <div className="h-3 w-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                          ) : (
+                            <div className={`h-3 w-3 rounded-full border-2 transition-colors ${
+                              isCompleted
+                                ? "step-circle-completed"
+                                : isSelected
+                                  ? "border-primary bg-primary/20"
+                                  : "border-ink-900/25 bg-surface"
+                            }`} />
+                          )}
                         </button>
                         {i < progressSteps.length - 1 && (
                           <div className="w-px flex-1 min-h-[12px] bg-ink-900/15 mt-0.5" />
@@ -522,21 +529,44 @@ export function Sidebar({
                 </svg>
                 <span>Add step</span>
               </button>
-              {progressSteps.length > 0 && activeSessionId && (
-                <button
-                  type="button"
-                  className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover transition-colors shadow-soft"
-                  onClick={() => {
-                    sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId, stepIndex: selectedStepIndex } });
-                  }}
-                  aria-label={`Run step ${selectedStepIndex + 1}`}
-                >
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="currentColor">
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
-                  <span>Run step {selectedStepIndex + 1}</span>
-                </button>
-              )}
+              {progressSteps.length > 0 && activeSessionId && (() => {
+                const isStepCompleted = activeSession?.completedStepIndices?.includes(selectedStepIndex);
+                const isSelectedStepRunning = runningStepIndex === selectedStepIndex && activeSession?.status === "running";
+                if (isSelectedStepRunning) {
+                  return (
+                    <div className="flex items-center justify-center gap-1.5 rounded-lg bg-ink-900/8 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
+                        <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
+                      </svg>
+                      <span>Running step {selectedStepIndex + 1}...</span>
+                    </div>
+                  );
+                }
+                return (
+                  <button
+                    type="button"
+                    className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover transition-colors shadow-soft"
+                    onClick={() => {
+                      setRunningStepIndex(selectedStepIndex);
+                      sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId, stepIndex: selectedStepIndex } });
+                    }}
+                    aria-label={`${isStepCompleted ? "Rerun" : "Run"} step ${selectedStepIndex + 1}`}
+                  >
+                    {isStepCompleted ? (
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="1 4 1 10 7 10" />
+                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="currentColor">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    )}
+                    <span>{isStepCompleted ? "Rerun" : "Run"} step {selectedStepIndex + 1}</span>
+                  </button>
+                );
+              })()}
             </div>
           </div>
         )}

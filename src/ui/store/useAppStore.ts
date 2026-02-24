@@ -31,6 +31,7 @@ interface AppState {
   selectedStepIndex: number;
   previewStepIndex: number;
   previewPanelOpen: boolean;
+  runningStepIndex: number | null;
   prompt: string;
   cwd: string;
   pendingStart: boolean;
@@ -51,6 +52,7 @@ interface AppState {
   setSelectedStepIndex: (index: number) => void;
   setPreviewStepIndex: (index: number) => void;
   setPreviewPanelOpen: (open: boolean) => void;
+  setRunningStepIndex: (index: number | null) => void;
   setApiConfigChecked: (checked: boolean) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
@@ -77,6 +79,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedStepIndex: 0,
   previewStepIndex: 0,
   previewPanelOpen: false,
+  runningStepIndex: null,
   prompt: "",
   cwd: "",
   pendingStart: false,
@@ -97,6 +100,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSelectedStepIndex: (index) => set({ selectedStepIndex: index, previewStepIndex: index }),
   setPreviewStepIndex: (index) => set({ previewStepIndex: index }),
   setPreviewPanelOpen: (previewPanelOpen) => set({ previewPanelOpen }),
+  setRunningStepIndex: (runningStepIndex) => set({ runningStepIndex }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
 
   toolStatuses: {},
@@ -333,6 +337,23 @@ export const useAppStore = create<AppState>((set, get) => ({
         break;
       }
 
+      case "session.messagesReset": {
+        const { sessionId, messages, completedStepIndices } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          const isActive = sessionId === state.activeSessionId;
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, messages, completedStepIndices }
+            },
+            // Reset preview state when rewinding
+            ...(isActive ? { previewPanelOpen: false } : {})
+          };
+        });
+        break;
+      }
+
       case "session.stepCompleted": {
         const { sessionId, stepIndex } = event.payload;
         set((state) => {
@@ -354,6 +375,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             previewStepIndex: isActive ? stepIndex : state.previewStepIndex,
             // Auto-open preview panel when step has output files
             previewPanelOpen: isActive && hasOutputFiles ? true : state.previewPanelOpen,
+            // Clear running indicator when the step completes
+            runningStepIndex: isActive && state.runningStepIndex === stepIndex ? null : state.runningStepIndex,
             sessions: {
               ...state.sessions,
               [sessionId]: { ...existing, completedStepIndices: nextCompleted, messages: nextMessages }
@@ -367,7 +390,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         const { sessionId, status, title, cwd } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          const isActive = sessionId === state.activeSessionId;
           return {
+            // Clear running step when session stops running
+            ...(isActive && status !== "running" ? { runningStepIndex: null } : {}),
             sessions: {
               ...state.sessions,
               [sessionId]: {

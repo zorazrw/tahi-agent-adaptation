@@ -77,6 +77,7 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const sessions = useAppStore((state) => state.sessions);
   const selectedStepIndex = useAppStore((state) => state.selectedStepIndex);
+  const setRunningStepIndex = useAppStore((state) => state.setRunningStepIndex);
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
 
   // Determine if there's a pending (not yet completed) step that can be started
@@ -97,6 +98,7 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
     // Tab to start next pending step
     if (e.key === "Tab" && hasPendingStep && !prompt.trim()) {
       e.preventDefault();
+      setRunningStepIndex(selectedStepIndex);
       sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId!, stepIndex: selectedStepIndex } });
       return;
     }
