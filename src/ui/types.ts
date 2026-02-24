@@ -47,7 +47,8 @@ export type ServerEvent =
   | { type: "session.deleted"; payload: { sessionId: string } }
   | { type: "session.stepCompleted"; payload: { sessionId: string; stepIndex: number } }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
-  | { type: "runner.error"; payload: { sessionId?: string; message: string } };
+  | { type: "runner.error"; payload: { sessionId?: string; message: string } }
+  | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[]; completedStepIndices: number[] } };
 
 // Client -> Server events
 export type ClientEvent =

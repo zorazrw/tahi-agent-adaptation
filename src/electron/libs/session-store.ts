@@ -1,71 +1,34 @@
 import Database from "better-sqlite3";
+import { z } from "zod";
 import type { SessionStatus, StreamMessage } from "../types.js";
 
-function parseSteps(raw: unknown): string[] | undefined {
-  if (raw == null) return undefined;
-  try {
-    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return Array.isArray(arr) && arr.every((x) => typeof x === "string") ? arr : undefined;
-  } catch {
-    return undefined;
-  }
-}
+// ── Zod schemas for JSON columns ──────────────────────────────────────
 
-function parseVerificationCriteria(raw: unknown): string[][] | undefined {
-  if (raw == null) return undefined;
-  try {
-    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (!Array.isArray(arr)) return undefined;
-    const ok = arr.every(
-      (row) => Array.isArray(row) && row.every((x) => typeof x === "string")
-    );
-    return ok ? (arr as string[][]) : undefined;
-  } catch {
-    return undefined;
-  }
-}
+const stepsSchema = z.array(z.string());
+const stringGrid = z.array(z.array(z.string()));
 
-function parseOutputFiles(raw: unknown): string[][] | undefined {
-  if (raw == null) return undefined;
-  try {
-    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (!Array.isArray(arr)) return undefined;
-    const ok = arr.every(
-      (row) => Array.isArray(row) && row.every((x) => typeof x === "string")
-    );
-    return ok ? (arr as string[][]) : undefined;
-  } catch {
-    return undefined;
-  }
-}
+const verifierMarkCell = z
+  .unknown()
+  .transform((v) => (v === "check" || v === "cross" ? v : undefined));
+const verifierMarksSchema = z.array(z.array(verifierMarkCell));
 
-function parseCompletedStepIndices(raw: unknown): number[] | undefined {
-  if (raw == null) return undefined;
-  try {
-    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (!Array.isArray(arr)) return undefined;
-    const ok = arr.every((x) => typeof x === "number" && Number.isInteger(x));
-    return ok ? (arr as number[]) : undefined;
-  } catch {
-    return undefined;
-  }
-}
+const completedStepIndicesSchema = z.array(z.number().int());
+
+/** Resume point: either a bare UUID (legacy) or {uuid, claudeSessionId}. */
+const stepResumePointValue = z.union([
+  z.string(),
+  z.object({ uuid: z.string(), claudeSessionId: z.string() })
+]);
+const stepResumePointsSchema = z.record(z.coerce.number().int(), stepResumePointValue);
 
 export type VerifierMark = "check" | "cross" | undefined;
 
-function parseVerifierMarks(raw: unknown): VerifierMark[][] | undefined {
+/** Parse a DB TEXT column that stores JSON, returning `undefined` on null/invalid. */
+function parseJsonColumn<T>(raw: unknown, schema: z.ZodType<T>): T | undefined {
   if (raw == null) return undefined;
   try {
-    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (!Array.isArray(arr)) return undefined;
-    const result: VerifierMark[][] = [];
-    for (const row of arr) {
-      if (!Array.isArray(row)) return undefined;
-      result.push(
-        row.map((cell) => (cell === "check" || cell === "cross" ? cell : undefined))
-      );
-    }
-    return result;
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return schema.parse(parsed);
   } catch {
     return undefined;
   }
@@ -99,6 +62,8 @@ export type Session = {
   outputFiles?: string[][];
   verificationCriteria?: string[][];
   verifierMarks?: VerifierMark[][];
+  /** Maps stepIndex -> resume data (UUID + claudeSessionId) captured before the step ran. Used for rerun. */
+  stepResumePoints?: Record<number, string | { uuid: string; claudeSessionId: string }>;
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -116,6 +81,7 @@ export type StoredSession = {
   outputFiles?: string[][];
   verificationCriteria?: string[][];
   verifierMarks?: VerifierMark[][];
+  stepResumePoints?: Record<number, string | { uuid: string; claudeSessionId: string }>;
   createdAt: number;
   updatedAt: number;
 };
@@ -203,11 +169,11 @@ export class SessionStore {
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
-        steps: parseSteps(row.steps) ?? mem?.steps ?? [],
-        completedStepIndices: parseCompletedStepIndices(row.completed_step_indices) ?? mem?.completedStepIndices ?? [],
-        outputFiles: parseOutputFiles(row.output_files) ?? mem?.outputFiles ?? [],
-        verificationCriteria: parseVerificationCriteria(row.verification_criteria) ?? mem?.verificationCriteria ?? [],
-        verifierMarks: parseVerifierMarks(row.verifier_marks) ?? mem?.verifierMarks ?? [],
+        steps: parseJsonColumn(row.steps, stepsSchema) ?? mem?.steps ?? [],
+        completedStepIndices: parseJsonColumn(row.completed_step_indices, completedStepIndicesSchema) ?? mem?.completedStepIndices ?? [],
+        outputFiles: parseJsonColumn(row.output_files, stringGrid) ?? mem?.outputFiles ?? [],
+        verificationCriteria: parseJsonColumn(row.verification_criteria, stringGrid) ?? mem?.verificationCriteria ?? [],
+        verifierMarks: parseJsonColumn(row.verifier_marks, verifierMarksSchema) ?? mem?.verifierMarks ?? [],
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
       };
@@ -255,11 +221,11 @@ export class SessionStore {
         allowedTools: sessionRow.allowed_tools ? String(sessionRow.allowed_tools) : undefined,
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
         claudeSessionId: sessionRow.claude_session_id ? String(sessionRow.claude_session_id) : undefined,
-        steps: parseSteps(sessionRow.steps) ?? mem?.steps ?? [],
-        completedStepIndices: parseCompletedStepIndices(sessionRow.completed_step_indices) ?? mem?.completedStepIndices ?? [],
-        outputFiles: parseOutputFiles(sessionRow.output_files) ?? mem?.outputFiles ?? [],
-        verificationCriteria: parseVerificationCriteria(sessionRow.verification_criteria) ?? mem?.verificationCriteria ?? [],
-        verifierMarks: parseVerifierMarks(sessionRow.verifier_marks) ?? mem?.verifierMarks ?? [],
+        steps: parseJsonColumn(sessionRow.steps, stepsSchema) ?? mem?.steps ?? [],
+        completedStepIndices: parseJsonColumn(sessionRow.completed_step_indices, completedStepIndicesSchema) ?? mem?.completedStepIndices ?? [],
+        outputFiles: parseJsonColumn(sessionRow.output_files, stringGrid) ?? mem?.outputFiles ?? [],
+        verificationCriteria: parseJsonColumn(sessionRow.verification_criteria, stringGrid) ?? mem?.verificationCriteria ?? [],
+        verifierMarks: parseJsonColumn(sessionRow.verifier_marks, verifierMarksSchema) ?? mem?.verifierMarks ?? [],
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },
@@ -346,22 +312,25 @@ export class SessionStore {
       completedStepIndices: "completed_step_indices",
       outputFiles: "output_files",
       verificationCriteria: "verification_criteria",
-      verifierMarks: "verifier_marks"
+      verifierMarks: "verifier_marks",
+      stepResumePoints: "step_resume_points"
     } as const;
+
+    /** Keys that are stored as JSON text in the DB. */
+    const jsonKeys = new Set<string>([
+      "steps", "completedStepIndices", "outputFiles",
+      "verificationCriteria", "stepResumePoints"
+    ]);
 
     for (const key of Object.keys(updates) as Array<keyof typeof updatable>) {
       const column = updatable[key];
       if (!column) continue;
       fields.push(`${column} = ?`);
       const value = updates[key];
-      if (key === "steps") {
-        values.push(Array.isArray(value) ? JSON.stringify(value) : null);
-      } else if (key === "completedStepIndices") {
-        values.push(Array.isArray(value) && value.every((x) => typeof x === "number") ? JSON.stringify(value) : null);
-      } else if (key === "outputFiles" || key === "verificationCriteria") {
-        values.push(Array.isArray(value) && value.every(Array.isArray) ? JSON.stringify(value) : null);
-      } else if (key === "verifierMarks") {
+      if (key === "verifierMarks") {
         values.push(serializeVerifierMarks(value as VerifierMark[][]));
+      } else if (jsonKeys.has(key)) {
+        values.push(value != null ? JSON.stringify(value) : null);
       } else {
         values.push(value === undefined ? null : (value as string));
       }
@@ -418,6 +387,11 @@ export class SessionStore {
     } catch {
       /* column may already exist */
     }
+    try {
+      this.db.exec(`alter table sessions add column step_resume_points text`);
+    } catch {
+      /* column may already exist */
+    }
     this.db.exec(
       `create table if not exists messages (
         id text primary key,
@@ -433,7 +407,7 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices, step_resume_points
          from sessions`
       )
       .all();
@@ -446,15 +420,54 @@ export class SessionStore {
         cwd: row.cwd ? String(row.cwd) : undefined,
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
-        steps: parseSteps(row.steps),
-        completedStepIndices: parseCompletedStepIndices(row.completed_step_indices),
-        outputFiles: parseOutputFiles(row.output_files),
-        verificationCriteria: parseVerificationCriteria(row.verification_criteria),
-        verifierMarks: parseVerifierMarks(row.verifier_marks),
+        steps: parseJsonColumn(row.steps, stepsSchema),
+        completedStepIndices: parseJsonColumn(row.completed_step_indices, completedStepIndicesSchema),
+        outputFiles: parseJsonColumn(row.output_files, stringGrid),
+        verificationCriteria: parseJsonColumn(row.verification_criteria, stringGrid),
+        verifierMarks: parseJsonColumn(row.verifier_marks, verifierMarksSchema),
+        stepResumePoints: parseJsonColumn(row.step_resume_points, stepResumePointsSchema),
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);
     }
+  }
+
+  /**
+   * Returns the UUID of the last SDK **assistant** message for a session.
+   * The SDK's `resumeSessionAt` option requires the UUID to be from an
+   * `SDKAssistantMessage`, not from result/system/user messages.
+   */
+  getLastAssistantMessageUuid(sessionId: string): string | undefined {
+    const rows = this.db
+      .prepare(`SELECT data FROM messages WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 50`)
+      .all(sessionId) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      const msg = JSON.parse(String(row.data));
+      if (msg.uuid && msg.type === "assistant") {
+        return String(msg.uuid);
+      }
+    }
+    return undefined;
+  }
+
+  /** Deletes all messages for a session that come after the message with the given UUID. */
+  deleteMessagesAfter(sessionId: string, afterMessageUuid: string): void {
+    const row = this.db
+      .prepare(`SELECT rowid FROM messages WHERE id = ? AND session_id = ?`)
+      .get(afterMessageUuid, sessionId) as Record<string, unknown> | undefined;
+    if (!row) return;
+    const rowid = Number(row.rowid);
+    this.db
+      .prepare(`DELETE FROM messages WHERE session_id = ? AND rowid > ?`)
+      .run(sessionId, rowid);
+  }
+
+  /** Loads all messages for a session from DB (for reset after truncation). */
+  getMessages(sessionId: string): StreamMessage[] {
+    return (this.db
+      .prepare(`SELECT data FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`)
+      .all(sessionId) as Array<Record<string, unknown>>)
+      .map((row) => JSON.parse(String(row.data)) as StreamMessage);
   }
 
   close(): void {

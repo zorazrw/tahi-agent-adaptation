@@ -97,11 +97,27 @@ function emit(event: ServerEvent) {
   broadcast(event);
 }
 
+/** Extract uuid (and optional claudeSessionId) from a resume point, handling legacy string format. */
+function parseResumePoint(
+  point: string | { uuid: string; claudeSessionId: string } | undefined
+): { uuid: string; claudeSessionId?: string } | undefined {
+  if (!point) return undefined;
+  if (typeof point === "string") return { uuid: point };
+  return point;
+}
+
 /** Starts a task-solving LLM call for the given workflow step index (0-based). */
 function triggerStepSolve(sessionId: string, stepIndex: number) {
   const store = initializeSessions();
   const session = store.getSession(sessionId);
   if (!session) return;
+  if (session.status === "running") {
+    broadcast({
+      type: "runner.error",
+      payload: { sessionId, message: "Session is already running. Please wait or stop it first." }
+    });
+    return;
+  }
   if (!session.steps?.length || stepIndex < 0 || stepIndex >= session.steps.length) {
     broadcast({
       type: "runner.error",
@@ -115,6 +131,63 @@ function triggerStepSolve(sessionId: string, stepIndex: number) {
       payload: { sessionId, message: "Cannot solve step: session has no resume id yet." }
     });
     return;
+  }
+
+  const isRerun = session.completedStepIndices?.includes(stepIndex) ?? false;
+  let resumeSessionAt: string | undefined;
+  // For reruns, use the claudeSessionId saved at the resume point (not the current one,
+  // which may have been overwritten by a previous failed rerun attempt).
+  let claudeSessionIdForResume = session.claudeSessionId;
+
+  if (isRerun) {
+    // --- Rerun: rewind conversation to before this step ---
+    const resumeData = parseResumePoint(session.stepResumePoints?.[stepIndex]);
+    if (!resumeData?.uuid) {
+      broadcast({
+        type: "runner.error",
+        payload: { sessionId, message: `Cannot rerun step ${stepIndex + 1}: no resume point recorded.` }
+      });
+      return;
+    }
+
+    resumeSessionAt = resumeData.uuid;
+    claudeSessionIdForResume = resumeData.claudeSessionId ?? session.claudeSessionId;
+
+    // Clear completed indices for this step and all subsequent steps
+    const newCompleted = (session.completedStepIndices ?? []).filter(i => i < stepIndex);
+
+    // Clear resume points for steps >= stepIndex (keep the current one for potential re-rerun)
+    const newResumePoints: Record<number, string | { uuid: string; claudeSessionId: string }> = {};
+    for (const [k, v] of Object.entries(session.stepResumePoints ?? {})) {
+      if (Number(k) <= stepIndex) newResumePoints[Number(k)] = v;
+    }
+
+    // Delete messages from DB after the resume point
+    store.deleteMessagesAfter(sessionId, resumeData.uuid);
+
+    // Restore the pre-step claudeSessionId so future attempts use the correct session
+    store.updateSession(sessionId, {
+      completedStepIndices: newCompleted,
+      stepResumePoints: newResumePoints,
+      claudeSessionId: claudeSessionIdForResume
+    });
+
+    // Reload truncated messages and broadcast reset to UI
+    const messages = store.getMessages(sessionId);
+    broadcast({
+      type: "session.messagesReset",
+      payload: { sessionId, messages, completedStepIndices: newCompleted }
+    });
+  } else {
+    // --- First run: record resume point (assistant UUID + claudeSessionId) for this step ---
+    const lastUuid = store.getLastAssistantMessageUuid(sessionId);
+    if (lastUuid) {
+      const newResumePoints = {
+        ...(session.stepResumePoints ?? {}),
+        [stepIndex]: { uuid: lastUuid, claudeSessionId: session.claudeSessionId }
+      };
+      store.updateSession(sessionId, { stepResumePoints: newResumePoints });
+    }
   }
 
   sessionCurrentStepIndex.set(sessionId, stepIndex);
@@ -132,7 +205,8 @@ function triggerStepSolve(sessionId: string, stepIndex: number) {
   runClaude({
     prompt: stepPrompt,
     session,
-    resumeSessionId: session.claudeSessionId,
+    resumeSessionId: claudeSessionIdForResume,
+    resumeSessionAt,
     onEvent: emit,
     onSessionUpdate: (updates) => {
       store.updateSession(session.id, updates);
