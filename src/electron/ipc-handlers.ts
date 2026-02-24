@@ -32,96 +32,6 @@ function hasLiveSession(sessionId: string): boolean {
   return Boolean(sessions.getSession(sessionId));
 }
 
-/** Parse numbered steps from LLM text; stop at OUTPUT FILES or VERIFIERS. */
-function parseNumberedSteps(text: string): string[] {
-  if (!text || typeof text !== "string") return [];
-  const outputFilesStart = text.search(/\nOUTPUT FILES:\s*\n/i);
-  const verifiersStart = text.search(/\nVERIFIERS:\s*\n/i);
-  const end = [outputFilesStart, verifiersStart].filter((i) => i >= 0);
-  const workflowEnd = end.length ? Math.min(...end) : text.length;
-  const workflowText = text.slice(0, workflowEnd);
-  const lines = workflowText.split(/\n/).map((s) => s.trim()).filter(Boolean);
-  const steps: string[] = [];
-  for (const line of lines) {
-    const match = line.match(/^\s*\d+[.)]\s*(.+)$/);
-    if (match) steps.push(match[1].trim());
-  }
-  return steps;
-}
-
-/** Parse OUTPUT FILES block into per-step file paths (string[][]). Expects "OUTPUT FILES:" then "Step N: path1, path2" lines. */
-function parseOutputFilesBlock(text: string, stepCount: number): string[][] {
-  const result: string[][] = Array.from({ length: stepCount }, () => []);
-  const outputFilesIdx = text.search(/\nOUTPUT FILES:\s*\n/i);
-  if (outputFilesIdx < 0) return result;
-  const verifiersIdx = text.search(/\nVERIFIERS:\s*\n/i);
-  const blockEnd = verifiersIdx >= 0 ? verifiersIdx : text.length;
-  const block = text.slice(outputFilesIdx, blockEnd);
-  const stepLineRegex = /^Step\s*(\d+)\s*:\s*(.+)$/gm;
-  let match: RegExpExecArray | null;
-  while ((match = stepLineRegex.exec(block)) !== null) {
-    const stepNum = parseInt(match[1], 10);
-    const pathsStr = match[2].trim();
-    const idx = stepNum - 1;
-    if (idx >= 0 && idx < stepCount && pathsStr) {
-      const paths = pathsStr.split(/[,;]/).map((p) => p.trim()).filter(Boolean);
-      result[idx] = paths;
-    }
-  }
-  return result;
-}
-
-/** Parse VERIFIERS block into per-step criteria (string[][]). Expects "VERIFIERS:" then "Step N:" sections with bullet lines. */
-function parseVerifiersBlock(text: string, stepCount: number): string[][] {
-  const verifiers: string[][] = Array.from({ length: stepCount }, () => []);
-  const verifiersIdx = text.search(/\nVERIFIERS:\s*\n/i);
-  if (verifiersIdx < 0) return verifiers;
-  const block = text.slice(verifiersIdx);
-  const stepRegex = /^Step\s*(\d+)\s*:?\s*\n/gm;
-  let match: RegExpExecArray | null = null;
-  let lastStepNum = 0;
-  let lastEnd = 0;
-  while ((match = stepRegex.exec(block)) !== null) {
-    const stepNum = parseInt(match[1], 10);
-    if (lastStepNum > 0) {
-      const content = block.slice(lastEnd, match.index);
-      const criteria = parseBulletCriteria(content);
-      const idx = lastStepNum - 1;
-      if (idx >= 0 && idx < stepCount) verifiers[idx] = criteria;
-    }
-    lastStepNum = stepNum;
-    lastEnd = match.index + match[0].length;
-  }
-  if (lastStepNum > 0) {
-    const content = block.slice(lastEnd);
-    const criteria = parseBulletCriteria(content);
-    const idx = lastStepNum - 1;
-    if (idx >= 0 && idx < stepCount) verifiers[idx] = criteria;
-  }
-  return verifiers;
-}
-
-function parseBulletCriteria(content: string): string[] {
-  const lines = content.split(/\n/).map((s) => s.trim()).filter(Boolean);
-  const result: string[] = [];
-  for (const line of lines) {
-    const m = line.match(/^[-*•]\s+(.+)$/) || line.match(/^\d+[.)]\s+(.+)$/);
-    if (m) result.push(m[1].trim());
-    else if (line) result.push(line);
-  }
-  return result;
-}
-
-/** Extract full text from an assistant message's content blocks. */
-function getAssistantMessageText(message: unknown): string {
-  const m = message as { type?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
-  if (m?.type !== "assistant" || !Array.isArray(m?.message?.content)) return "";
-  const parts: string[] = [];
-  for (const block of m.message.content) {
-    if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
-  }
-  return parts.join("\n");
-}
 
 function emit(event: ServerEvent) {
   // If a session was deleted, drop late events that would resurrect it in the UI.
@@ -139,24 +49,28 @@ function emit(event: ServerEvent) {
   if (event.type === "session.status") {
     sessions.updateSession(event.payload.sessionId, { status: event.payload.status });
   }
+  if (event.type === "workflow.plan") {
+    const { sessionId, steps, outputFiles, verificationCriteria } = event.payload;
+    const session = sessions.getSession(sessionId);
+    if (session && !session.steps?.length) {
+      sessions.updateSession(sessionId, { steps, outputFiles, verificationCriteria });
+      broadcast({ type: "session.steps", payload: { sessionId, steps } });
+      broadcast({ type: "session.outputFiles", payload: { sessionId, outputFiles } });
+      broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
+
+      // Transition to idle so the human can drive step-by-step execution.
+      // The runner will abort itself after the tool result is committed to the session.
+      sessions.updateSession(sessionId, { status: "idle" });
+      broadcast({
+        type: "session.status",
+        payload: { sessionId, status: "idle", title: session.title, cwd: session.cwd }
+      });
+    }
+    return;
+  }
   if (event.type === "stream.message") {
     const { sessionId, message } = event.payload;
     sessions.recordMessage(sessionId, message);
-    const text = getAssistantMessageText(message);
-    if (text) {
-      const steps = parseNumberedSteps(text);
-      if (steps.length >= 2) {
-        const session = sessions.getSession(sessionId);
-        if (session && !session.steps?.length) {
-          const outputFiles = parseOutputFilesBlock(text, steps.length);
-          const verificationCriteria = parseVerifiersBlock(text, steps.length);
-          sessions.updateSession(sessionId, { steps, outputFiles, verificationCriteria });
-          broadcast({ type: "session.steps", payload: { sessionId, steps } });
-          broadcast({ type: "session.outputFiles", payload: { sessionId, outputFiles } });
-          broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
-        }
-      }
-    }
     // When a step-solving run completes, mark that step as completed and persist.
     const m = message as { type?: string; subtype?: string };
     if (m.type === "result") {
@@ -183,11 +97,27 @@ function emit(event: ServerEvent) {
   broadcast(event);
 }
 
+/** Extract uuid (and optional claudeSessionId) from a resume point, handling legacy string format. */
+function parseResumePoint(
+  point: string | { uuid: string; claudeSessionId: string } | undefined
+): { uuid: string; claudeSessionId?: string } | undefined {
+  if (!point) return undefined;
+  if (typeof point === "string") return { uuid: point };
+  return point;
+}
+
 /** Starts a task-solving LLM call for the given workflow step index (0-based). */
 function triggerStepSolve(sessionId: string, stepIndex: number) {
   const store = initializeSessions();
   const session = store.getSession(sessionId);
   if (!session) return;
+  if (session.status === "running") {
+    broadcast({
+      type: "runner.error",
+      payload: { sessionId, message: "Session is already running. Please wait or stop it first." }
+    });
+    return;
+  }
   if (!session.steps?.length || stepIndex < 0 || stepIndex >= session.steps.length) {
     broadcast({
       type: "runner.error",
@@ -201,6 +131,63 @@ function triggerStepSolve(sessionId: string, stepIndex: number) {
       payload: { sessionId, message: "Cannot solve step: session has no resume id yet." }
     });
     return;
+  }
+
+  const isRerun = session.completedStepIndices?.includes(stepIndex) ?? false;
+  let resumeSessionAt: string | undefined;
+  // For reruns, use the claudeSessionId saved at the resume point (not the current one,
+  // which may have been overwritten by a previous failed rerun attempt).
+  let claudeSessionIdForResume = session.claudeSessionId;
+
+  if (isRerun) {
+    // --- Rerun: rewind conversation to before this step ---
+    const resumeData = parseResumePoint(session.stepResumePoints?.[stepIndex]);
+    if (!resumeData?.uuid) {
+      broadcast({
+        type: "runner.error",
+        payload: { sessionId, message: `Cannot rerun step ${stepIndex + 1}: no resume point recorded.` }
+      });
+      return;
+    }
+
+    resumeSessionAt = resumeData.uuid;
+    claudeSessionIdForResume = resumeData.claudeSessionId ?? session.claudeSessionId;
+
+    // Clear completed indices for this step and all subsequent steps
+    const newCompleted = (session.completedStepIndices ?? []).filter(i => i < stepIndex);
+
+    // Clear resume points for steps >= stepIndex (keep the current one for potential re-rerun)
+    const newResumePoints: Record<number, string | { uuid: string; claudeSessionId: string }> = {};
+    for (const [k, v] of Object.entries(session.stepResumePoints ?? {})) {
+      if (Number(k) <= stepIndex) newResumePoints[Number(k)] = v;
+    }
+
+    // Delete messages from DB after the resume point
+    store.deleteMessagesAfter(sessionId, resumeData.uuid);
+
+    // Restore the pre-step claudeSessionId so future attempts use the correct session
+    store.updateSession(sessionId, {
+      completedStepIndices: newCompleted,
+      stepResumePoints: newResumePoints,
+      claudeSessionId: claudeSessionIdForResume
+    });
+
+    // Reload truncated messages and broadcast reset to UI
+    const messages = store.getMessages(sessionId);
+    broadcast({
+      type: "session.messagesReset",
+      payload: { sessionId, messages, completedStepIndices: newCompleted }
+    });
+  } else {
+    // --- First run: record resume point (assistant UUID + claudeSessionId) for this step ---
+    const lastUuid = store.getLastAssistantMessageUuid(sessionId);
+    if (lastUuid) {
+      const newResumePoints = {
+        ...(session.stepResumePoints ?? {}),
+        [stepIndex]: { uuid: lastUuid, claudeSessionId: session.claudeSessionId }
+      };
+      store.updateSession(sessionId, { stepResumePoints: newResumePoints });
+    }
   }
 
   sessionCurrentStepIndex.set(sessionId, stepIndex);
@@ -218,7 +205,8 @@ function triggerStepSolve(sessionId: string, stepIndex: number) {
   runClaude({
     prompt: stepPrompt,
     session,
-    resumeSessionId: session.claudeSessionId,
+    resumeSessionId: claudeSessionIdForResume,
+    resumeSessionAt,
     onEvent: emit,
     onSessionUpdate: (updates) => {
       store.updateSession(session.id, updates);

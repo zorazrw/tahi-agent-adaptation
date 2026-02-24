@@ -1,15 +1,34 @@
 import { useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
+import { getRenderer } from "./file-renderers";
+import { ZoomControls } from "./file-renderers/DocxRenderer";
 
 const FILE_TOOL_NAMES = new Set(["Read", "Write", "Edit"]);
-const PREVIEW_EXTENSIONS = [".txt", ".xlsx", ".xls", ".docx", ".jpg", ".jpeg", ".png"];
+const PREVIEW_EXTENSIONS = [
+  // Documents
+  ".txt", ".md", ".csv", ".tsv", ".json",
+  ".xlsx", ".xls", ".docx", ".pdf",
+  // Web
+  ".html", ".htm",
+  // Images
+  ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+  // Media
+  ".mp4", ".webm", ".mp3", ".wav", ".ogg",
+  // Code
+  ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+  ".py", ".rb", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp", ".cs",
+  ".css", ".scss", ".less", ".php", ".swift", ".kt",
+  ".sh", ".bash", ".zsh",
+  ".yaml", ".yml", ".toml", ".xml", ".sql",
+  ".r", ".lua", ".dart", ".scala", ".ex", ".exs", ".hs", ".ml",
+];
 
-function pathHasPreviewExt(path: string): boolean {
+export function pathHasPreviewExt(path: string): boolean {
   const lower = path.toLowerCase();
   return PREVIEW_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
-/** From the current chat session, find the latest file referred by the agent (tool_use Read/Write/Edit) that we can preview (.txt, .xlsx, .xls, .docx, .jpg, .png). */
+/** From the current chat session, find the latest file referred by the agent (tool_use Read/Write/Edit) that we can preview (.txt, .xlsx, .xls, .docx, .jpg, .png, .pdf). */
 export function getLatestPreviewFileRef(messages: StreamMessage[]): string | null {
   let latest: string | null = null;
   for (const msg of messages) {
@@ -41,19 +60,37 @@ export function getPreviewFileForStep(
 
 type PreviewFileResult =
   | { kind: "txt"; content: string }
-  | { kind: "xlsx"; data: unknown[][] }
-  | { kind: "docx"; html: string }
+  | { kind: "xlsx"; sheets: { name: string; html: string }[] }
+  | { kind: "docx"; data: string }
   | { kind: "image"; dataUrl: string }
+  | { kind: "pdf"; data: string }
+  | { kind: "md"; content: string }
+  | { kind: "code"; content: string; language: string }
+  | { kind: "csv"; content: string }
+  | { kind: "json"; content: string }
+  | { kind: "html"; content: string }
+  | { kind: "video"; dataUrl: string }
+  | { kind: "audio"; dataUrl: string }
   | { error: string };
+
+function isFileNotFoundError(error: string): boolean {
+  return /ENOENT|no such file or directory/i.test(error);
+}
 
 type FilePreviewProps = {
   filePath: string | null;
   cwd?: string | null;
+  stepCompleted?: boolean;
 };
 
-export function FilePreview({ filePath, cwd }: FilePreviewProps) {
+const ZOOM_STEP = 0.1;
+const ZOOM_MIN = 0.3;
+const ZOOM_MAX = 2.0;
+
+export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) {
   const [result, setResult] = useState<PreviewFileResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [zoom, setZoom] = useState(0.6);
 
   useEffect(() => {
     if (!filePath) {
@@ -68,20 +105,42 @@ export function FilePreview({ filePath, cwd }: FilePreviewProps) {
       .then((res) => setResult(res))
       .catch((err) => setResult({ error: err instanceof Error ? err.message : String(err) }))
       .finally(() => setLoading(false));
-  }, [filePath, cwd]);
+  }, [filePath, cwd, stepCompleted]);
 
-  if (!filePath) return null;
+  if (!filePath) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full rounded-lg border border-dashed border-ink-900/15 bg-surface-secondary/50 text-center px-6">
+        <svg viewBox="0 0 24 24" className="h-10 w-10 text-ink-400 mb-3" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+        </svg>
+        <p className="text-sm text-muted-foreground">Output files will appear here when the step runs.</p>
+      </div>
+    );
+  }
+
+  const isNotFound = result && "error" in result && isFileNotFoundError(result.error);
+  const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
+  const showZoom = result && "kind" in result && result.kind === "docx";
 
   return (
-    <div className="flex flex-col h-full min-h-0 rounded-lg border border-ink-900/10 bg-surface-secondary">
-      <div className="shrink-0 px-3 py-2 border-b border-ink-900/10">
-        <span className="text-xs font-medium text-muted truncate block" title={filePath}>
+    <div className="flex-1 flex flex-col rounded-lg border border-ink-900/10 bg-surface-secondary overflow-hidden">
+      <div className="px-3 py-1.5 border-b border-ink-900/10 flex items-center gap-2 shrink-0">
+        <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}
         </span>
+        {showZoom && (
+          <ZoomControls
+            zoom={zoom}
+            onZoomIn={() => setZoom((z) => Math.min(ZOOM_MAX, +(z + ZOOM_STEP).toFixed(1)))}
+            onZoomOut={() => setZoom((z) => Math.max(ZOOM_MIN, +(z - ZOOM_STEP).toFixed(1)))}
+            min={ZOOM_MIN}
+            max={ZOOM_MAX}
+          />
+        )}
       </div>
-      <div className="flex-1 min-h-0 overflow-auto px-3 py-2">
+      <div className="flex-1 flex flex-col min-h-0 overflow-auto px-3 py-2">
         {loading && (
-          <div className="flex items-center gap-2 text-sm text-muted">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
@@ -89,49 +148,19 @@ export function FilePreview({ filePath, cwd }: FilePreviewProps) {
             <span>Loading…</span>
           </div>
         )}
-        {result && "error" in result && !loading && (
+        {isNotFound && !loading && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 6v6l4 2" />
+            </svg>
+            <span>File will be generated when this step runs</span>
+          </div>
+        )}
+        {result && "error" in result && !isNotFound && !loading && (
           <p className="text-sm text-error">{result.error}</p>
         )}
-        {result && "kind" in result && result.kind === "txt" && !loading && (
-          <pre className="text-sm text-ink-700 whitespace-pre-wrap break-words font-mono">
-            {result.content}
-          </pre>
-        )}
-        {result && "kind" in result && result.kind === "xlsx" && !loading && (
-          <div className="overflow-auto">
-            <table className="text-sm text-ink-700 border-collapse border border-ink-900/20">
-              <tbody>
-                {result.data.map((row: unknown[], i: number) => (
-                  <tr key={i}>
-                    {(Array.isArray(row) ? row : []).map((cell, j) => (
-                      <td
-                        key={j}
-                        className="border border-ink-900/20 px-2 py-1.5 align-top"
-                      >
-                        {cell != null ? String(cell) : ""}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {result && "kind" in result && result.kind === "docx" && !loading && (
-          <div
-            className="file-preview-docx text-sm text-ink-700 prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1"
-            dangerouslySetInnerHTML={{ __html: result.html }}
-          />
-        )}
-        {result && "kind" in result && result.kind === "image" && !loading && (
-          <div className="flex items-center justify-center min-h-[120px]">
-            <img
-              src={result.dataUrl}
-              alt="Preview"
-              className="max-w-full max-h-full object-contain rounded"
-            />
-          </div>
-        )}
+        {Renderer && !loading && <Renderer data={result} zoom={showZoom ? zoom : undefined} />}
       </div>
     </div>
   );

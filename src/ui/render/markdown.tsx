@@ -1,47 +1,66 @@
+import { useState, useCallback, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
 
+function extractTextContent(node: ReactNode): string {
+  if (typeof node === "string") return node;
+  if (typeof node === "number") return String(node);
+  if (!node) return "";
+  if (Array.isArray(node)) return node.map(extractTextContent).join("");
+  if (typeof node === "object" && "props" in node) {
+    return extractTextContent((node as { props: { children?: ReactNode } }).props.children);
+  }
+  return "";
+}
+
+function CopyButton({ content }: { content: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [content]);
+
+  return (
+    <button
+      className="code-copy-btn"
+      data-copied={copied}
+      onClick={handleCopy}
+    >
+      {copied ? "Copied!" : "Copy"}
+    </button>
+  );
+}
+
 export default function MDContent({ text }: { text: string }) {
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeRaw, rehypeHighlight]}
-      components={{
-        h1: (props) => <h1 className="mt-4 text-xl font-semibold text-ink-900" {...props} />,
-        h2: (props) => <h2 className="mt-4 text-lg font-semibold text-ink-900" {...props} />,
-        h3: (props) => <h3 className="mt-3 text-base font-semibold text-ink-800" {...props} />,
-        p: (props) => <p className="mt-2 text-base leading-relaxed text-ink-700" {...props} />,
-        ul: (props) => <ul className="mt-2 ml-4 grid list-disc gap-1" {...props} />,
-        ol: (props) => <ol className="mt-2 ml-4 grid list-decimal gap-1" {...props} />,
-        li: (props) => <li className="min-w-0 text-ink-700" {...props} />,
-        strong: (props) => <strong className="text-ink-900 font-semibold" {...props} />,
-        em: (props) => <em className="text-ink-800" {...props} />,
-        pre: (props) => (
-          <pre
-            className="mt-3 max-w-full overflow-x-auto whitespace-pre-wrap rounded-xl bg-surface-tertiary p-3 text-sm text-ink-700"
-            {...props}
-          />
-        ),
-        code: (props) => {
-          const { children, className, ...rest } = props;
-          const match = /language-(\w+)/.exec(className || "");
-          const isInline = !match && !String(children).includes("\n");
-
-          return isInline ? (
-            <code className="rounded bg-surface-tertiary px-1.5 py-0.5 text-accent font-mono text-base" {...rest}>
-              {children}
-            </code>
-          ) : (
-            <code className={`${className} font-mono`} {...rest}>
-              {children}
-            </code>
-          );
-        }
-      }}
-    >
-      {String(text ?? "")}
-    </ReactMarkdown>
-  )
+    <div className="md-chat">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, rehypeHighlight]}
+        components={{
+          pre: ({ children, ...props }) => {
+            const text = extractTextContent(children);
+            return (
+              <pre {...props}>
+                {children}
+                <CopyButton content={text} />
+              </pre>
+            );
+          },
+          table: ({ children, ...props }) => (
+            <div className="table-wrapper">
+              <table {...props}>{children}</table>
+            </div>
+          ),
+        }}
+      >
+        {String(text ?? "")}
+      </ReactMarkdown>
+    </div>
+  );
 }

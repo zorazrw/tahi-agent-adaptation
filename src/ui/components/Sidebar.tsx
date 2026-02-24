@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Dialog from "@radix-ui/react-dialog";
+import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/ui/components/ui/combobox";
 import type { ClientEvent } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
@@ -25,7 +25,10 @@ export function Sidebar({
   const updateSessionVerificationCriteria = useAppStore((state) => state.updateSessionVerificationCriteria);
   const updateSessionVerifierMarks = useAppStore((state) => state.updateSessionVerifierMarks);
   const updateSessionTitle = useAppStore((state) => state.updateSessionTitle);
+  const runningStepIndex = useAppStore((state) => state.runningStepIndex);
+  const setRunningStepIndex = useAppStore((state) => state.setRunningStepIndex);
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
+  const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -33,12 +36,9 @@ export function Sidebar({
   const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
-  const DEFAULT_STEPS = ["Step 1", "Step 2", "Step 3", "Step 4"];
-  const progressSteps = activeSession?.steps?.length ? activeSession.steps : DEFAULT_STEPS;
+  const progressSteps = activeSession?.steps ?? [];
 
-  const [verificationCriteriaByStep, setVerificationCriteriaByStep] = useState<string[][]>(() =>
-    Array.from({ length: DEFAULT_STEPS.length }, () => [])
-  );
+  const [verificationCriteriaByStep, setVerificationCriteriaByStep] = useState<string[][]>([]);
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
   const [editingStepDraft, setEditingStepDraft] = useState("");
   const editingStepInputRef = useRef<HTMLInputElement | null>(null);
@@ -268,7 +268,7 @@ export function Sidebar({
     const stepMarks = [...(allMarks[selectedStepIndex] ?? [])];
     while (stepMarks.length <= index) stepMarks.push(undefined);
     const cur = stepMarks[index];
-    stepMarks[index] = cur === "check" ? "cross" : "check";
+    stepMarks[index] = cur === undefined ? "check" : cur === "check" ? "cross" : undefined;
     const nextFull = allMarks.slice(0, progressSteps.length);
     while (nextFull.length <= selectedStepIndex) nextFull.push([]);
     nextFull[selectedStepIndex] = stepMarks;
@@ -294,7 +294,7 @@ export function Sidebar({
   };
 
   return (
-    <aside className="fixed inset-y-0 left-0 flex h-full w-[280px] flex-col border-r border-ink-900/5 bg-[#FAF9F6] px-4 pb-4 pt-12">
+    <aside className="fixed inset-y-0 left-0 flex h-full w-[var(--sidebar-width)] flex-col border-r border-ink-900/5 bg-[#FAF9F6] px-4 pb-4 pt-12">
       <div 
         className="absolute top-0 left-0 right-0 h-12"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
@@ -321,227 +321,239 @@ export function Sidebar({
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
         <div className="py-2">
           {sessionList.length === 0 ? (
-            <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted">
+            <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted-foreground">
               No sessions yet. Click "+ New Task" to start.
             </div>
           ) : (
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className="flex w-full cursor-pointer items-center gap-2 rounded-xl border border-ink-900/10 bg-surface px-3 py-3 text-left transition hover:bg-surface-tertiary hover:border-ink-900/20 focus:outline-none focus:ring-2 focus:ring-accent/30 data-[state=open]:border-accent/30 data-[state=open]:bg-accent-subtle"
-                >
-                  <div
-                    className="flex min-w-0 flex-1 flex-col overflow-hidden"
-                    onClick={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => e.stopPropagation()}
-                  >
-                    {activeSessionId && sessions[activeSessionId] ? (
-                      editingTitle ? (
-                        <input
-                          ref={titleInputRef}
-                          type="text"
-                          className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] font-medium text-ink-800 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
-                          value={titleDraft}
-                          onChange={(e) => setTitleDraft(e.target.value)}
-                          onBlur={saveTitle}
-                          onKeyDown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === "Enter") saveTitle();
-                            if (e.key === "Escape") { setEditingTitle(false); setTitleDraft(""); }
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                          onPointerDown={(e) => e.stopPropagation()}
-                          aria-label="Edit task title"
-                        />
-                      ) : (
-                        <>
-                          <div
-                            className={`text-[12px] font-medium ${sessions[activeSessionId].status === "running" ? "text-info" : sessions[activeSessionId].status === "completed" ? "text-success" : sessions[activeSessionId].status === "error" ? "text-error" : "text-ink-800"} truncate cursor-text hover:underline`}
-                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); startEditTitle(); }}
-                            onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); startEditTitle(); } }}
-                            aria-label="Edit task title"
-                          >
-                            {sessions[activeSessionId].title}
-                          </div>
-                          <div className="mt-0.5 text-xs text-muted">
-                            <span className="truncate">{formatCwd(sessions[activeSessionId].cwd)}</span>
-                          </div>
-                        </>
-                      )
-                    ) : (
-                      <span className="text-xs text-muted">Select a task</span>
+            <div className="space-y-1.5">
+              <Combobox
+                items={sessionList}
+                value={activeSessionId ? sessionList.find((s) => s.id === activeSessionId) ?? null : null}
+                onValueChange={(session) => { if (session) setActiveSessionId(session.id); }}
+                itemToStringLabel={(session) => session.title}
+                itemToStringValue={(session) => session.title}
+              >
+                <ComboboxInput placeholder="Search tasks..." className="w-full" />
+                <ComboboxContent>
+                  <ComboboxEmpty>No tasks found.</ComboboxEmpty>
+                  <ComboboxList>
+                    {(session) => (
+                      <ComboboxItem key={session.id} value={session}>
+                        <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${session.status === "running" ? "bg-info" : session.status === "completed" ? "bg-success" : session.status === "error" ? "bg-error" : "bg-ink-300"}`} />
+                        <span className="truncate">{session.title}</span>
+                      </ComboboxItem>
                     )}
-                  </div>
-                  <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-ink-500" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M6 9l6 6 6-6" />
-                  </svg>
+                  </ComboboxList>
+                </ComboboxContent>
+              </Combobox>
+              {activeSessionId && sessions[activeSessionId] && (
+                <div className="flex items-center gap-1 px-0.5">
+                  <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground">{formatCwd(sessions[activeSessionId].cwd)}</span>
+                  <button
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
+                    onClick={startEditTitle}
+                    aria-label="Edit title"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
+                  </button>
+                  <button
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-error hover:bg-ink-900/5 transition-colors"
+                    onClick={() => setDeleteConfirmSessionId(activeSessionId)}
+                    aria-label="Delete session"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" /></svg>
+                  </button>
+                  <button
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
+                    onClick={() => setResumeSessionId(activeSessionId)}
+                    aria-label="Resume in Claude Code"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 5h16v14H4z" /><path d="M7 9h10M7 12h6" /><path d="M13 15l3 2-3 2" /></svg>
+                  </button>
                 </div>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content className="z-50 max-h-[min(60vh,320px)] min-w-[240px] overflow-y-auto rounded-xl border border-ink-900/10 bg-white p-1 shadow-lg" align="start" sideOffset={6}>
-                  <div className="px-2 py-1.5 text-xs font-medium text-ink-500">Switch task</div>
-                  {sessionList.map((session) => (
-                    <DropdownMenu.Item
-                      key={session.id}
-                      className="flex cursor-pointer flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left text-sm text-ink-700 outline-none hover:bg-ink-900/5 data-[highlighted]:bg-ink-900/5"
-                      onSelect={() => setActiveSessionId(session.id)}
-                    >
-                      <span className={`font-medium ${session.status === "running" ? "text-info" : session.status === "completed" ? "text-success" : session.status === "error" ? "text-error" : "text-ink-800"}`}>
-                        {session.title}
-                      </span>
-                      <span className="text-xs text-muted">{formatCwd(session.cwd)}</span>
-                    </DropdownMenu.Item>
-                  ))}
-                  {activeSessionId && (
-                    <>
-                      <DropdownMenu.Separator className="my-1 h-px bg-ink-900/10" />
-                      <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => activeSessionId && onDeleteSession(activeSessionId)}>
-                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-error/80" fill="none" stroke="currentColor" strokeWidth="1.8">
-                          <path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" />
-                        </svg>
-                        Delete this session
-                      </DropdownMenu.Item>
-                      <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => activeSessionId && setResumeSessionId(activeSessionId)}>
-                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-ink-500" fill="none" stroke="currentColor" strokeWidth="1.8">
-                          <path d="M4 5h16v14H4z" /><path d="M7 9h10M7 12h6" /><path d="M13 15l3 2-3 2" />
-                        </svg>
-                        Resume in Claude Code
-                      </DropdownMenu.Item>
-                    </>
-                  )}
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
+              )}
+              {editingTitle && activeSessionId && (
+                <div className="mt-1.5 px-0.5">
+                  <input
+                    ref={titleInputRef}
+                    type="text"
+                    className="w-full rounded-md border border-ink-900/20 bg-white px-2 py-1 text-sm text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
+                    value={titleDraft}
+                    onChange={(e) => setTitleDraft(e.target.value)}
+                    onBlur={saveTitle}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveTitle();
+                      if (e.key === "Escape") { setEditingTitle(false); setTitleDraft(""); }
+                    }}
+                    aria-label="Edit task title"
+                  />
+                </div>
+              )}
+            </div>
           )}
         </div>
-        {/* Progress: connected dots multi-step plan (step labels editable) */}
+        {/* Progress: vertical timeline */}
         {sessionList.length > 0 && (
           <div className="shrink-0 border-t border-ink-900/10 pt-3">
-            <div className="mb-2 text-sm font-semibold text-ink-600">Progress</div>
-            <div className="flex flex-col">
-              {progressSteps.map((label, i) => (
-                <div key={i} className="flex items-center gap-3 w-full min-w-0">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="h-3 w-0.5 rounded-full bg-primary" />
+              <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Progress</span>
+            </div>
+            {progressSteps.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-1 mb-1">No steps defined yet. Add steps to track progress.</p>
+            ) : (
+              <div className="flex flex-col gap-0">
+                {progressSteps.map((label, i) => {
+                  const isCompleted = activeSession?.completedStepIndices?.includes(i);
+                  const isSelected = selectedStepIndex === i;
+                  const isRunning = runningStepIndex === i && activeSession?.status === "running";
+                  return (
+                    <div key={i} className="flex gap-2.5 min-w-0">
+                      {/* Timeline column: dot + connector */}
+                      <div className="flex flex-col items-center shrink-0 w-4 pt-[3px]">
+                        <button
+                          type="button"
+                          className="shrink-0 focus:outline-none"
+                          onClick={() => { setSelectedStepIndex(i); setEditingIndex(null); }}
+                          aria-label={`Select step ${i + 1}`}
+                        >
+                          {isRunning ? (
+                            <div className="h-3 w-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                          ) : (
+                            <div className={`h-3 w-3 rounded-full border-2 transition-colors ${
+                              isCompleted
+                                ? "step-circle-completed"
+                                : isSelected
+                                  ? "border-primary bg-primary/20"
+                                  : "border-ink-900/25 bg-surface"
+                            }`} />
+                          )}
+                        </button>
+                        {i < progressSteps.length - 1 && (
+                          <div className="w-px flex-1 min-h-[12px] bg-ink-900/15 mt-0.5" />
+                        )}
+                      </div>
+                      {/* Label column */}
+                      <div className="flex-1 min-w-0 pb-2.5">
+                        {editingStepIndex === i ? (
+                          <input
+                            ref={editingStepIndex === i ? (el) => { editingStepInputRef.current = el; } : undefined}
+                            type="text"
+                            className="w-full rounded border border-ink-900/20 bg-surface px-2 py-1 text-xs text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
+                            value={editingStepDraft}
+                            onChange={(e) => setEditingStepDraft(e.target.value)}
+                            onBlur={saveStepLabelEdit}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") { e.preventDefault(); saveStepLabelEdit(); }
+                              if (e.key === "Escape") { setEditingStepIndex(null); setEditingStepDraft(""); }
+                            }}
+                          />
+                        ) : (
+                          <div className="group flex items-start gap-1 min-w-0">
+                            <button
+                              type="button"
+                              className={`flex-1 text-left text-xs leading-snug rounded px-1 -mx-1 py-0.5 transition-colors hover:bg-ink-900/5 line-clamp-2 break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-700"}`}
+                              onClick={() => { setSelectedStepIndex(i); setEditingIndex(null); }}
+                            >
+                              {label || <span className="italic text-muted-foreground">Untitled step</span>}
+                            </button>
+                            <div className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-ink-400 hover:text-ink-600 hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                onClick={(e) => { e.stopPropagation(); startEditStepLabel(i); }}
+                                aria-label="Edit step label"
+                              >
+                                <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-ink-400 hover:text-error hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                onClick={(e) => { e.stopPropagation(); deleteStep(i); }}
+                                aria-label="Delete step"
+                              >
+                                <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M18 6L6 18M6 6l12 12" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* Action buttons: Add step + Run selected step */}
+            <div className="flex gap-2 mt-1">
+              <button
+                type="button"
+                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-900/20 px-2 py-1.5 text-xs text-muted-foreground hover:border-ink-900/30 hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
+                onClick={addStep}
+                aria-label="Add step"
+              >
+                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                <span>Add step</span>
+              </button>
+              {progressSteps.length > 0 && activeSessionId && (() => {
+                const isStepCompleted = activeSession?.completedStepIndices?.includes(selectedStepIndex);
+                const isSelectedStepRunning = runningStepIndex === selectedStepIndex && activeSession?.status === "running";
+                if (isSelectedStepRunning) {
+                  return (
+                    <div className="flex items-center justify-center gap-1.5 rounded-lg bg-ink-900/8 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
+                        <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
+                      </svg>
+                      <span>Running step {selectedStepIndex + 1}...</span>
+                    </div>
+                  );
+                }
+                return (
                   <button
                     type="button"
-                    className="flex flex-col items-center shrink-0 rounded-full p-1.5 -m-1.5 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:ring-inset min-w-[32px] min-h-[32px] justify-center"
+                    className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover transition-colors shadow-soft"
                     onClick={() => {
-                      setSelectedStepIndex(i);
-                      setEditingIndex(null);
-                      if (activeSessionId) {
-                        sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId, stepIndex: i } });
-                      }
+                      setRunningStepIndex(selectedStepIndex);
+                      sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId, stepIndex: selectedStepIndex } });
                     }}
-                    aria-label={`Run step ${i + 1}`}
+                    aria-label={`${isStepCompleted ? "Rerun" : "Run"} step ${selectedStepIndex + 1}`}
                   >
-                    <div
-                      className={`h-4 w-4 rounded-full border-2 transition-colors flex-shrink-0 ${
-                        activeSession?.completedStepIndices?.includes(i)
-                          ? "step-circle-completed"
-                          : selectedStepIndex === i
-                            ? "border-accent bg-accent/20"
-                            : "border-ink-900/30 bg-surface"
-                      }`}
-                    />
-                    {i < progressSteps.length - 1 && (
-                      <div className="w-px h-4 bg-ink-900/20 shrink-0 mt-0.5" />
-                    )}
-                  </button>
-                  <div className="flex-1 min-w-0 py-0.5">
-                    {editingStepIndex === i ? (
-                      <input
-                        ref={editingStepIndex === i ? (el) => { editingStepInputRef.current = el; } : undefined}
-                        type="text"
-                        className="w-full rounded border border-ink-900/20 bg-surface px-2 py-1 text-xs text-ink-800 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
-                        value={editingStepDraft}
-                        onChange={(e) => setEditingStepDraft(e.target.value)}
-                        onBlur={saveStepLabelEdit}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            saveStepLabelEdit();
-                          }
-                          if (e.key === "Escape") {
-                            setEditingStepIndex(null);
-                            setEditingStepDraft("");
-                          }
-                        }}
-                      />
+                    {isStepCompleted ? (
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="1 4 1 10 7 10" />
+                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                      </svg>
                     ) : (
-                      <div className="flex items-center gap-0.5 min-w-0 group">
-                        <button
-                          type="button"
-                          className={`flex-1 text-left text-xs truncate rounded px-1 -mx-1 py-0.5 transition-colors hover:bg-ink-900/5 ${selectedStepIndex === i ? "font-medium text-ink-800" : "text-ink-700"}`}
-                          onClick={() => {
-                            setSelectedStepIndex(i);
-                            setEditingIndex(null);
-                          }}
-                        >
-                          {label}
-                        </button>
-                        <button
-                          type="button"
-                          className="shrink-0 rounded p-0.5 text-ink-400 hover:text-ink-600 hover:bg-ink-900/10 opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/30"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            startEditStepLabel(i);
-                          }}
-                          aria-label="Edit step label"
-                        >
-                          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                          </svg>
-                        </button>
-                        <button
-                          type="button"
-                          className="shrink-0 rounded p-0.5 text-ink-400 hover:text-error hover:bg-ink-900/10 opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-accent/30"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteStep(i);
-                          }}
-                          aria-label="Delete step"
-                        >
-                          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M5 12h14" />
-                          </svg>
-                        </button>
-                      </div>
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="currentColor">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
                     )}
-                  </div>
-                </div>
-              ))}
-              <div className="flex items-center gap-3 w-full min-w-0">
-                <div className="shrink-0 w-8 h-4" aria-hidden />
-                <button
-                  type="button"
-                  className="flex-1 flex items-center gap-1.5 rounded-lg border border-dashed border-ink-900/20 px-2 py-1.5 mt-0.5 text-xs text-muted hover:border-ink-900/30 hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
-                  onClick={addStep}
-                  aria-label="Add step"
-                >
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M12 5v14M5 12h14" />
-                  </svg>
-                  <span>Add step</span>
-                </button>
-              </div>
+                    <span>{isStepCompleted ? "Rerun" : "Run"} step {selectedStepIndex + 1}</span>
+                  </button>
+                );
+              })()}
             </div>
           </div>
         )}
       </div>
       {/* Files: expected output file name(s) for the current step */}
       <div className="shrink-0 flex flex-col border-t border-ink-900/10 pt-2 pb-2">
-        <div className="shrink-0 text-sm font-semibold text-ink-600 mb-1.5">
-          Files {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+        <div className="shrink-0 flex items-center gap-2 mb-1.5">
+          <div className="h-3 w-0.5 rounded-full bg-ink-400" />
+          <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+            Files {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+          </span>
         </div>
         <div className="min-h-0 overflow-y-auto max-h-[88px] flex flex-col gap-1">
           {(activeSession?.outputFiles?.[selectedStepIndex] ?? []).length === 0 ? (
-            <p className="text-xs text-muted py-0.5">No output file name for this step.</p>
+            <p className="text-xs text-muted-foreground py-0.5">No output file name for this step.</p>
           ) : (
             (activeSession?.outputFiles?.[selectedStepIndex] ?? []).map((fileName, i) => (
               <div key={i} className="font-mono text-xs text-ink-700 truncate rounded bg-ink-900/5 px-2 py-1" title={fileName}>
@@ -553,12 +565,15 @@ export function Sidebar({
       </div>
       {/* Verifier area (per-step criteria from workflow or user) */}
       <div className="flex-1 min-h-0 max-h-[260px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-        <div className="shrink-0 text-sm font-semibold text-ink-600 mb-2">
-          Verifier {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+        <div className="shrink-0 flex items-center gap-2 mb-2">
+          <div className="h-3 w-0.5 rounded-full bg-ink-400" />
+          <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+            Verifier {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
+          </span>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
           {verificationCriteria.length === 0 && !editingIndex ? (
-            <p className="text-xs text-muted py-1">No verifiers for this step. Add criteria to check output files and quality.</p>
+            <p className="text-xs text-muted-foreground py-1">No verifiers for this step. Add criteria to check output files and quality.</p>
           ) : null}
           {verificationCriteria.map((text, index) => {
             const mark = currentVerifierMarks[index];
@@ -566,10 +581,10 @@ export function Sidebar({
               <div key={index} className="shrink-0 flex items-start gap-2">
                 <div className="flex-1 min-w-0">
                   {editingIndex === index ? (
-                    <div className="rounded-xl border border-accent/40 bg-surface p-1.5">
+                    <div className="rounded-xl border border-primary/40 bg-surface p-1.5">
                       <textarea
                         ref={editingIndex === index ? (el) => { editInputRef.current = el; } : undefined}
-                        className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/30"
+                        className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
                         placeholder="Enter verification criterion..."
                         value={draftText}
                         onChange={(e) => setDraftText(e.target.value)}
@@ -600,7 +615,7 @@ export function Sidebar({
                     e.stopPropagation();
                     toggleVerifierMark(index);
                   }}
-                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-ink-900/10 hover:text-ink-700 focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors mt-0.5"
+                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-ink-900/10 hover:text-ink-700 focus:outline-none focus:ring-2 focus:ring-primary/30 transition-colors mt-0.5"
                   aria-label={mark === "check" ? "Mark as failed (cross)" : "Mark as passed (check)"}
                   title={mark === "check" ? "Mark as failed" : "Mark as passed"}
                 >
@@ -624,7 +639,7 @@ export function Sidebar({
                     e.stopPropagation();
                     removeCriterion(index);
                   }}
-                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-red-50 hover:text-red-600 hover:border-red-200 focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors mt-0.5"
+                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-red-50 hover:text-red-600 hover:border-red-200 focus:outline-none focus:ring-2 focus:ring-primary/30 transition-colors mt-0.5"
                   aria-label="Remove verifier"
                   title="Remove verifier"
                 >
@@ -639,7 +654,7 @@ export function Sidebar({
           })}
           <button
             type="button"
-            className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-2.5 text-muted hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[38px] w-full"
+            className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-2.5 text-muted-foreground hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[38px] w-full"
             onClick={startAddCriterion}
             aria-label="Add verification criterion"
           >
@@ -651,8 +666,8 @@ export function Sidebar({
       </div>
       <Dialog.Root open={!!resumeSessionId} onOpenChange={(open) => !open && setResumeSessionId(null)}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-xl -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-6 shadow-xl">
+          <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm animate-fade-in" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-xl -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-6 shadow-xl animate-scale-in">
             <div className="flex items-start justify-between gap-4">
               <Dialog.Title className="text-lg font-semibold text-ink-800">Resume</Dialog.Title>
               <Dialog.Close asChild>
@@ -671,6 +686,33 @@ export function Sidebar({
                 ) : (
                   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>
                 )}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root open={!!deleteConfirmSessionId} onOpenChange={(open) => !open && setDeleteConfirmSessionId(null)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm animate-fade-in" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 w-full max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-6 shadow-xl animate-scale-in">
+            <Dialog.Title className="text-lg font-semibold text-ink-800">Delete session?</Dialog.Title>
+            <p className="mt-2 text-sm text-muted-foreground">This action cannot be undone. The session and its history will be permanently removed.</p>
+            <div className="mt-5 flex gap-3">
+              <Dialog.Close asChild>
+                <button className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors">
+                  Cancel
+                </button>
+              </Dialog.Close>
+              <button
+                className="flex-1 rounded-xl bg-error px-4 py-2.5 text-sm font-medium text-white hover:bg-error/90 transition-colors"
+                onClick={() => {
+                  if (deleteConfirmSessionId) {
+                    onDeleteSession(deleteConfirmSessionId);
+                    setDeleteConfirmSessionId(null);
+                  }
+                }}
+              >
+                Delete
               </button>
             </div>
           </Dialog.Content>

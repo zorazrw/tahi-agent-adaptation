@@ -1,10 +1,75 @@
 import { useEffect, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { Spinner } from "./Spinner";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
+type Tab = "api" | "skills";
+
 export function SettingsModal({ onClose }: SettingsModalProps) {
+  const [tab, setTab] = useState<Tab>("api");
+
+  return (
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-ink-900/20 backdrop-blur-sm animate-fade-in" />
+        <Dialog.Content className="fixed inset-0 z-50 flex items-center justify-center px-4 py-8">
+          <div className="w-full max-w-lg rounded-2xl border border-ink-900/5 bg-surface shadow-elevated animate-scale-in flex flex-col max-h-[80vh]">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 pt-6 pb-0 shrink-0">
+              <Dialog.Title className="text-base font-semibold text-ink-800">Settings</Dialog.Title>
+              <Dialog.Close asChild>
+                <button
+                  className="rounded-full p-1.5 text-muted-foreground hover:bg-surface-tertiary hover:text-ink-700 transition-colors"
+                  aria-label="Close"
+                >
+                  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </Dialog.Close>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex gap-1 px-6 pt-4 pb-0 shrink-0">
+              <button
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  tab === "api"
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+                onClick={() => setTab("api")}
+              >
+                API
+              </button>
+              <button
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  tab === "skills"
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+                onClick={() => setTab("skills")}
+              >
+                Skills
+              </button>
+            </div>
+
+            {/* Tab content */}
+            <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6 pt-4">
+              {tab === "api" ? <ApiPanel onClose={onClose} /> : <SkillsPanel />}
+            </div>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+/* ---------- API Config Panel ---------- */
+
+function ApiPanel({ onClose }: { onClose: () => void }) {
   const [apiKey, setApiKey] = useState("");
   const [baseURL, setBaseURL] = useState("");
   const [model, setModel] = useState("");
@@ -14,7 +79,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
-    // 加载当前配置
     setLoading(true);
     window.electron.getApiConfig()
       .then((config) => {
@@ -34,27 +98,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   }, []);
 
   const handleSave = async () => {
-    // 验证输入
-    if (!apiKey.trim()) {
-      setError("API Key is required");
-      return;
-    }
-    if (!baseURL.trim()) {
-      setError("Base URL is required");
-      return;
-    }
-    if (!model.trim()) {
-      setError("Model is required");
-      return;
-    }
-
-    // 验证 URL 格式
-    try {
-      new URL(baseURL);
-    } catch {
-      setError("Invalid Base URL format");
-      return;
-    }
+    if (!apiKey.trim()) { setError("API Key is required"); return; }
+    if (!baseURL.trim()) { setError("Base URL is required"); return; }
+    if (!model.trim()) { setError("Model is required"); return; }
+    try { new URL(baseURL); } catch { setError("Invalid Base URL format"); return; }
 
     setError(null);
     setSaving(true);
@@ -84,105 +131,251 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Spinner className="w-6 h-6 text-primary" color="currentColor" />
+      </div>
+    );
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-900/20 px-4 py-8 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-2xl border border-ink-900/5 bg-surface p-6 shadow-elevated">
-        <div className="flex items-center justify-between">
-          <div className="text-base font-semibold text-ink-800">API Configuration</div>
-          <button
-            className="rounded-full p-1.5 text-muted hover:bg-surface-tertiary hover:text-ink-700 transition-colors"
-            onClick={onClose}
-            aria-label="Close"
-          >
-            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-        <p className="mt-2 text-sm text-muted">Supports Anthropic’s official API as well as third-party APIs compatible with the Anthropic format.</p>
+    <>
+      <p className="text-sm text-muted-foreground">Supports Anthropic's official API as well as third-party APIs compatible with the Anthropic format.</p>
+      <div className="mt-4 grid gap-4">
+        <label className="grid gap-1.5">
+          <span className="text-xs font-medium text-muted-foreground">Base URL</span>
+          <input
+            type="url"
+            className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
+            placeholder="https://..."
+            value={baseURL}
+            onChange={(e) => setBaseURL(e.target.value)}
+            required
+          />
+        </label>
+        <label className="grid gap-1.5">
+          <span className="text-xs font-medium text-muted-foreground">API Key</span>
+          <input
+            type="password"
+            className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
+            placeholder="sk-..."
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            required
+          />
+        </label>
+        <label className="grid gap-1.5">
+          <span className="text-xs font-medium text-muted-foreground">Model Name</span>
+          <input
+            type="text"
+            className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
+            placeholder="claude-3-5-sonnet-20241022"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            required
+          />
+        </label>
 
-        {loading ? (
-          <div className="mt-5 flex items-center justify-center py-8">
-            <svg aria-hidden="true" className="w-6 h-6 animate-spin text-accent" viewBox="0 0 100 101" fill="none">
-              <path d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z" fill="currentColor" opacity="0.3" />
-              <path d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z" fill="currentColor" />
-            </svg>
-          </div>
-        ) : (
-          <div className="mt-5 grid gap-4">
-            <label className="grid gap-1.5">
-              <span className="text-xs font-medium text-muted">Base URL</span>
-              <input
-                type="url"
-                className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-muted-light focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20 transition-colors"
-                placeholder="htts://..."
-                value={baseURL}
-                onChange={(e) => setBaseURL(e.target.value)}
-                required
-              />
-            </label>
-
-            <label className="grid gap-1.5">
-              <span className="text-xs font-medium text-muted">API Key</span>
-              <input
-                type="string"
-                className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-muted-light focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20 transition-colors"
-                placeholder="sk-..."
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                required
-              />
-            </label>
-
-            <label className="grid gap-1.5">
-              <span className="text-xs font-medium text-muted">Model Name</span>
-              <input
-                type="text"
-                className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-muted-light focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20 transition-colors"
-                placeholder="claude-3-5-sonnet-20241022"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                required
-              />
-            </label>
-
-            {error && (
-              <div className="rounded-xl border border-error/20 bg-error-light px-4 py-2.5 text-sm text-error">
-                {error}
-              </div>
-            )}
-
-            {success && (
-              <div className="rounded-xl border border-success/20 bg-success-light px-4 py-2.5 text-sm text-success">
-                Configuration saved successfully!
-              </div>
-            )}
-
-            <div className="flex gap-3">
-              <button
-                className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors"
-                onClick={onClose}
-                disabled={saving}
-              >
-                Cancel
-              </button>
-              <button
-                className="flex-1 rounded-xl bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-accent-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={handleSave}
-                disabled={saving || !apiKey.trim() || !baseURL.trim() || !model.trim()}
-              >
-                {saving ? (
-                  <svg aria-hidden="true" className="mx-auto w-5 h-5 animate-spin" viewBox="0 0 100 101" fill="none">
-                    <path d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z" fill="currentColor" opacity="0.3" />
-                    <path d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z" fill="white" />
-                  </svg>
-                ) : "Save"}
-              </button>
-            </div>
+        {error && (
+          <div className="rounded-xl border border-error/20 bg-error-light px-4 py-2.5 text-sm text-error">
+            {error}
           </div>
         )}
+        {success && (
+          <div className="rounded-xl border border-success/20 bg-success-light px-4 py-2.5 text-sm text-success">
+            Configuration saved successfully!
+          </div>
+        )}
+
+        <div className="flex gap-3">
+          <button
+            className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors"
+            onClick={onClose}
+            disabled={saving}
+          >
+            Cancel
+          </button>
+          <button
+            className="flex-1 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={handleSave}
+            disabled={saving || !apiKey.trim() || !baseURL.trim() || !model.trim()}
+          >
+            {saving ? <Spinner className="mx-auto w-5 h-5" /> : "Save"}
+          </button>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
+/* ---------- Skills Panel ---------- */
+
+function SkillsPanel() {
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [skillContent, setSkillContent] = useState<string | null>(null);
+  const [loadingContent, setLoadingContent] = useState(false);
+  const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
+
+  useEffect(() => {
+    window.electron.listSkills().then((result) => {
+      setSkills(result);
+      setLoading(false);
+    });
+  }, []);
+
+  const handleToggleSkill = async (skill: SkillInfo) => {
+    if (expandedPath === skill.path) {
+      setExpandedPath(null);
+      setSkillContent(null);
+      return;
+    }
+    setExpandedPath(skill.path);
+    setSkillContent(null);
+    setLoadingContent(true);
+    const result = await window.electron.getSkillContent(skill.path);
+    setSkillContent("content" in result ? result.content : "Failed to load content.");
+    setLoadingContent(false);
+  };
+
+  const handleRemoveSkill = async (dirName: string) => {
+    const result = await window.electron.removeSkill(dirName);
+    if (result.success) {
+      setSkills((prev) => prev.filter((s) => !(s.dirName === dirName && s.source === "app")));
+      if (skills.find((s) => s.dirName === dirName)?.path === expandedPath) {
+        setExpandedPath(null);
+        setSkillContent(null);
+      }
+    }
+    setRemoveConfirm(null);
+  };
+
+  const handleOpenFolder = () => {
+    window.electron.getSkillsDir();
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Spinner className="w-6 h-6 text-primary" color="currentColor" />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-sm text-muted-foreground">Manage installed skills.</p>
+        <button
+          onClick={handleOpenFolder}
+          className="rounded-lg border border-ink-900/10 bg-surface px-3 py-1.5 text-xs font-medium text-ink-600 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors shrink-0"
+        >
+          Open Folder
+        </button>
+      </div>
+
+      {skills.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-ink-900/15 bg-surface/50 px-6 py-10 text-center">
+          <svg viewBox="0 0 24 24" className="mx-auto h-8 w-8 text-ink-300 mb-3" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+          </svg>
+          <p className="text-sm text-muted-foreground">
+            No skills installed. Add skills by placing directories with{" "}
+            <code className="text-xs bg-ink-900/5 px-1 py-0.5 rounded">SKILL.md</code> files in the skills directory.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {skills.map((skill) => (
+            <div
+              key={`${skill.source}-${skill.dirName}`}
+              className={`rounded-xl border transition-colors ${
+                expandedPath === skill.path
+                  ? "border-primary/30 bg-primary-subtle/30"
+                  : "border-ink-900/10 bg-surface hover:border-ink-900/20 hover:bg-surface-tertiary"
+              }`}
+            >
+              <div
+                className="flex items-center gap-3 px-4 py-3 cursor-pointer"
+                onClick={() => handleToggleSkill(skill)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleToggleSkill(skill); } }}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-ink-800 truncate">{skill.name}</div>
+                  {skill.description && (
+                    <div className="text-xs text-muted-foreground truncate mt-0.5">{skill.description}</div>
+                  )}
+                </div>
+                <span
+                  className={`shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                    skill.source === "app"
+                      ? "bg-amber-100 text-amber-700"
+                      : "bg-ink-900/8 text-ink-500"
+                  }`}
+                >
+                  {skill.source === "app" ? "App" : "User"}
+                </span>
+                {skill.source === "app" && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setRemoveConfirm(skill.dirName); }}
+                    className="shrink-0 rounded-lg p-1.5 text-ink-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                    aria-label={`Remove ${skill.name}`}
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    </svg>
+                  </button>
+                )}
+                <svg
+                  viewBox="0 0 24 24"
+                  className={`h-3.5 w-3.5 shrink-0 text-ink-400 transition-transform ${expandedPath === skill.path ? "rotate-180" : ""}`}
+                  fill="none" stroke="currentColor" strokeWidth="2"
+                >
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </div>
+              {expandedPath === skill.path && (
+                <div className="border-t border-ink-900/10 px-4 py-3">
+                  {loadingContent ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+                      <Spinner className="w-3.5 h-3.5" color="currentColor" />
+                      Loading...
+                    </div>
+                  ) : (
+                    <pre className="text-xs text-ink-700 whitespace-pre-wrap break-words max-h-64 overflow-y-auto leading-relaxed">
+                      {skillContent}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {removeConfirm && (
+        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4">
+          <p className="text-sm text-ink-700">Remove this skill? The skill directory and its symlink will be deleted.</p>
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => setRemoveConfirm(null)}
+              className="flex-1 rounded-lg border border-ink-900/10 bg-white px-3 py-2 text-xs font-medium text-ink-700 hover:bg-surface-tertiary transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => handleRemoveSkill(removeConfirm)}
+              className="flex-1 rounded-lg bg-red-500 px-3 py-2 text-xs font-medium text-white hover:bg-red-600 transition-colors"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

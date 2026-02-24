@@ -3,6 +3,7 @@
         "strict": true,
         "target": "ESNext",
         "module": "NodeNext",
+        "rootDir": "../../src",
         "outDir": "../../dist-electron",
         "skipLibCheck": true,
         // add global types

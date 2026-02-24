@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ServerEvent, SessionStatus, StreamMessage, VerifierMark } from "../types";
+import type { ServerEvent, SessionStatus, StreamMessage, StepCompletedMessage, VerifierMark } from "../types";
 
 export type PermissionRequest = {
   toolUseId: string;
@@ -29,6 +29,9 @@ interface AppState {
   sessions: Record<string, SessionView>;
   activeSessionId: string | null;
   selectedStepIndex: number;
+  previewStepIndex: number;
+  previewPanelOpen: boolean;
+  runningStepIndex: number | null;
   prompt: string;
   cwd: string;
   pendingStart: boolean;
@@ -47,6 +50,9 @@ interface AppState {
   setShowSettingsModal: (show: boolean) => void;
   setActiveSessionId: (id: string | null) => void;
   setSelectedStepIndex: (index: number) => void;
+  setPreviewStepIndex: (index: number) => void;
+  setPreviewPanelOpen: (open: boolean) => void;
+  setRunningStepIndex: (index: number | null) => void;
   setApiConfigChecked: (checked: boolean) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
@@ -55,6 +61,12 @@ interface AppState {
   updateSessionVerifierMarks: (sessionId: string, verifierMarks: VerifierMark[][]) => void;
   updateSessionTitle: (sessionId: string, title: string) => void;
   handleServerEvent: (event: ServerEvent) => void;
+
+  toolStatuses: Record<string, "pending" | "success" | "error">;
+  setToolStatus: (toolUseId: string, status: "pending" | "success" | "error") => void;
+
+  toolMeta: Record<string, { name: string; info: string | null; editData?: { file_path: string; old_string: string; new_string: string }; writeData?: { file_path: string; content: string } }>;
+  setToolMeta: (toolUseId: string, meta: { name: string; info: string | null; editData?: { file_path: string; old_string: string; new_string: string }; writeData?: { file_path: string; content: string } }) => void;
 }
 
 function createSession(id: string): SessionView {
@@ -65,6 +77,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessions: {},
   activeSessionId: null,
   selectedStepIndex: 0,
+  previewStepIndex: 0,
+  previewPanelOpen: false,
+  runningStepIndex: null,
   prompt: "",
   cwd: "",
   pendingStart: false,
@@ -81,9 +96,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   setGlobalError: (globalError) => set({ globalError }),
   setShowStartModal: (showStartModal) => set({ showStartModal }),
   setShowSettingsModal: (showSettingsModal) => set({ showSettingsModal }),
-  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0 }),
-  setSelectedStepIndex: (index) => set({ selectedStepIndex: index }),
+  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0, previewStepIndex: 0, previewPanelOpen: false }),
+  setSelectedStepIndex: (index) => set({ selectedStepIndex: index, previewStepIndex: index }),
+  setPreviewStepIndex: (index) => set({ previewStepIndex: index }),
+  setPreviewPanelOpen: (previewPanelOpen) => set({ previewPanelOpen }),
+  setRunningStepIndex: (runningStepIndex) => set({ runningStepIndex }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
+
+  toolStatuses: {},
+  setToolStatus: (toolUseId, status) => set((state) => ({
+    toolStatuses: { ...state.toolStatuses, [toolUseId]: status }
+  })),
+
+  toolMeta: {},
+  setToolMeta: (toolUseId, meta) => set((state) => ({
+    toolMeta: { ...state.toolMeta, [toolUseId]: meta }
+  })),
 
   updateSessionSteps: (sessionId, steps) => {
     set((state) => {
@@ -309,16 +337,49 @@ export const useAppStore = create<AppState>((set, get) => ({
         break;
       }
 
+      case "session.messagesReset": {
+        const { sessionId, messages, completedStepIndices } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          const isActive = sessionId === state.activeSessionId;
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, messages, completedStepIndices }
+            },
+            // Reset preview state when rewinding
+            ...(isActive ? { previewPanelOpen: false } : {})
+          };
+        });
+        break;
+      }
+
       case "session.stepCompleted": {
         const { sessionId, stepIndex } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           const completed = existing.completedStepIndices ?? [];
           if (completed.includes(stepIndex)) return {};
+          const nextCompleted = [...completed, stepIndex].sort((a, b) => a - b);
+          const isActive = sessionId === state.activeSessionId;
+          const nextStepIndex = Math.min(stepIndex + 1, (existing.steps?.length ?? 1) - 1);
+          const stepLabel = existing.steps?.[stepIndex] ?? `Step ${stepIndex + 1}`;
+          const hasOutputFiles = (existing.outputFiles?.[stepIndex]?.length ?? 0) > 0;
+
+          // Inject synthetic step_completed message into chat
+          const syntheticMsg: StepCompletedMessage = { type: "step_completed", stepIndex, stepLabel };
+          const nextMessages = [...existing.messages, syntheticMsg];
+
           return {
+            selectedStepIndex: isActive ? nextStepIndex : state.selectedStepIndex,
+            previewStepIndex: isActive ? stepIndex : state.previewStepIndex,
+            // Auto-open preview panel when step has output files
+            previewPanelOpen: isActive && hasOutputFiles ? true : state.previewPanelOpen,
+            // Clear running indicator when the step completes
+            runningStepIndex: isActive && state.runningStepIndex === stepIndex ? null : state.runningStepIndex,
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, completedStepIndices: [...completed, stepIndex].sort((a, b) => a - b) }
+              [sessionId]: { ...existing, completedStepIndices: nextCompleted, messages: nextMessages }
             }
           };
         });
@@ -329,7 +390,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         const { sessionId, status, title, cwd } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          const isActive = sessionId === state.activeSessionId;
           return {
+            // Clear running step when session stops running
+            ...(isActive && status !== "running" ? { runningStepIndex: null } : {}),
             sessions: {
               ...state.sessions,
               [sessionId]: {
@@ -379,6 +443,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       case "stream.message": {
         const { sessionId, message } = event.payload;
+        // Skip intermediate stream events (content_block_delta, etc.)
+        // These are handled by partial message state in App.tsx
+        if ((message as any).type === "stream_event") break;
+
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {

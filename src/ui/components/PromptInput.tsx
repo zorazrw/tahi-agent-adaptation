@@ -11,6 +11,7 @@ interface PromptInputProps {
   sendEvent: (event: ClientEvent) => void;
   onSendMessage?: () => void;
   disabled?: boolean;
+  rightOffset?: string;
 }
 
 export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
@@ -69,11 +70,38 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   return { prompt, setPrompt, isRunning, handleSend, handleStop, handleStartFromModal };
 }
 
-export function PromptInput({ sendEvent, onSendMessage, disabled = false }: PromptInputProps) {
+export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightOffset }: PromptInputProps) {
   const { prompt, setPrompt, isRunning, handleSend, handleStop } = usePromptActions(sendEvent);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
+  const activeSessionId = useAppStore((state) => state.activeSessionId);
+  const sessions = useAppStore((state) => state.sessions);
+  const selectedStepIndex = useAppStore((state) => state.selectedStepIndex);
+  const setRunningStepIndex = useAppStore((state) => state.setRunningStepIndex);
+  const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+
+  // Determine if there's a pending (not yet completed) step that can be started
+  const hasPendingStep = !!(
+    activeSessionId &&
+    activeSession &&
+    activeSession.status !== "running" &&
+    activeSession.steps &&
+    activeSession.steps.length > 0 &&
+    !activeSession.completedStepIndices?.includes(selectedStepIndex)
+  );
+
+  const pendingStepLabel = hasPendingStep
+    ? activeSession!.steps![selectedStepIndex] || `Step ${selectedStepIndex + 1}`
+    : null;
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Tab to start next pending step
+    if (e.key === "Tab" && hasPendingStep && !prompt.trim()) {
+      e.preventDefault();
+      setRunningStepIndex(selectedStepIndex);
+      sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId!, stepIndex: selectedStepIndex } });
+      return;
+    }
     if (disabled && !isRunning) return;
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
@@ -119,21 +147,29 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false }: Prom
   }, [prompt]);
 
   return (
-    <section className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 px-2 lg:pb-8 pt-8 lg:ml-[280px]">
-      <div className="mx-auto flex w-full max-w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-surface px-4 py-3 shadow-card lg:max-w-3xl">
-        <textarea
-          rows={1}
-          className="flex-1 resize-none bg-transparent py-1.5 text-sm text-ink-800 placeholder:text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
-          placeholder={disabled ? "Create/select a task to start..." : "Describe what you want agent to handle..."}
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onInput={handleInput}
-          ref={promptRef}
-          disabled={disabled && !isRunning}
-        />
+    <section className={`fixed bottom-0 left-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 lg:pb-8 pt-8 lg:ml-[var(--sidebar-width)] ${rightOffset ? "px-4" : "px-2"}`} style={{ right: rightOffset ?? 0 }}>
+      <div className={`mx-auto flex w-full max-w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-surface px-4 py-3 shadow-card transition-[border-color,box-shadow] duration-150 ease-out focus-within:border-ink-900/25 focus-within:shadow-[0_4px_16px_rgba(0,0,0,0.08),0_0_0_3px_rgba(217,119,87,0.08)] ${rightOffset ? "" : "lg:max-w-3xl"}`}>
+        <div className="flex-1 relative">
+          <textarea
+            rows={1}
+            className="w-full resize-none bg-transparent py-1.5 text-sm text-ink-800 placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+            placeholder={disabled ? "Create/select a task to start..." : "Describe what you want agent to handle..."}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onInput={handleInput}
+            ref={promptRef}
+            disabled={disabled && !isRunning}
+          />
+          {hasPendingStep && !prompt.trim() && (
+            <div className="absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
+              <kbd className="inline-flex items-center rounded border border-ink-900/15 bg-ink-900/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground leading-none">TAB</kbd>
+              <span className="text-xs text-muted-foreground whitespace-nowrap">to start next step</span>
+            </div>
+          )}
+        </div>
         <button
-          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${isRunning ? "bg-error text-white hover:bg-error/90" : "bg-accent text-white hover:bg-accent-hover"}`}
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${isRunning ? "bg-error text-white hover:bg-error/90" : "bg-primary text-white hover:bg-primary-hover"}`}
           onClick={handleButtonClick}
           aria-label={isRunning ? "Stop session" : "Send prompt"}
           disabled={disabled && !isRunning}
