@@ -19,6 +19,15 @@ import { PanelRightOpenIcon, PanelRightCloseIcon } from "lucide-react";
 
 const SCROLL_THRESHOLD = 50;
 
+function AnimatedDots() {
+  const [count, setCount] = useState(1);
+  useEffect(() => {
+    const id = setInterval(() => setCount((c) => (c % 3) + 1), 500);
+    return () => clearInterval(id);
+  }, []);
+  return <>{".".repeat(count)}</>;
+}
+
 function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -492,7 +501,7 @@ function App() {
                         <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "300ms" }} />
                         <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "450ms" }} />
                       </span>
-                      <span>Thinking...</span>
+                      <span>Thinking<AnimatedDots /></span>
                     </div>
                   ) : (
                     <MessageResponse isAnimating={showPartialMessage} caret="block">{partialMessage}</MessageResponse>
