@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { TopLevelItem } from "../hooks/useGroupedMessages";
 import type { IndexedMessage } from "../hooks/useMessageWindow";
 import type { PermissionRequest } from "../store/useAppStore";
@@ -45,11 +45,35 @@ export function TaskToolCard({
   }, [group.children]);
 
   const toolState = group.status === "running" ? "running" : group.status === "error" ? "error" : "completed";
-  const defaultOpen = group.status === "running";
+
+  // Controlled open state: starts open when running, auto-collapses on completion
+  const [isOpen, setIsOpen] = useState(group.status === "running");
+  const prevStatusRef = useRef(group.status);
+
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = group.status;
+
+    if (group.status === "running") {
+      setIsOpen(true);
+    } else if (prev === "running" && (group.status === "completed" || group.status === "error")) {
+      // Auto-collapse when task finishes
+      setIsOpen(false);
+    }
+  }, [group.status]);
+
+  // Auto-scroll to bottom when children update while running
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (group.status === "running" && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [group.children.length, group.status]);
 
   return (
     <div className="mt-3">
-      <Tool defaultOpen={defaultOpen} className="border-l-2 border-l-primary/30">
+      <Tool open={isOpen} onOpenChange={setIsOpen} className="border-l-2 border-l-primary/30">
         <ToolHeader
           icon={<WrenchIcon className="size-4" />}
           title="Task"
@@ -69,7 +93,7 @@ export function TaskToolCard({
           state={toolState}
         />
         <ToolContent className="p-0">
-          <div className="max-h-[600px] overflow-y-auto pl-2 pr-1 py-1">
+          <div ref={scrollRef} className="max-h-[600px] overflow-y-auto pl-2 pr-1 py-0.5 [&>div]:!mt-1">
             {group.children.length === 0 && group.status === "running" && (
               <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
                 <span className="inline-grid grid-cols-2 gap-0.5 opacity-40">

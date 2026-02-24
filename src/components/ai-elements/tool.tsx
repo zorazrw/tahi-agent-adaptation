@@ -51,13 +51,13 @@ export const ToolHeader = ({
     {icon && <span className="shrink-0 text-muted-foreground">{icon}</span>}
     <span className="font-semibold shrink-0">{title}</span>
     {description && (
-      <span className="truncate text-muted-foreground font-mono text-xs">{description}</span>
+      <span className="flex-1 min-w-0 truncate text-muted-foreground font-mono text-xs">{description}</span>
     )}
+    {!description && <span className="flex-1" />}
     {state === "running" && (
       <LoaderIcon className="size-3.5 shrink-0 text-muted-foreground animate-spin" />
     )}
-    <span className="flex-1" />
-    {suffix}
+    {suffix && <span className="shrink-0">{suffix}</span>}
     <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-[state=open]:rotate-90" />
   </CollapsibleTrigger>
 );
