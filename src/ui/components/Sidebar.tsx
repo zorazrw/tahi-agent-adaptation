@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Dialog from "@radix-ui/react-dialog";
+import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/ui/components/ui/combobox";
 import type { ClientEvent } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
@@ -325,99 +325,71 @@ export function Sidebar({
               No sessions yet. Click "+ New Task" to start.
             </div>
           ) : (
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className="flex w-full cursor-pointer items-center gap-2 rounded-xl border border-ink-900/10 bg-surface px-3 py-3 text-left transition hover:bg-surface-tertiary hover:border-ink-900/20 focus:outline-none focus:ring-2 focus:ring-primary/30 data-[state=open]:border-primary/30 data-[state=open]:bg-primary-subtle"
-                >
-                  <div
-                    className="flex min-w-0 flex-1 flex-col overflow-hidden"
-                    onClick={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => e.stopPropagation()}
-                  >
-                    {activeSessionId && sessions[activeSessionId] ? (
-                      editingTitle ? (
-                        <input
-                          ref={titleInputRef}
-                          type="text"
-                          className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] font-medium text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
-                          value={titleDraft}
-                          onChange={(e) => setTitleDraft(e.target.value)}
-                          onBlur={saveTitle}
-                          onKeyDown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === "Enter") saveTitle();
-                            if (e.key === "Escape") { setEditingTitle(false); setTitleDraft(""); }
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                          onPointerDown={(e) => e.stopPropagation()}
-                          aria-label="Edit task title"
-                        />
-                      ) : (
-                        <>
-                          <div
-                            className={`text-[12px] font-medium ${sessions[activeSessionId].status === "running" ? "text-info" : sessions[activeSessionId].status === "completed" ? "text-success" : sessions[activeSessionId].status === "error" ? "text-error" : "text-ink-800"} truncate cursor-text hover:underline`}
-                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); startEditTitle(); }}
-                            onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); startEditTitle(); } }}
-                            aria-label="Edit task title"
-                          >
-                            {sessions[activeSessionId].title}
-                          </div>
-                          <div className="mt-0.5 text-xs text-muted-foreground">
-                            <span className="truncate">{formatCwd(sessions[activeSessionId].cwd)}</span>
-                          </div>
-                        </>
-                      )
-                    ) : (
-                      <span className="text-xs text-muted-foreground">Select a task</span>
+            <div className="space-y-1.5">
+              <Combobox
+                items={sessionList}
+                value={activeSessionId ? sessionList.find((s) => s.id === activeSessionId) ?? null : null}
+                onValueChange={(session) => { if (session) setActiveSessionId(session.id); }}
+                itemToStringLabel={(session) => session.title}
+                itemToStringValue={(session) => session.title}
+              >
+                <ComboboxInput placeholder="Search tasks..." className="w-full" />
+                <ComboboxContent>
+                  <ComboboxEmpty>No tasks found.</ComboboxEmpty>
+                  <ComboboxList>
+                    {(session) => (
+                      <ComboboxItem key={session.id} value={session}>
+                        <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${session.status === "running" ? "bg-info" : session.status === "completed" ? "bg-success" : session.status === "error" ? "bg-error" : "bg-ink-300"}`} />
+                        <span className="truncate">{session.title}</span>
+                      </ComboboxItem>
                     )}
-                  </div>
-                  <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-ink-500" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M6 9l6 6 6-6" />
-                  </svg>
+                  </ComboboxList>
+                </ComboboxContent>
+              </Combobox>
+              {activeSessionId && sessions[activeSessionId] && (
+                <div className="flex items-center gap-1 px-0.5">
+                  <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground">{formatCwd(sessions[activeSessionId].cwd)}</span>
+                  <button
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
+                    onClick={startEditTitle}
+                    aria-label="Edit title"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
+                  </button>
+                  <button
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-error hover:bg-ink-900/5 transition-colors"
+                    onClick={() => setDeleteConfirmSessionId(activeSessionId)}
+                    aria-label="Delete session"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" /></svg>
+                  </button>
+                  <button
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
+                    onClick={() => setResumeSessionId(activeSessionId)}
+                    aria-label="Resume in Claude Code"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 5h16v14H4z" /><path d="M7 9h10M7 12h6" /><path d="M13 15l3 2-3 2" /></svg>
+                  </button>
                 </div>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content className="z-50 max-h-[min(60vh,320px)] min-w-[240px] overflow-y-auto rounded-xl border border-ink-900/10 bg-white p-1 shadow-lg" align="start" sideOffset={6}>
-                  <div className="px-2 py-1.5 text-xs font-medium text-ink-500">Switch task</div>
-                  {sessionList.map((session) => (
-                    <DropdownMenu.Item
-                      key={session.id}
-                      className="flex cursor-pointer flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left text-sm text-ink-700 outline-none hover:bg-ink-900/5 data-[highlighted]:bg-ink-900/5"
-                      onSelect={() => setActiveSessionId(session.id)}
-                    >
-                      <span className={`font-medium ${session.status === "running" ? "text-info" : session.status === "completed" ? "text-success" : session.status === "error" ? "text-error" : "text-ink-800"}`}>
-                        {session.title}
-                      </span>
-                      <span className="text-xs text-muted-foreground">{formatCwd(session.cwd)}</span>
-                    </DropdownMenu.Item>
-                  ))}
-                  {activeSessionId && (
-                    <>
-                      <DropdownMenu.Separator className="my-1 h-px bg-ink-900/10" />
-                      <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => activeSessionId && setDeleteConfirmSessionId(activeSessionId)}>
-                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-error/80" fill="none" stroke="currentColor" strokeWidth="1.8">
-                          <path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" />
-                        </svg>
-                        Delete this session
-                      </DropdownMenu.Item>
-                      <DropdownMenu.Item className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm text-ink-700 outline-none hover:bg-ink-900/5" onSelect={() => activeSessionId && setResumeSessionId(activeSessionId)}>
-                        <svg viewBox="0 0 24 24" className="h-4 w-4 text-ink-500" fill="none" stroke="currentColor" strokeWidth="1.8">
-                          <path d="M4 5h16v14H4z" /><path d="M7 9h10M7 12h6" /><path d="M13 15l3 2-3 2" />
-                        </svg>
-                        Resume in Claude Code
-                      </DropdownMenu.Item>
-                    </>
-                  )}
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
+              )}
+              {editingTitle && activeSessionId && (
+                <div className="mt-1.5 px-0.5">
+                  <input
+                    ref={titleInputRef}
+                    type="text"
+                    className="w-full rounded-md border border-ink-900/20 bg-white px-2 py-1 text-sm text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
+                    value={titleDraft}
+                    onChange={(e) => setTitleDraft(e.target.value)}
+                    onBlur={saveTitle}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveTitle();
+                      if (e.key === "Escape") { setEditingTitle(false); setTitleDraft(""); }
+                    }}
+                    aria-label="Edit task title"
+                  />
+                </div>
+              )}
+            </div>
           )}
         </div>
         {/* Progress: vertical timeline */}
