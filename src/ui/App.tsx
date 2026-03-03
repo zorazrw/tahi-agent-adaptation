@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
-import type { ServerEvent, StreamMessage } from "./types";
+import type { ServerEvent } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { StartSessionModal } from "./components/StartSessionModal";
 import { SettingsModal } from "./components/SettingsModal";
@@ -116,14 +116,7 @@ function App() {
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
 
-  // Determine if any step has output files (for toggle button visibility)
-  const hasAnyPreviewFiles = useMemo(() => {
-    const outputFiles = activeSession?.outputFiles;
-    if (!outputFiles) return false;
-    return outputFiles.some((files) => files?.length > 0);
-  }, [activeSession?.outputFiles]);
-
-  const showPreviewPanel = previewPanelOpen && hasAnyPreviewFiles;
+  const showChatPanel = previewPanelOpen;
 
   const {
     visibleMessages,
@@ -288,9 +281,9 @@ function App() {
       if (!isDraggingRef.current) return;
       const rect = container.getBoundingClientRect();
       const x = ev.clientX - rect.left;
-      // Preview is on the right, so previewWidthPct = 100 - chatPct
-      const chatPct = Math.min(85, Math.max(30, (x / rect.width) * 100));
-      setPreviewWidthPct(100 - chatPct);
+      // Preview is on the left (center), chat on the right; x = preview width
+      const previewPct = Math.min(85, Math.max(30, (x / rect.width) * 100));
+      setPreviewWidthPct(100 - previewPct);
     };
     const onMouseUp = () => {
       isDraggingRef.current = false;
@@ -304,49 +297,6 @@ function App() {
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
   }, []);
-
-  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
-
-  // Filter to only high-level messages (skip raw stream events)
-  const transcriptMessages = useMemo(() => {
-    const validTypes = new Set(["user_prompt", "assistant", "user", "system", "result", "step_completed"]);
-    return messages.filter((m) => validTypes.has(m.type));
-  }, [messages]);
-
-  const messagesToMarkdown = useCallback((msgs: StreamMessage[]) => {
-    const lines: string[] = [];
-    for (const msg of msgs) {
-      if (msg.type === "step_completed") {
-        lines.push(`---\n**Step ${msg.stepIndex + 1} completed:** ${msg.stepLabel}\n`);
-      } else if (msg.type === "user_prompt") {
-        lines.push(`## User\n\n${msg.prompt}\n`);
-      } else if (msg.type === "assistant") {
-        for (const block of (msg as any).message.content) {
-          if (block.type === "text") lines.push(`## Assistant\n\n${block.text}\n`);
-          else if (block.type === "tool_use") lines.push(`### Tool Use: ${block.name}\n\n\`\`\`json\n${JSON.stringify(block.input, null, 2)}\n\`\`\`\n`);
-        }
-      } else if (msg.type === "user") {
-        for (const block of (msg as any).message.content) {
-          if (block.type === "tool_result") {
-            const text = Array.isArray(block.content) ? block.content.map((c: any) => c.text || "").join("\n") : String(block.content ?? "");
-            if (text.trim()) lines.push(`### Tool Result${block.is_error ? " (Error)" : ""}\n\n\`\`\`\n${text}\n\`\`\`\n`);
-          }
-        }
-      } else if (msg.type === "result") {
-        const r = msg as any;
-        lines.push(`## Result (${r.subtype})\n\nCost: $${r.total_cost_usd?.toFixed(2) ?? "?"} | Duration: ${r.duration_ms ? (r.duration_ms / 60000).toFixed(1) + "min" : "?"}\n`);
-      }
-    }
-    return lines.join("\n");
-  }, []);
-
-  const handleCopyTranscript = useCallback((format: "json" | "markdown") => {
-    const data = format === "json" ? JSON.stringify(transcriptMessages, null, 2) : messagesToMarkdown(transcriptMessages);
-    navigator.clipboard.writeText(data).then(() => {
-      setCopyFeedback(format === "json" ? "JSON" : "Markdown");
-      setTimeout(() => setCopyFeedback(null), 1500);
-    });
-  }, [transcriptMessages, messagesToMarkdown]);
 
   return (
     <div className="flex h-screen bg-surface">
@@ -365,32 +315,18 @@ function App() {
           <span className="text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
           {activeSession && (
             <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-              {copyFeedback ? (
-                <span className="text-xs text-success px-2 py-0.5">Copied {copyFeedback}!</span>
-              ) : (
-                <>
-                  <button onClick={() => handleCopyTranscript("markdown")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as Markdown">
-                    Copy MD
-                  </button>
-                  <button onClick={() => handleCopyTranscript("json")} className="text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors" title="Copy as JSON">
-                    Copy JSON
-                  </button>
-                </>
-              )}
-              {hasAnyPreviewFiles && (
-                <button
-                  onClick={() => setPreviewPanelOpen(!previewPanelOpen)}
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
-                  title={previewPanelOpen ? "Close preview" : "Open preview"}
-                >
-                  {previewPanelOpen ? (
-                    <PanelRightCloseIcon className="size-3.5" />
-                  ) : (
-                    <PanelRightOpenIcon className="size-3.5" />
-                  )}
-                  Preview
-                </button>
-              )}
+              <button
+                onClick={() => setPreviewPanelOpen(!previewPanelOpen)}
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
+                title={previewPanelOpen ? "Close chat" : "Open chat"}
+              >
+                {previewPanelOpen ? (
+                  <PanelRightCloseIcon className="size-3.5" />
+                ) : (
+                  <PanelRightOpenIcon className="size-3.5" />
+                )}
+                Chat
+              </button>
             </div>
           )}
         </div>
@@ -414,116 +350,27 @@ function App() {
             </button>
           </div>
         ) : (
-        <div ref={splitContainerRef} className="flex flex-1 flex-row min-h-0 overflow-hidden">
-          {/* Left column: chat */}
-          <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${100 - previewWidthPct} 1 0px` }}>
-            {/* Messages */}
-            <div
-              ref={scrollContainerRef}
-              onScroll={handleScroll}
-              className="flex-1 min-h-0 overflow-y-auto pb-4 pt-4 px-8"
-            >
-              <div className="mx-auto max-w-3xl">
-                <div ref={topSentinelRef} className="h-1" />
-
-                {!hasMoreHistory && totalMessages > 0 && (
-                  <div className="flex items-center justify-center py-2 mb-2">
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <div className="h-px w-12 bg-ink-900/10" />
-                      <span>Beginning of conversation</span>
-                      <div className="h-px w-12 bg-ink-900/10" />
-                    </div>
-                  </div>
-                )}
-
-                {isLoadingHistory && (
-                  <div className="flex items-center justify-center py-2 mb-2">
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                      </svg>
-                      <span>Loading...</span>
-                    </div>
-                  </div>
-                )}
-
-                {visibleMessages.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-8 text-center">
-                    <div className="text-lg font-medium text-ink-700">No messages yet</div>
-                    <p className="mt-2 text-sm text-muted-foreground">Start a conversation with agent cowork</p>
-                  </div>
-                ) : (
-                  groupedItems.map((item, idx) => {
-                    if (item.kind === "task_group") {
-                      const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.parentMessageIndex) && item.parentMessageIndex >= prevMessagesLengthRef.current - 1;
-                      if (shouldAnimate) animatedIndicesRef.current.add(item.parentMessageIndex);
-                      return (
-                        <div key={`${activeSessionId}-task-${item.taskToolUseId}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
-                          <ErrorBoundary>
-                            <TaskToolCard
-                              group={item}
-                              isRunning={isRunning}
-                              permissionRequest={permissionRequests[0]}
-                              onPermissionResult={handlePermissionResult}
-                            />
-                          </ErrorBoundary>
-                        </div>
-                      );
-                    }
-                    // kind: "message"
-                    const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.originalIndex) && item.originalIndex >= prevMessagesLengthRef.current - 1;
-                    if (shouldAnimate) animatedIndicesRef.current.add(item.originalIndex);
-                    return (
-                      <div key={`${activeSessionId}-msg-${item.originalIndex}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
-                        <ErrorBoundary>
-                          <MessageCard
-                            message={item.message}
-                            isLast={idx === groupedItems.length - 1}
-                            isRunning={isRunning}
-                            permissionRequest={permissionRequests[0]}
-                            onPermissionResult={handlePermissionResult}
-                            skipTaskToolUse
-                          />
-                        </ErrorBoundary>
-                      </div>
-                    );
-                  })
-                )}
-
-                {/* Partial message display */}
-                <div className="partial-message">
-                  {showPartialMessage && !partialMessage.trim() ? (
-                    <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
-                      <span className="inline-grid grid-cols-2 gap-0.5 opacity-40">
-                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" />
-                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "150ms" }} />
-                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "300ms" }} />
-                        <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "450ms" }} />
-                      </span>
-                      <span>Thinking<AnimatedDots /></span>
-                    </div>
-                  ) : (
-                    <MessageResponse isAnimating={showPartialMessage} caret="block">{partialMessage}</MessageResponse>
-                  )}
-                </div>
-
-                <div ref={messagesEndRef} />
+        <>
+        <div className="flex flex-1 flex-col min-h-0" style={{ paddingBottom: "var(--prompt-bar-height)" }}>
+          <div ref={splitContainerRef} className="flex flex-1 flex-row min-h-0 overflow-hidden">
+          {/* Left (center) column: preview — always visible */}
+          <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: showChatPanel ? `${100 - previewWidthPct} 1 0px` : "1 1 0px" }}>
+            <PreviewPanelHeader />
+            <div className="flex-1 min-h-0 overflow-hidden p-4">
+              <div className="flex flex-col h-full">
+                <ErrorBoundary>
+                  <FilePreview
+                    filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
+                    cwd={activeSession?.cwd}
+                    stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
+                  />
+                </ErrorBoundary>
               </div>
             </div>
-
-            {/* Spacer for fixed PromptInput */}
-            <div className="h-24 shrink-0 lg:h-28" aria-hidden />
-            <PromptInput
-              sendEvent={sendEvent}
-              onSendMessage={handleSendMessage}
-              disabled={visibleMessages.length === 0}
-              rightOffset={showPreviewPanel ? `calc(${previewWidthPct}% - var(--sidebar-width) * ${previewWidthPct} / 100 + 12px)` : undefined}
-            />
           </div>
 
-          {/* Vertical drag handle (only when preview panel is open) */}
-          {showPreviewPanel && (
+          {/* Vertical drag handle (only when chat panel is open) */}
+          {showChatPanel && (
             <div
               onMouseDown={handleSplitMouseDown}
               className="shrink-0 w-3 cursor-col-resize relative group flex items-center justify-center border-l border-r border-ink-900/8 hover:border-ink-900/15 hover:bg-primary/5 transition-all duration-150"
@@ -532,24 +379,114 @@ function App() {
             </div>
           )}
 
-          {/* Right column: preview panel (only when open) */}
-          {showPreviewPanel && (
+          {/* Right column: chat / model log (only when Chat is toggled) */}
+          {showChatPanel && (
             <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
-              <PreviewPanelHeader />
-              <div className="flex-1 min-h-0 overflow-hidden p-4">
-                <div className="flex flex-col h-full">
-                <ErrorBoundary>
-                  <FilePreview
-                    filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
-                    cwd={activeSession?.cwd}
-                    stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
-                  />
-                </ErrorBoundary>
+              <div
+                ref={scrollContainerRef}
+                onScroll={handleScroll}
+                className="flex-1 min-h-0 overflow-y-auto pb-4 pt-4 px-8"
+              >
+                <div className="mx-auto max-w-3xl">
+                  <div ref={topSentinelRef} className="h-1" />
+
+                  {!hasMoreHistory && totalMessages > 0 && (
+                    <div className="flex items-center justify-center py-2 mb-2">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <div className="h-px w-12 bg-ink-900/10" />
+                        <span>Beginning of conversation</span>
+                        <div className="h-px w-12 bg-ink-900/10" />
+                      </div>
+                    </div>
+                  )}
+
+                  {isLoadingHistory && (
+                    <div className="flex items-center justify-center py-2 mb-2">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        <span>Loading...</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {visibleMessages.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-8 text-center">
+                      <div className="text-lg font-medium text-ink-700">No messages yet</div>
+                      <p className="mt-2 text-sm text-muted-foreground">Start a conversation with agent cowork</p>
+                    </div>
+                  ) : (
+                    groupedItems.map((item, idx) => {
+                      if (item.kind === "task_group") {
+                        const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.parentMessageIndex) && item.parentMessageIndex >= prevMessagesLengthRef.current - 1;
+                        if (shouldAnimate) animatedIndicesRef.current.add(item.parentMessageIndex);
+                        return (
+                          <div key={`${activeSessionId}-task-${item.taskToolUseId}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
+                            <ErrorBoundary>
+                              <TaskToolCard
+                                group={item}
+                                isRunning={isRunning}
+                                permissionRequest={permissionRequests[0]}
+                                onPermissionResult={handlePermissionResult}
+                              />
+                            </ErrorBoundary>
+                          </div>
+                        );
+                      }
+                      const shouldAnimate = isRunning && !animatedIndicesRef.current.has(item.originalIndex) && item.originalIndex >= prevMessagesLengthRef.current - 1;
+                      if (shouldAnimate) animatedIndicesRef.current.add(item.originalIndex);
+                      return (
+                        <div key={`${activeSessionId}-msg-${item.originalIndex}`} className={`message-card ${shouldAnimate ? "animate-fade-up" : ""}`}>
+                          <ErrorBoundary>
+                            <MessageCard
+                              message={item.message}
+                              isLast={idx === groupedItems.length - 1}
+                              isRunning={isRunning}
+                              permissionRequest={permissionRequests[0]}
+                              onPermissionResult={handlePermissionResult}
+                              skipTaskToolUse
+                            />
+                          </ErrorBoundary>
+                        </div>
+                      );
+                    })
+                  )}
+
+                  <div className="partial-message">
+                    {showPartialMessage && !partialMessage.trim() ? (
+                      <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+                        <span className="inline-grid grid-cols-2 gap-0.5 opacity-40">
+                          <span className="h-1 w-1 rounded-full bg-current animate-pulse" />
+                          <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "150ms" }} />
+                          <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "300ms" }} />
+                          <span className="h-1 w-1 rounded-full bg-current animate-pulse" style={{ animationDelay: "450ms" }} />
+                        </span>
+                        <span>Thinking<AnimatedDots /></span>
+                      </div>
+                    ) : (
+                      <MessageResponse isAnimating={showPartialMessage} caret="block">{partialMessage}</MessageResponse>
+                    )}
+                  </div>
+
+                  <div ref={messagesEndRef} />
                 </div>
               </div>
+
+              <div className="h-24 shrink-0 lg:h-28" aria-hidden />
             </div>
           )}
+          </div>
         </div>
+
+        <PromptInput
+          sendEvent={sendEvent}
+          onSendMessage={handleSendMessage}
+          disabled={visibleMessages.length === 0}
+          rightOffset={undefined}
+        />
+        </>
         )}
 
         {hasNewMessages && !shouldAutoScroll && (

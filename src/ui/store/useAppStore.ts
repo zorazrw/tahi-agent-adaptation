@@ -364,7 +364,6 @@ export const useAppStore = create<AppState>((set, get) => ({
           const isActive = sessionId === state.activeSessionId;
           const nextStepIndex = Math.min(stepIndex + 1, (existing.steps?.length ?? 1) - 1);
           const stepLabel = existing.steps?.[stepIndex] ?? `Step ${stepIndex + 1}`;
-          const hasOutputFiles = (existing.outputFiles?.[stepIndex]?.length ?? 0) > 0;
 
           // Inject synthetic step_completed message into chat
           const syntheticMsg: StepCompletedMessage = { type: "step_completed", stepIndex, stepLabel };
@@ -373,8 +372,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           return {
             selectedStepIndex: isActive ? nextStepIndex : state.selectedStepIndex,
             previewStepIndex: isActive ? stepIndex : state.previewStepIndex,
-            // Auto-open preview panel when step has output files
-            previewPanelOpen: isActive && hasOutputFiles ? true : state.previewPanelOpen,
+            // Chat panel is user-toggled; preview is always visible in center
+            previewPanelOpen: state.previewPanelOpen,
             // Clear running indicator when the step completes
             runningStepIndex: isActive && state.runningStepIndex === stepIndex ? null : state.runningStepIndex,
             sessions: {
