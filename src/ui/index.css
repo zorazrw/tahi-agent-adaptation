@@ -92,6 +92,8 @@
 
 :root {
   --sidebar-width: 280px;
+  /* Reserved space so preview/chat bottom aligns with top of fixed PromptInput (pt-8 + box + pb-6/8) */
+  --prompt-bar-height: 7rem;
 }
 
 pre code.hljs {

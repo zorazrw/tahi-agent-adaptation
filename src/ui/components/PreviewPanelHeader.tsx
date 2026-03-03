@@ -1,3 +1,4 @@
+import type { FC } from "react";
 import { FolderOpenIcon, XIcon } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { getPreviewFileForStep } from "./FilePreview";
@@ -9,7 +10,7 @@ import {
   SelectValue,
 } from "./ui/select";
 
-export function PreviewPanelHeader() {
+export const PreviewPanelHeader: FC = () => {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const sessions = useAppStore((s) => s.sessions);
   const previewStepIndex = useAppStore((s) => s.previewStepIndex);
@@ -35,10 +36,10 @@ export function PreviewPanelHeader() {
           value={String(previewStepIndex)}
           onValueChange={(v) => setPreviewStepIndex(Number(v))}
         >
-          <SelectTrigger size="sm" className="h-7 text-xs min-w-0 max-w-[200px]">
+          <SelectTrigger size="sm" className="h-7 text-xs min-w-0 max-w-[1000px]">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent position="popper" side="bottom">
             {stepsWithFiles.map(({ label, idx }) => (
               <SelectItem key={idx} value={String(idx)}>
                 <span className="truncate">Step {idx + 1}: {label}</span>
@@ -80,4 +81,4 @@ export function PreviewPanelHeader() {
       </button>
     </div>
   );
-}
+};

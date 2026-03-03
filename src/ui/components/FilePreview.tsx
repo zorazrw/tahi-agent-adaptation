@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
+import { CopyIcon } from "lucide-react";
 import { getRenderer } from "./file-renderers";
 import { ZoomControls } from "./file-renderers/DocxRenderer";
 
@@ -77,6 +78,24 @@ function isFileNotFoundError(error: string): boolean {
   return /ENOENT|no such file or directory/i.test(error);
 }
 
+/** Get plain-text copyable content from preview result, or null if not copyable. */
+function getCopyableContent(result: PreviewFileResult | null): string | null {
+  if (!result || "error" in result) return null;
+  switch (result.kind) {
+    case "txt":
+    case "md":
+    case "code":
+    case "json":
+    case "csv":
+    case "html":
+      return result.content ?? null;
+    case "docx":
+      return result.data ?? null;
+    default:
+      return null;
+  }
+}
+
 type FilePreviewProps = {
   filePath: string | null;
   cwd?: string | null;
@@ -91,6 +110,16 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
   const [result, setResult] = useState<PreviewFileResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [zoom, setZoom] = useState(0.6);
+  const [copyFeedback, setCopyFeedback] = useState(false);
+
+  const handleCopyFileContent = () => {
+    const text = getCopyableContent(result);
+    if (text == null) return;
+    navigator.clipboard.writeText(text).then(() => {
+      setCopyFeedback(true);
+      setTimeout(() => setCopyFeedback(false), 1500);
+    });
+  };
 
   useEffect(() => {
     if (!filePath) {
@@ -128,6 +157,16 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
         <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}
         </span>
+        {getCopyableContent(result) != null && (
+          <button
+            onClick={handleCopyFileContent}
+            className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors"
+            aria-label={copyFeedback ? "Copied" : "Copy file content"}
+            title={copyFeedback ? "Copied!" : "Copy file content"}
+          >
+            <CopyIcon className="size-4" />
+          </button>
+        )}
         {showZoom && (
           <ZoomControls
             zoom={zoom}
