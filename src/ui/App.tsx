@@ -12,7 +12,6 @@ import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
 import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
-import { PreviewPanelHeader } from "./components/PreviewPanelHeader";
 import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PanelRightOpenIcon, PanelRightCloseIcon } from "lucide-react";
@@ -309,12 +308,12 @@ function App() {
 
       <main className="flex flex-1 flex-col ml-[var(--sidebar-width)] min-h-0 overflow-hidden bg-surface-cream">
         <div
-          className="flex shrink-0 items-center justify-between h-12 px-4 border-b border-ink-900/10 bg-surface-cream select-none"
+          className="relative flex shrink-0 items-center justify-end h-12 px-4 border-b border-ink-900/10 bg-surface-cream select-none"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
-          <span className="text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
+          <span className="absolute left-0 right-0 flex justify-center pointer-events-none text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
           {activeSession && (
-            <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <div className="relative z-10 flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <button
                 onClick={() => setPreviewPanelOpen(!previewPanelOpen)}
                 className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
@@ -355,7 +354,6 @@ function App() {
           <div ref={splitContainerRef} className="flex flex-1 flex-row min-h-0 overflow-hidden">
           {/* Left (center) column: preview — always visible */}
           <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: showChatPanel ? `${100 - previewWidthPct} 1 0px` : "1 1 0px" }}>
-            <PreviewPanelHeader />
             <div className="flex-1 min-h-0 overflow-hidden p-4">
               <div className="flex flex-col h-full">
                 <ErrorBoundary>
@@ -473,8 +471,6 @@ function App() {
                   <div ref={messagesEndRef} />
                 </div>
               </div>
-
-              <div className="h-24 shrink-0 lg:h-28" aria-hidden />
             </div>
           )}
           </div>

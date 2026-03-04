@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
-import { CopyIcon } from "lucide-react";
+import { CopyIcon, FolderOpenIcon } from "lucide-react";
 import { getRenderer } from "./file-renderers";
 import { ZoomControls } from "./file-renderers/DocxRenderer";
 
@@ -167,6 +167,14 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
             <CopyIcon className="size-4" />
           </button>
         )}
+        <button
+          onClick={() => window.electron.showItemInFolder(filePath, cwd ?? undefined)}
+          className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors"
+          aria-label="Open in Finder"
+          title="Open in Finder"
+        >
+          <FolderOpenIcon className="size-4" />
+        </button>
         {showZoom && (
           <ZoomControls
             zoom={zoom}
