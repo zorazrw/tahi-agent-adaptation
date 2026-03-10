@@ -110,7 +110,10 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
       return;
     }
     const sessionCwd = cwd.trim() || tempCwd || undefined;
-    const fileRefs = attachedFiles.length > 0 ? attachedFiles.map((f) => `[attached: ${f}]`).join("\n") + "\n\n" : "";
+    const fileRefs = attachedFiles.length > 0
+      ? "The following files have been copied into the working directory (cwd). Use relative paths to access them:\n" +
+        attachedFiles.map((f) => `- ${f}`).join("\n") + "\n\n"
+      : "";
     sendEvent({
       type: "session.start",
       payload: {
@@ -121,7 +124,9 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
       },
     });
     setPrompt("");
-  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, sendEvent, setPendingStart, setGlobalError, setPrompt]);
+    setAttachedFiles([]);
+    setTempCwd(null);
+  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;

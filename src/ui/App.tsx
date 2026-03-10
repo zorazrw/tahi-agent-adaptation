@@ -246,7 +246,12 @@ function App() {
   }, [resetToLatest]);
 
   const handleNewSession = useCallback(() => {
-    useAppStore.getState().setActiveSessionId(null);
+    const store = useAppStore.getState();
+    store.setActiveSessionId(null);
+    store.setAttachedFiles([]);
+    store.setTempCwd(null);
+    store.setCwd("");
+    store.setPrompt("");
   }, []);
 
   const handleDeleteSession = useCallback((sessionId: string) => {
