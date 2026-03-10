@@ -48,7 +48,16 @@ export function getLatestPreviewFileRef(messages: StreamMessage[]): string | nul
   return latest;
 }
 
-/** First previewable file from the given step's output files list (used for step-scoped preview). */
+/** First previewable file from a node's output files list. */
+export function getPreviewFileForNode(
+  outputFiles: string[] | undefined
+): string | null {
+  if (!outputFiles?.length) return null;
+  const path = outputFiles.find((p) => pathHasPreviewExt(p));
+  return path ?? null;
+}
+
+/** @deprecated kept for backward compat - use getPreviewFileForNode */
 export function getPreviewFileForStep(
   outputFiles: string[][] | undefined,
   selectedStepIndex: number

@@ -11,7 +11,7 @@ import { PromptInput } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
-import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
+import { FilePreview, getPreviewFileForNode } from "./components/FilePreview";
 import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PanelRightOpenIcon, PanelRightCloseIcon } from "lucide-react";
@@ -62,7 +62,7 @@ function App() {
   const pendingStart = useAppStore((s) => s.pendingStart);
   const apiConfigChecked = useAppStore((s) => s.apiConfigChecked);
   const setApiConfigChecked = useAppStore((s) => s.setApiConfigChecked);
-  const previewStepIndex = useAppStore((s) => s.previewStepIndex);
+  const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const previewPanelOpen = useAppStore((s) => s.previewPanelOpen);
   const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
 
@@ -354,9 +354,33 @@ function App() {
               <div className="flex flex-col h-full">
                 <ErrorBoundary>
                   <FilePreview
-                    filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
+                    filePath={(() => {
+                      if (!selectedNodeId || !activeSession?.workflowTree) return null;
+                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                        for (const n of tree) {
+                          if (n.id === id) return n;
+                          const f = findNode(n.children, id);
+                          if (f) return f;
+                        }
+                        return undefined;
+                      };
+                      const node = findNode(activeSession.workflowTree, selectedNodeId);
+                      return getPreviewFileForNode(node?.outputFiles);
+                    })()}
                     cwd={activeSession?.cwd}
-                    stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
+                    stepCompleted={(() => {
+                      if (!selectedNodeId || !activeSession?.workflowTree) return false;
+                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                        for (const n of tree) {
+                          if (n.id === id) return n;
+                          const f = findNode(n.children, id);
+                          if (f) return f;
+                        }
+                        return undefined;
+                      };
+                      const node = findNode(activeSession.workflowTree, selectedNodeId);
+                      return node?.status === "completed";
+                    })()}
                   />
                 </ErrorBoundary>
               </div>

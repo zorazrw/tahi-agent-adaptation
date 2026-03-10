@@ -5,7 +5,8 @@ import type { Session } from "./session-store.js";
 import { getCurrentApiConfig, buildEnvForConfig, getClaudeCodePath} from "./claude-settings.js";
 import { getEnhancedEnv } from "./util.js";
 import { syncAppSkills } from "./skill-store.js";
-import { createWorkflowMcpServer, flattenWorkflowPlan } from "./workflow-mcp-server.js";
+import { createWorkflowMcpServer } from "./workflow-mcp-server.js";
+import type { WorkflowNode } from "./workflow-tree-utils.js";
 import { appendFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
@@ -23,7 +24,7 @@ export type RunnerOptions = {
   prompt: string;
   session: Session;
   resumeSessionId?: string;
-  /** When rerunning a step, resume the SDK conversation up to this message UUID. */
+  /** When rerunning a node, resume the SDK conversation up to this message UUID. */
   resumeSessionAt?: string;
   onEvent: (event: ServerEvent) => void;
   onSessionUpdate?: (updates: Partial<Session>) => void;
@@ -40,8 +41,11 @@ const WORKFLOW_PLAN_INSTRUCTION = [
   "",
   "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
   "Do NOT write out steps as text. Use the tool with structured JSON input.",
-  "Each step needs: a short description (under 10 words), expected output file(s), and verification criteria.",
-  "Aim for 4 steps or fewer. After calling the tool, STOP. Do NOT execute any steps yourself.",
+  "Keep it simple. For small tasks use a flat list (no children). For medium tasks use one level of children. Only use 3 levels for genuinely complex tasks.",
+  "Do NOT add separate validation/verification/testing steps — our system handles verification natively via verifier criteria on each node.",
+  "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
+  "Aim for fewer, meaningful steps rather than many granular ones.",
+  "After calling the tool, STOP. Do NOT execute any steps yourself.",
   "The human operator will trigger each step individually.",
   "",
   "Task instruction:"
@@ -54,10 +58,9 @@ function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): strin
   return WORKFLOW_PLAN_INSTRUCTION + trimmed;
 }
 
-/** Builds the resume prompt for executing a single workflow step. */
-export function buildPromptForStep(stepDescription: string, stepIndex: number, totalSteps: number): string {
-  const oneBased = stepIndex + 1;
-  return `Proceed with step ${oneBased} of ${totalSteps}: ${stepDescription}`;
+/** Builds the resume prompt for executing a single workflow node. */
+export function buildPromptForNode(nodeDescription: string, pathContext: string): string {
+  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}`;
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
@@ -82,12 +85,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
 
   // Start the query in the background
   (async () => {
-    // Save claudeSessionId so we can restore it if the run crashes.
-    // Must be outside try/catch so the catch block can access it.
     const savedClaudeSessionId = session.claudeSessionId;
 
     try {
-      // 获取当前配置
       const config = getCurrentApiConfig();
 
       if (!config) {
@@ -98,17 +98,14 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         return;
       }
 
-      // Sync app-managed skills into ~/.claude/skills/ for SDK discovery
       syncAppSkills();
 
-      // 使用 Anthropic SDK
       const env = buildEnvForConfig(config);
       const mergedEnv = {
         ...getEnhancedEnv(),
         ...env
       };
 
-      // Build tools list: default Claude Code tools + CodeExecution (if not already present)
       const defaultTools = [
         "Task", "TaskOutput", "Bash", "Glob", "Grep", "ExitPlanMode", "Read", "Edit", "Write",
         "NotebookEdit", "WebFetch", "WebSearch", "KillShell", "AskUserQuestion",
@@ -119,18 +116,14 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         ? defaultTools
         : [...defaultTools, codeExecutionTool];
 
-      // Only provide the workflow MCP server on the first message (planning phase).
-      // The agent is instructed to call WorkflowPlan then stop naturally.
-      // On resume (step execution), omit it so the agent focuses on the step.
       let planRegistered = false;
       let mcpServers: Record<string, ReturnType<typeof createWorkflowMcpServer>> | undefined;
       if (isFirstMessage) {
         mcpServers = {
-          workflow: createWorkflowMcpServer((input) => {
-            const { steps, outputFiles, verificationCriteria } = flattenWorkflowPlan(input);
+          workflow: createWorkflowMcpServer((workflowTree: WorkflowNode[]) => {
             onEvent({
               type: "workflow.plan",
-              payload: { sessionId: session.id, steps, outputFiles, verificationCriteria }
+              payload: { sessionId: session.id, workflowTree }
             });
             planRegistered = true;
           })
@@ -158,14 +151,11 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
             log(`[runner:stderr] ${data.trimEnd()}`);
           },
           canUseTool: async (toolName, input, { signal }) => {
-            // For AskUserQuestion, we need to wait for user response
             if (toolName === "AskUserQuestion") {
               const toolUseId = crypto.randomUUID();
 
-              // Send permission request to frontend
               sendPermissionRequest(toolUseId, toolName, input);
 
-              // Create a promise that will be resolved when user responds
               return new Promise<PermissionResult>((resolve) => {
                 session.pendingPermissions.set(toolUseId, {
                   toolUseId,
@@ -177,7 +167,6 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
                   }
                 });
 
-                // Handle abort
                 signal.addEventListener("abort", () => {
                   session.pendingPermissions.delete(toolUseId);
                   resolve({ behavior: "deny", message: "Session aborted" });
@@ -185,7 +174,6 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
               });
             }
 
-            // Auto-approve other tools
             return { behavior: "allow", updatedInput: input };
           }
         }
@@ -202,16 +190,12 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         if (message.type === "system" && "subtype" in message && message.subtype === "init") {
           const sdkSessionId = message.session_id;
           if (sdkSessionId) {
-            // Update locally so this run can reference it, but we'll
-            // only persist if the run succeeds (see below).
             session.claudeSessionId = sdkSessionId;
           }
         }
 
         sendMessage(message);
 
-        // When the agent finishes a turn, update status — but skip if
-        // a plan was just registered (the workflow.plan handler already set "idle").
         if (message.type === "result") {
           if (message.subtype === "success") gotSuccessResult = true;
           if (!planRegistered) {
@@ -224,9 +208,6 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         }
       }
 
-      // Only persist the new claudeSessionId if the run completed successfully.
-      // This prevents cascading failures where a crashed run's session ID
-      // corrupts subsequent resume attempts.
       if (gotSuccessResult || planRegistered) {
         onSessionUpdate?.({ claudeSessionId: session.claudeSessionId });
       } else {
@@ -238,7 +219,6 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     } catch (error) {
       log(`[runner] Query error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
 
-      // Restore claudeSessionId so the next retry uses the last-known-good session
       if (savedClaudeSessionId) {
         session.claudeSessionId = savedClaudeSessionId;
         onSessionUpdate?.({ claudeSessionId: savedClaudeSessionId });

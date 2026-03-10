@@ -1,15 +1,26 @@
 import { BrowserWindow } from "electron";
-import type { ClientEvent, ServerEvent } from "./types.js";
-import { runClaude, buildPromptForStep, type RunnerHandle } from "./libs/runner.js";
+import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
+import { runClaude, buildPromptForNode, type RunnerHandle } from "./libs/runner.js";
 import { SessionStore } from "./libs/session-store.js";
+import {
+  findNodeById,
+  findParentNode,
+  getNextIncompleteChild,
+  isNodeFullyComplete,
+  getMaxDepth,
+  getNodePath,
+  updateNodeStatus,
+  resetNode,
+  completeNodeAndDescendants,
+} from "./libs/workflow-tree-utils.js";
 import { app } from "electron";
 import { join } from "path";
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
 
-/** While a step-solving run is in progress, maps sessionId -> stepIndex so we can emit stepCompleted on result. */
-const sessionCurrentStepIndex = new Map<string, number>();
+/** While a node-solving run is in progress, maps sessionId -> nodeId so we can emit nodeCompleted on result. */
+const sessionCurrentNodeId = new Map<string, string>();
 
 function initializeSessions() {
   if (!sessions) {
@@ -34,8 +45,6 @@ function hasLiveSession(sessionId: string): boolean {
 
 
 function emit(event: ServerEvent) {
-  // If a session was deleted, drop late events that would resurrect it in the UI.
-  // (Session history lookups are DB-backed, so these late events commonly lead to "Unknown session".)
   if (
     (event.type === "session.status" ||
       event.type === "stream.message" ||
@@ -50,16 +59,16 @@ function emit(event: ServerEvent) {
     sessions.updateSession(event.payload.sessionId, { status: event.payload.status });
   }
   if (event.type === "workflow.plan") {
-    const { sessionId, steps, outputFiles, verificationCriteria } = event.payload;
+    const { sessionId, workflowTree } = event.payload;
     const session = sessions.getSession(sessionId);
-    if (session && !session.steps?.length) {
-      sessions.updateSession(sessionId, { steps, outputFiles, verificationCriteria });
-      broadcast({ type: "session.steps", payload: { sessionId, steps } });
-      broadcast({ type: "session.outputFiles", payload: { sessionId, outputFiles } });
-      broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
+    if (session && (!session.workflowTree || session.workflowTree.length === 0)) {
+      // Set default verification depth to middle of tree
+      const maxD = getMaxDepth(workflowTree);
+      const defaultDepth = Math.max(0, Math.floor(maxD / 2));
+      sessions.updateSession(sessionId, { workflowTree, verificationDepth: defaultDepth });
+      broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree } });
+      broadcast({ type: "session.verificationDepth", payload: { sessionId, verificationDepth: defaultDepth } });
 
-      // Transition to idle so the human can drive step-by-step execution.
-      // The runner will abort itself after the tool result is committed to the session.
       sessions.updateSession(sessionId, { status: "idle" });
       broadcast({
         type: "session.status",
@@ -71,19 +80,33 @@ function emit(event: ServerEvent) {
   if (event.type === "stream.message") {
     const { sessionId, message } = event.payload;
     sessions.recordMessage(sessionId, message);
-    // When a step-solving run completes, mark that step as completed and persist.
+
+    // When a node-solving run completes, mark that node as completed and handle auto-cascade.
     const m = message as { type?: string; subtype?: string };
     if (m.type === "result") {
-      const stepIndex = sessionCurrentStepIndex.get(sessionId);
-      if (stepIndex !== undefined) {
-        sessionCurrentStepIndex.delete(sessionId);
+      const nodeId = sessionCurrentNodeId.get(sessionId);
+      if (nodeId !== undefined) {
+        sessionCurrentNodeId.delete(sessionId);
         if (m.subtype === "success") {
           const session = sessions.getSession(sessionId);
-          if (session) {
-            const completed = [...(session.completedStepIndices ?? []), stepIndex].sort((a, b) => a - b);
-            sessions.updateSession(sessionId, { completedStepIndices: completed });
+          if (session && session.workflowTree) {
+            const completedNode = findNodeById(session.workflowTree, nodeId);
+            if (completedNode) {
+              // Mark this node and all its descendants as completed
+              completeNodeAndDescendants(completedNode);
+            }
+
+            // Bubble up: mark parents complete if all children are done
+            let parentNode = findParentNode(session.workflowTree, nodeId);
+            while (parentNode && isNodeFullyComplete(parentNode)) {
+              parentNode.status = "completed";
+              parentNode = findParentNode(session.workflowTree, parentNode.id);
+            }
+
+            sessions.updateSession(sessionId, { workflowTree: session.workflowTree });
+            broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: session.workflowTree } });
           }
-          broadcast({ type: "session.stepCompleted", payload: { sessionId, stepIndex } });
+          broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
         }
       }
     }
@@ -97,17 +120,8 @@ function emit(event: ServerEvent) {
   broadcast(event);
 }
 
-/** Extract uuid (and optional claudeSessionId) from a resume point, handling legacy string format. */
-function parseResumePoint(
-  point: string | { uuid: string; claudeSessionId: string } | undefined
-): { uuid: string; claudeSessionId?: string } | undefined {
-  if (!point) return undefined;
-  if (typeof point === "string") return { uuid: point };
-  return point;
-}
-
-/** Starts a task-solving LLM call for the given workflow step index (0-based). */
-function triggerStepSolve(sessionId: string, stepIndex: number) {
+/** Starts a task-solving LLM call for the given workflow node. */
+function triggerNodeSolve(sessionId: string, nodeId: string) {
   const store = initializeSessions();
   const session = store.getSession(sessionId);
   if (!session) return;
@@ -118,34 +132,57 @@ function triggerStepSolve(sessionId: string, stepIndex: number) {
     });
     return;
   }
-  if (!session.steps?.length || stepIndex < 0 || stepIndex >= session.steps.length) {
+  if (!session.workflowTree?.length) {
     broadcast({
       type: "runner.error",
-      payload: { sessionId, message: "No workflow steps yet. Send a message first to generate the workflow." }
+      payload: { sessionId, message: "No workflow tree yet. Send a message first to generate the workflow." }
     });
     return;
   }
   if (!session.claudeSessionId) {
     broadcast({
       type: "runner.error",
-      payload: { sessionId, message: "Cannot solve step: session has no resume id yet." }
+      payload: { sessionId, message: "Cannot solve node: session has no resume id yet." }
     });
     return;
   }
 
-  const isRerun = session.completedStepIndices?.includes(stepIndex) ?? false;
+  const verificationDepth = session.verificationDepth ?? 0;
+  const node = findNodeById(session.workflowTree, nodeId);
+  if (!node) {
+    broadcast({
+      type: "runner.error",
+      payload: { sessionId, message: `Node ${nodeId} not found in workflow tree.` }
+    });
+    return;
+  }
+
+  // If this node is above the verification depth and has children,
+  // delegate to the first incomplete child at verification depth
+  if (node.children.length > 0 && node.depth < verificationDepth) {
+    const firstIncomplete = getNextIncompleteChild(node);
+    if (!firstIncomplete) {
+      broadcast({
+        type: "runner.error",
+        payload: { sessionId, message: "All children of this node are already completed." }
+      });
+      return;
+    }
+    triggerNodeSolve(sessionId, firstIncomplete.id);
+    return;
+  }
+
+  // Execute this node directly (at or below verification depth, or leaf)
+  const isRerun = node.status === "completed";
   let resumeSessionAt: string | undefined;
-  // For reruns, use the claudeSessionId saved at the resume point (not the current one,
-  // which may have been overwritten by a previous failed rerun attempt).
   let claudeSessionIdForResume = session.claudeSessionId;
 
   if (isRerun) {
-    // --- Rerun: rewind conversation to before this step ---
-    const resumeData = parseResumePoint(session.stepResumePoints?.[stepIndex]);
+    const resumeData = node.resumePoint;
     if (!resumeData?.uuid) {
       broadcast({
         type: "runner.error",
-        payload: { sessionId, message: `Cannot rerun step ${stepIndex + 1}: no resume point recorded.` }
+        payload: { sessionId, message: `Cannot rerun node: no resume point recorded.` }
       });
       return;
     }
@@ -153,57 +190,60 @@ function triggerStepSolve(sessionId: string, stepIndex: number) {
     resumeSessionAt = resumeData.uuid;
     claudeSessionIdForResume = resumeData.claudeSessionId ?? session.claudeSessionId;
 
-    // Clear completed indices for this step and all subsequent steps
-    const newCompleted = (session.completedStepIndices ?? []).filter(i => i < stepIndex);
+    // Reset this node and all subsequent siblings + their children
+    resetNode(node);
 
-    // Clear resume points for steps >= stepIndex (keep the current one for potential re-rerun)
-    const newResumePoints: Record<number, string | { uuid: string; claudeSessionId: string }> = {};
-    for (const [k, v] of Object.entries(session.stepResumePoints ?? {})) {
-      if (Number(k) <= stepIndex) newResumePoints[Number(k)] = v;
+    const parent = findParentNode(session.workflowTree, nodeId);
+    if (parent) {
+      let foundSelf = false;
+      for (const sibling of parent.children) {
+        if (sibling.id === nodeId) { foundSelf = true; continue; }
+        if (foundSelf) resetNode(sibling);
+      }
+      // Re-check parent status
+      parent.status = "pending";
     }
 
-    // Delete messages from DB after the resume point
     store.deleteMessagesAfter(sessionId, resumeData.uuid);
-
-    // Restore the pre-step claudeSessionId so future attempts use the correct session
     store.updateSession(sessionId, {
-      completedStepIndices: newCompleted,
-      stepResumePoints: newResumePoints,
+      workflowTree: session.workflowTree,
       claudeSessionId: claudeSessionIdForResume
     });
 
-    // Reload truncated messages and broadcast reset to UI
     const messages = store.getMessages(sessionId);
     broadcast({
       type: "session.messagesReset",
-      payload: { sessionId, messages, completedStepIndices: newCompleted }
+      payload: { sessionId, messages }
     });
   } else {
-    // --- First run: record resume point (assistant UUID + claudeSessionId) for this step ---
+    // First run: record resume point
     const lastUuid = store.getLastAssistantMessageUuid(sessionId);
     if (lastUuid) {
-      const newResumePoints = {
-        ...(session.stepResumePoints ?? {}),
-        [stepIndex]: { uuid: lastUuid, claudeSessionId: session.claudeSessionId }
-      };
-      store.updateSession(sessionId, { stepResumePoints: newResumePoints });
+      node.resumePoint = { uuid: lastUuid, claudeSessionId: session.claudeSessionId! };
+      store.updateSession(sessionId, { workflowTree: session.workflowTree });
     }
   }
 
-  sessionCurrentStepIndex.set(sessionId, stepIndex);
-  const stepPrompt = buildPromptForStep(session.steps[stepIndex], stepIndex, session.steps.length);
-  store.updateSession(sessionId, { status: "running", lastPrompt: stepPrompt });
+  // Mark node as running
+  node.status = "running";
+  store.updateSession(sessionId, { workflowTree: session.workflowTree });
+  broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: session.workflowTree } });
+
+  sessionCurrentNodeId.set(sessionId, nodeId);
+  const pathContext = getNodePath(session.workflowTree, nodeId);
+  const nodePrompt = buildPromptForNode(node.description, pathContext);
+  store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",
     payload: { sessionId, status: "running", title: session.title, cwd: session.cwd }
   });
   broadcast({
     type: "stream.user_prompt",
-    payload: { sessionId, prompt: stepPrompt }
+    payload: { sessionId, prompt: nodePrompt }
   });
 
   runClaude({
-    prompt: stepPrompt,
+    prompt: nodePrompt,
     session,
     resumeSessionId: claudeSessionIdForResume,
     resumeSessionAt,
@@ -231,7 +271,6 @@ function triggerStepSolve(sessionId: string, stepIndex: number) {
 }
 
 export function handleClientEvent(event: ClientEvent) {
-  // Initialize sessions on first event
   const sessions = initializeSessions();
 
   if (event.type === "session.list") {
@@ -245,7 +284,6 @@ export function handleClientEvent(event: ClientEvent) {
   if (event.type === "session.history") {
     const history = sessions.getSessionHistory(event.payload.sessionId);
     if (!history) {
-      // Session may have been deleted (or deleted concurrently). Treat as a sync event rather than an error toast.
       emit({ type: "session.deleted", payload: { sessionId: event.payload.sessionId } });
       return;
     }
@@ -255,11 +293,8 @@ export function handleClientEvent(event: ClientEvent) {
         sessionId: history.session.id,
         status: history.session.status,
         messages: history.messages,
-        steps: history.session.steps,
-        completedStepIndices: history.session.completedStepIndices,
-        outputFiles: history.session.outputFiles,
-        verificationCriteria: history.session.verificationCriteria,
-        verifierMarks: history.session.verifierMarks,
+        workflowTree: history.session.workflowTree,
+        verificationDepth: history.session.verificationDepth,
         title: history.session.title
       }
     });
@@ -377,9 +412,9 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
-  if (event.type === "session.solveStep") {
-    const { sessionId, stepIndex } = event.payload;
-    triggerStepSolve(sessionId, stepIndex);
+  if (event.type === "session.solveNode") {
+    const { sessionId, nodeId } = event.payload;
+    triggerNodeSolve(sessionId, nodeId);
     return;
   }
 
@@ -401,33 +436,22 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
-  if (event.type === "session.updateSteps") {
-    const { sessionId, steps } = event.payload;
-    // Always persist to DB so steps survive relaunch (even if session not in memory yet).
-    sessions.persistSteps(sessionId, steps);
+  if (event.type === "session.updateWorkflowTree") {
+    const { sessionId, workflowTree } = event.payload;
+    sessions.persistWorkflowTree(sessionId, workflowTree);
     if (hasLiveSession(sessionId)) {
-      sessions.updateSession(sessionId, { steps });
-      broadcast({ type: "session.steps", payload: { sessionId, steps } });
+      sessions.updateSession(sessionId, { workflowTree });
+      broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree } });
     }
     return;
   }
 
-  if (event.type === "session.updateVerificationCriteria") {
-    const { sessionId, verificationCriteria } = event.payload;
-    sessions.persistVerificationCriteria(sessionId, verificationCriteria);
+  if (event.type === "session.updateVerificationDepth") {
+    const { sessionId, verificationDepth } = event.payload;
+    sessions.persistVerificationDepth(sessionId, verificationDepth);
     if (hasLiveSession(sessionId)) {
-      sessions.updateSession(sessionId, { verificationCriteria });
-      broadcast({ type: "session.verificationCriteria", payload: { sessionId, verificationCriteria } });
-    }
-    return;
-  }
-
-  if (event.type === "session.updateVerifierMarks") {
-    const { sessionId, verifierMarks } = event.payload;
-    sessions.persistVerifierMarks(sessionId, verifierMarks);
-    if (hasLiveSession(sessionId)) {
-      sessions.updateSession(sessionId, { verifierMarks });
-      broadcast({ type: "session.verifierMarks", payload: { sessionId, verifierMarks } });
+      sessions.updateSession(sessionId, { verificationDepth });
+      broadcast({ type: "session.verificationDepth", payload: { sessionId, verificationDepth } });
     }
     return;
   }
@@ -450,8 +474,6 @@ export function handleClientEvent(event: ClientEvent) {
       runnerHandles.delete(sessionId);
     }
 
-    // Always try to delete and emit deleted event
-    // Don't emit error if session doesn't exist - it may have already been deleted
     sessions.deleteSession(sessionId);
     emit({
       type: "session.deleted",

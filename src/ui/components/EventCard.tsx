@@ -6,12 +6,12 @@ import type {
   SDKResultMessage,
   SDKUserMessage
 } from "@anthropic-ai/claude-agent-sdk";
-import type { StreamMessage, StepCompletedMessage } from "../types";
+import type { StreamMessage, NodeCompletedMessage } from "../types";
 import { useAppStore } from "../store/useAppStore";
 import type { PermissionRequest } from "../store/useAppStore";
 import { DecisionPanel } from "./DecisionPanel";
 import { WorkflowCard } from "./WorkflowCard";
-import { StepOutputSnippet } from "./StepOutputSnippet";
+import { NodeOutputSnippet } from "./StepOutputSnippet";
 
 // ai-elements
 import { MessageResponse } from "../../components/ai-elements/message";
@@ -418,8 +418,8 @@ const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: Assistant
   const setToolMeta = useAppStore((s) => s.setToolMeta);
   const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
 
-  const input = messageContent.input as { steps?: Array<{ description: string; outputFiles: string[]; verifiers: string[] }> } | null;
-  const steps = input?.steps ?? [];
+  const input = messageContent.input as { tasks?: Array<{ description: string; outputFiles: string[]; verifiers: string[]; children?: unknown[] }> } | null;
+  const tasks = input?.tasks ?? [];
 
   useEffect(() => {
     if (messageContent.id) {
@@ -428,14 +428,15 @@ const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: Assistant
     }
   }, [messageContent.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (steps.length === 0) return null;
+  if (tasks.length === 0) return null;
 
+  // Flatten to show top-level descriptions in the card
   return (
     <div className="mt-4">
       <WorkflowCard
-        steps={steps.map((s) => s.description)}
-        outputFiles={steps.map((s) => s.outputFiles)}
-        verifiers={steps.map((s) => s.verifiers)}
+        steps={tasks.map((s) => s.description)}
+        outputFiles={tasks.map((s) => s.outputFiles)}
+        verifiers={tasks.map((s) => s.verifiers)}
       />
     </div>
   );
@@ -610,8 +611,8 @@ export function MessageCard({
     return <UserMessageCard message={message} />;
   }
 
-  if (message.type === "step_completed") {
-    return <StepOutputSnippet message={message as StepCompletedMessage} />;
+  if (message.type === "node_completed") {
+    return <NodeOutputSnippet message={message as NodeCompletedMessage} />;
   }
 
   const sdkMessage = message as SDKMessage;

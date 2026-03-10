@@ -1,25 +1,36 @@
 import Database from "better-sqlite3";
 import { z } from "zod";
-import type { SessionStatus, StreamMessage } from "../types.js";
+import type { SessionStatus, StreamMessage, WorkflowNode } from "../types.js";
+import { migrateFromFlatSteps } from "./workflow-tree-utils.js";
 
 // ── Zod schemas for JSON columns ──────────────────────────────────────
-
-const stepsSchema = z.array(z.string());
-const stringGrid = z.array(z.array(z.string()));
 
 const verifierMarkCell = z
   .unknown()
   .transform((v) => (v === "check" || v === "cross" ? v : undefined));
-const verifierMarksSchema = z.array(z.array(verifierMarkCell));
 
+/** Recursive Zod schema for WorkflowNode tree stored as JSON. */
+const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
+  z.object({
+    id: z.string(),
+    description: z.string(),
+    outputFiles: z.array(z.string()),
+    verifiers: z.array(z.string()),
+    verifierMarks: z.array(verifierMarkCell),
+    children: z.array(workflowNodeSchema),
+    status: z.enum(["pending", "running", "completed", "error"]),
+    depth: z.number(),
+    resumePoint: z.object({ uuid: z.string(), claudeSessionId: z.string() }).optional(),
+  })
+);
+
+const workflowTreeSchema = z.array(workflowNodeSchema);
+
+// Legacy schemas for migration
+const stepsSchema = z.array(z.string());
+const stringGrid = z.array(z.array(z.string()));
 const completedStepIndicesSchema = z.array(z.number().int());
-
-/** Resume point: either a bare UUID (legacy) or {uuid, claudeSessionId}. */
-const stepResumePointValue = z.union([
-  z.string(),
-  z.object({ uuid: z.string(), claudeSessionId: z.string() })
-]);
-const stepResumePointsSchema = z.record(z.coerce.number().int(), stepResumePointValue);
+const verifierMarksGridSchema = z.array(z.array(verifierMarkCell));
 
 export type VerifierMark = "check" | "cross" | undefined;
 
@@ -34,12 +45,9 @@ function parseJsonColumn<T>(raw: unknown, schema: z.ZodType<T>): T | undefined {
   }
 }
 
-function serializeVerifierMarks(marks: VerifierMark[][] | undefined): string | null {
-  if (!marks || !Array.isArray(marks)) return null;
-  const arr = marks.map((row) =>
-    Array.isArray(row) ? row.map((m) => (m === "check" || m === "cross" ? m : "")) : []
-  );
-  return JSON.stringify(arr);
+function serializeWorkflowTree(tree: WorkflowNode[] | undefined): string | null {
+  if (!tree || !Array.isArray(tree)) return null;
+  return JSON.stringify(tree);
 }
 
 export type PendingPermission = {
@@ -57,13 +65,8 @@ export type Session = {
   cwd?: string;
   allowedTools?: string;
   lastPrompt?: string;
-  steps?: string[];
-  completedStepIndices?: number[];
-  outputFiles?: string[][];
-  verificationCriteria?: string[][];
-  verifierMarks?: VerifierMark[][];
-  /** Maps stepIndex -> resume data (UUID + claudeSessionId) captured before the step ran. Used for rerun. */
-  stepResumePoints?: Record<number, string | { uuid: string; claudeSessionId: string }>;
+  workflowTree?: WorkflowNode[];
+  verificationDepth?: number;
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -76,12 +79,8 @@ export type StoredSession = {
   allowedTools?: string;
   lastPrompt?: string;
   claudeSessionId?: string;
-  steps?: string[];
-  completedStepIndices?: number[];
-  outputFiles?: string[][];
-  verificationCriteria?: string[][];
-  verifierMarks?: VerifierMark[][];
-  stepResumePoints?: Record<number, string | { uuid: string; claudeSessionId: string }>;
+  workflowTree?: WorkflowNode[];
+  verificationDepth?: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -111,22 +110,16 @@ export class SessionStore {
       cwd: options.cwd,
       allowedTools: options.allowedTools,
       lastPrompt: options.prompt,
-      steps: [],
-      outputFiles: [],
-      verificationCriteria: [],
-      verifierMarks: [],
+      workflowTree: [],
+      verificationDepth: 0,
       pendingPermissions: new Map()
     };
     this.sessions.set(id, session);
-    const stepsJson = JSON.stringify(session.steps ?? []);
-    const outputFilesJson = JSON.stringify(session.outputFiles ?? []);
-    const verificationCriteriaJson = JSON.stringify(session.verificationCriteria ?? []);
-    const verifierMarksJson = serializeVerifierMarks(session.verifierMarks);
     this.db
       .prepare(
         `insert into sessions
-          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -136,10 +129,8 @@ export class SessionStore {
         session.cwd ?? null,
         session.allowedTools ?? null,
         session.lastPrompt ?? null,
-        stepsJson,
-        verificationCriteriaJson,
-        outputFilesJson,
-        verifierMarksJson,
+        serializeWorkflowTree(session.workflowTree),
+        session.verificationDepth ?? 0,
         now,
         now
       );
@@ -153,7 +144,9 @@ export class SessionStore {
   listSessions(): StoredSession[] {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt,
+                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+                completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
          order by updated_at desc`
       )
@@ -161,6 +154,20 @@ export class SessionStore {
     return rows.map((row) => {
       const id = String(row.id);
       const mem = this.sessions.get(id);
+      let tree = parseJsonColumn(row.workflow_tree, workflowTreeSchema) ?? mem?.workflowTree;
+
+      // Migration: if no workflow_tree but has steps, convert
+      if ((!tree || tree.length === 0) && row.steps) {
+        const steps = parseJsonColumn(row.steps, stepsSchema) ?? [];
+        if (steps.length > 0) {
+          const outputFiles = parseJsonColumn(row.output_files, stringGrid) ?? [];
+          const verificationCriteria = parseJsonColumn(row.verification_criteria, stringGrid) ?? [];
+          const verifierMarks = parseJsonColumn(row.verifier_marks, verifierMarksGridSchema) ?? [];
+          const completedStepIndices = parseJsonColumn(row.completed_step_indices, completedStepIndicesSchema) ?? [];
+          tree = migrateFromFlatSteps(steps, outputFiles, verificationCriteria, verifierMarks, completedStepIndices);
+        }
+      }
+
       return {
         id,
         title: String(row.title),
@@ -169,11 +176,8 @@ export class SessionStore {
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
-        steps: parseJsonColumn(row.steps, stepsSchema) ?? mem?.steps ?? [],
-        completedStepIndices: parseJsonColumn(row.completed_step_indices, completedStepIndicesSchema) ?? mem?.completedStepIndices ?? [],
-        outputFiles: parseJsonColumn(row.output_files, stringGrid) ?? mem?.outputFiles ?? [],
-        verificationCriteria: parseJsonColumn(row.verification_criteria, stringGrid) ?? mem?.verificationCriteria ?? [],
-        verifierMarks: parseJsonColumn(row.verifier_marks, verifierMarksSchema) ?? mem?.verifierMarks ?? [],
+        workflowTree: tree ?? [],
+        verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
       };
@@ -197,7 +201,9 @@ export class SessionStore {
   getSessionHistory(id: string): SessionHistory | null {
     const sessionRow = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices, created_at, updated_at
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt,
+                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+                completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
          where id = ?`
       )
@@ -212,6 +218,20 @@ export class SessionStore {
       .map((row) => JSON.parse(String(row.data)) as StreamMessage);
 
     const mem = this.sessions.get(id);
+    let tree = parseJsonColumn(sessionRow.workflow_tree, workflowTreeSchema) ?? mem?.workflowTree;
+
+    // Migration: if no workflow_tree but has steps, convert
+    if ((!tree || tree.length === 0) && sessionRow.steps) {
+      const steps = parseJsonColumn(sessionRow.steps, stepsSchema) ?? [];
+      if (steps.length > 0) {
+        const outputFiles = parseJsonColumn(sessionRow.output_files, stringGrid) ?? [];
+        const verificationCriteria = parseJsonColumn(sessionRow.verification_criteria, stringGrid) ?? [];
+        const verifierMarks = parseJsonColumn(sessionRow.verifier_marks, verifierMarksGridSchema) ?? [];
+        const completedStepIndices = parseJsonColumn(sessionRow.completed_step_indices, completedStepIndicesSchema) ?? [];
+        tree = migrateFromFlatSteps(steps, outputFiles, verificationCriteria, verifierMarks, completedStepIndices);
+      }
+    }
+
     return {
       session: {
         id: String(sessionRow.id),
@@ -221,11 +241,8 @@ export class SessionStore {
         allowedTools: sessionRow.allowed_tools ? String(sessionRow.allowed_tools) : undefined,
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
         claudeSessionId: sessionRow.claude_session_id ? String(sessionRow.claude_session_id) : undefined,
-        steps: parseJsonColumn(sessionRow.steps, stepsSchema) ?? mem?.steps ?? [],
-        completedStepIndices: parseJsonColumn(sessionRow.completed_step_indices, completedStepIndicesSchema) ?? mem?.completedStepIndices ?? [],
-        outputFiles: parseJsonColumn(sessionRow.output_files, stringGrid) ?? mem?.outputFiles ?? [],
-        verificationCriteria: parseJsonColumn(sessionRow.verification_criteria, stringGrid) ?? mem?.verificationCriteria ?? [],
-        verifierMarks: parseJsonColumn(sessionRow.verifier_marks, verifierMarksSchema) ?? mem?.verifierMarks ?? [],
+        workflowTree: tree ?? [],
+        verificationDepth: sessionRow.verification_depth != null ? Number(sessionRow.verification_depth) : 0,
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },
@@ -267,35 +284,26 @@ export class SessionStore {
     return removedFromDb || Boolean(existing);
   }
 
-  /** Persist only steps to DB (e.g. when session may not be in memory yet). */
-  persistSteps(id: string, steps: string[]): void {
-    const stepsJson = Array.isArray(steps) ? JSON.stringify(steps) : null;
+  /** Persist workflow tree to DB. */
+  persistWorkflowTree(id: string, workflowTree: WorkflowNode[]): void {
+    const json = serializeWorkflowTree(workflowTree);
     this.db
-      .prepare(`update sessions set steps = ?, updated_at = ? where id = ?`)
-      .run(stepsJson, Date.now(), id);
+      .prepare(`update sessions set workflow_tree = ?, updated_at = ? where id = ?`)
+      .run(json, Date.now(), id);
   }
 
-  /** Persist only title to DB (e.g. when session may not be in memory yet). */
+  /** Persist verification depth to DB. */
+  persistVerificationDepth(id: string, verificationDepth: number): void {
+    this.db
+      .prepare(`update sessions set verification_depth = ?, updated_at = ? where id = ?`)
+      .run(verificationDepth, Date.now(), id);
+  }
+
+  /** Persist only title to DB. */
   persistTitle(id: string, title: string): void {
     this.db
       .prepare(`update sessions set title = ?, updated_at = ? where id = ?`)
       .run(title, Date.now(), id);
-  }
-
-  /** Persist only verification criteria to DB (e.g. when session may not be in memory yet). */
-  persistVerificationCriteria(id: string, verificationCriteria: string[][]): void {
-    const json = Array.isArray(verificationCriteria) ? JSON.stringify(verificationCriteria) : null;
-    this.db
-      .prepare(`update sessions set verification_criteria = ?, updated_at = ? where id = ?`)
-      .run(json, Date.now(), id);
-  }
-
-  /** Persist only verifier marks to DB. */
-  persistVerifierMarks(id: string, verifierMarks: VerifierMark[][]): void {
-    const json = serializeVerifierMarks(verifierMarks);
-    this.db
-      .prepare(`update sessions set verifier_marks = ?, updated_at = ? where id = ?`)
-      .run(json, Date.now(), id);
   }
 
   private persistSession(id: string, updates: Partial<Session>): void {
@@ -308,29 +316,21 @@ export class SessionStore {
       cwd: "cwd",
       allowedTools: "allowed_tools",
       lastPrompt: "last_prompt",
-      steps: "steps",
-      completedStepIndices: "completed_step_indices",
-      outputFiles: "output_files",
-      verificationCriteria: "verification_criteria",
-      verifierMarks: "verifier_marks",
-      stepResumePoints: "step_resume_points"
+      workflowTree: "workflow_tree",
+      verificationDepth: "verification_depth"
     } as const;
 
-    /** Keys that are stored as JSON text in the DB. */
-    const jsonKeys = new Set<string>([
-      "steps", "completedStepIndices", "outputFiles",
-      "verificationCriteria", "stepResumePoints"
-    ]);
+    const jsonKeys = new Set<string>(["workflowTree"]);
 
     for (const key of Object.keys(updates) as Array<keyof typeof updatable>) {
       const column = updatable[key];
       if (!column) continue;
       fields.push(`${column} = ?`);
       const value = updates[key];
-      if (key === "verifierMarks") {
-        values.push(serializeVerifierMarks(value as VerifierMark[][]));
-      } else if (jsonKeys.has(key)) {
+      if (jsonKeys.has(key)) {
         values.push(value != null ? JSON.stringify(value) : null);
+      } else if (key === "verificationDepth") {
+        values.push(value != null ? Number(value) : 0);
       } else {
         values.push(value === undefined ? null : (value as string));
       }
@@ -362,36 +362,17 @@ export class SessionStore {
         updated_at integer not null
       )`
     );
-    try {
-      this.db.exec(`alter table sessions add column steps text`);
-    } catch {
-      /* column may already exist */
-    }
-    try {
-      this.db.exec(`alter table sessions add column verification_criteria text`);
-    } catch {
-      /* column may already exist */
-    }
-    try {
-      this.db.exec(`alter table sessions add column output_files text`);
-    } catch {
-      /* column may already exist */
-    }
-    try {
-      this.db.exec(`alter table sessions add column completed_step_indices text`);
-    } catch {
-      /* column may already exist */
-    }
-    try {
-      this.db.exec(`alter table sessions add column verifier_marks text`);
-    } catch {
-      /* column may already exist */
-    }
-    try {
-      this.db.exec(`alter table sessions add column step_resume_points text`);
-    } catch {
-      /* column may already exist */
-    }
+    // Legacy columns (kept for migration)
+    try { this.db.exec(`alter table sessions add column steps text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column verification_criteria text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column output_files text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column completed_step_indices text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column verifier_marks text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column step_resume_points text`); } catch { /* exists */ }
+    // New columns
+    try { this.db.exec(`alter table sessions add column workflow_tree text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column verification_depth integer default 0`); } catch { /* exists */ }
+
     this.db.exec(
       `create table if not exists messages (
         id text primary key,
@@ -407,11 +388,27 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, steps, verification_criteria, output_files, verifier_marks, completed_step_indices, step_resume_points
+        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt,
+                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+                verifier_marks, completed_step_indices
          from sessions`
       )
       .all();
     for (const row of rows as Array<Record<string, unknown>>) {
+      let tree = parseJsonColumn(row.workflow_tree, workflowTreeSchema);
+
+      // Migration: if no workflow_tree but has steps, convert
+      if ((!tree || tree.length === 0) && row.steps) {
+        const steps = parseJsonColumn(row.steps, stepsSchema) ?? [];
+        if (steps.length > 0) {
+          const outputFiles = parseJsonColumn(row.output_files, stringGrid) ?? [];
+          const verificationCriteria = parseJsonColumn(row.verification_criteria, stringGrid) ?? [];
+          const verifierMarks = parseJsonColumn(row.verifier_marks, verifierMarksGridSchema) ?? [];
+          const completedStepIndices = parseJsonColumn(row.completed_step_indices, completedStepIndicesSchema) ?? [];
+          tree = migrateFromFlatSteps(steps, outputFiles, verificationCriteria, verifierMarks, completedStepIndices);
+        }
+      }
+
       const session: Session = {
         id: String(row.id),
         title: String(row.title),
@@ -420,12 +417,8 @@ export class SessionStore {
         cwd: row.cwd ? String(row.cwd) : undefined,
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
-        steps: parseJsonColumn(row.steps, stepsSchema),
-        completedStepIndices: parseJsonColumn(row.completed_step_indices, completedStepIndicesSchema),
-        outputFiles: parseJsonColumn(row.output_files, stringGrid),
-        verificationCriteria: parseJsonColumn(row.verification_criteria, stringGrid),
-        verifierMarks: parseJsonColumn(row.verifier_marks, verifierMarksSchema),
-        stepResumePoints: parseJsonColumn(row.step_resume_points, stepResumePointsSchema),
+        workflowTree: tree ?? [],
+        verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);
@@ -434,8 +427,6 @@ export class SessionStore {
 
   /**
    * Returns the UUID of the last SDK **assistant** message for a session.
-   * The SDK's `resumeSessionAt` option requires the UUID to be from an
-   * `SDKAssistantMessage`, not from result/system/user messages.
    */
   getLastAssistantMessageUuid(sessionId: string): string | undefined {
     const rows = this.db
