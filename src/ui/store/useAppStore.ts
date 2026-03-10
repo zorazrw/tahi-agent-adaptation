@@ -41,6 +41,8 @@ interface AppState {
   showSettingsModal: boolean;
   historyRequested: Set<string>;
   apiConfigChecked: boolean;
+  attachedFiles: string[];
+  tempCwd: string | null;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -48,6 +50,8 @@ interface AppState {
   setGlobalError: (error: string | null) => void;
   setShowStartModal: (show: boolean) => void;
   setShowSettingsModal: (show: boolean) => void;
+  setAttachedFiles: (files: string[]) => void;
+  setTempCwd: (dir: string | null) => void;
   setActiveSessionId: (id: string | null) => void;
   setSelectedStepIndex: (index: number) => void;
   setPreviewStepIndex: (index: number) => void;
@@ -89,9 +93,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   showSettingsModal: false,
   historyRequested: new Set(),
   apiConfigChecked: false,
+  attachedFiles: [],
+  tempCwd: null,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
+  setAttachedFiles: (attachedFiles) => set({ attachedFiles }),
+  setTempCwd: (tempCwd) => set({ tempCwd }),
   setPendingStart: (pendingStart) => set({ pendingStart }),
   setGlobalError: (globalError) => set({ globalError }),
   setShowStartModal: (showStartModal) => set({ showStartModal }),

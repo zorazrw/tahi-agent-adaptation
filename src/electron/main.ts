@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain, dialog, globalShortcut, Menu, shell } from "electron"
 import { execSync } from "child_process";
-import { readFile } from "fs/promises";
-import { resolve, isAbsolute } from "path";
+import { readFile, mkdir, copyFile } from "fs/promises";
+import { resolve, isAbsolute, basename, join } from "path";
+import { randomUUID } from "crypto";
+import { homedir } from "os";
 import * as XLSX from "xlsx";
 
 import { ipcMainHandle, isDev, DEV_PORT } from "./util.js";
@@ -123,6 +125,34 @@ app.on("ready", () => {
         }
 
         return result.filePaths[0];
+    });
+
+    // Create temp session directory
+    ipcMainHandle("create-temp-session-dir", async () => {
+        const id = randomUUID();
+        const dir = join(homedir(), "agent-cowork-sessions", id);
+        await mkdir(dir, { recursive: true });
+        return dir;
+    });
+
+    // Copy files into a target directory
+    ipcMainHandle("copy-files-to-dir", async (_: any, filePaths: string[], targetDir: string) => {
+        const names: string[] = [];
+        for (const src of filePaths) {
+            const name = basename(src);
+            await copyFile(src, join(targetDir, name));
+            names.push(name);
+        }
+        return names;
+    });
+
+    // Select files dialog
+    ipcMainHandle("select-files", async () => {
+        const result = await dialog.showOpenDialog(mainWindow!, {
+            properties: ['openFile', 'multiSelections']
+        });
+        if (result.canceled) return [];
+        return result.filePaths;
     });
 
     // Handle API config

@@ -5,9 +5,9 @@ import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
 import type { ServerEvent } from "./types";
 import { Sidebar } from "./components/Sidebar";
-import { StartSessionModal } from "./components/StartSessionModal";
+import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
-import { PromptInput, usePromptActions } from "./components/PromptInput";
+import { PromptInput } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
@@ -46,8 +46,7 @@ function App() {
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const showStartModal = useAppStore((s) => s.showStartModal);
-  const setShowStartModal = useAppStore((s) => s.setShowStartModal);
+
   const showSettingsModal = useAppStore((s) => s.showSettingsModal);
   const setShowSettingsModal = useAppStore((s) => s.setShowSettingsModal);
   const globalError = useAppStore((s) => s.globalError);
@@ -108,8 +107,6 @@ function App() {
   }, [handleServerEvent, handlePartialMessages]);
 
   const { connected, sendEvent } = useIPC(onEvent);
-  const { handleStartFromModal } = usePromptActions(sendEvent);
-
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
@@ -250,8 +247,7 @@ function App() {
 
   const handleNewSession = useCallback(() => {
     useAppStore.getState().setActiveSessionId(null);
-    setShowStartModal(true);
-  }, [setShowStartModal]);
+  }, []);
 
   const handleDeleteSession = useCallback((sessionId: string) => {
     sendEvent({ type: "session.delete", payload: { sessionId } });
@@ -339,14 +335,9 @@ function App() {
             </div>
             <div>
               <h2 className="text-lg font-semibold text-ink-800">Agent Cowork</h2>
-              <p className="mt-1 text-sm text-muted-foreground max-w-md">Create a new task to start working with an AI agent. Define steps, set verification criteria, and preview outputs.</p>
+              <p className="mt-1 text-sm text-muted-foreground max-w-md">Create a new task to start working with an AI agent. Select a folder or upload files to get started.</p>
             </div>
-            <button
-              className="rounded-full bg-primary px-6 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors"
-              onClick={handleNewSession}
-            >
-              + New Task
-            </button>
+            <HomePromptInput sendEvent={sendEvent} />
           </div>
         ) : (
         <>
@@ -497,18 +488,6 @@ function App() {
           </button>
         )}
       </main>
-
-      {showStartModal && (
-        <StartSessionModal
-          cwd={cwd}
-          prompt={prompt}
-          pendingStart={pendingStart}
-          onCwdChange={setCwd}
-          onPromptChange={setPrompt}
-          onStart={handleStartFromModal}
-          onClose={() => setShowStartModal(false)}
-        />
-      )}
 
       {showSettingsModal && (
         <SettingsModal onClose={() => setShowSettingsModal(false)} />

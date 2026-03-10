@@ -47,6 +47,14 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("get-skills-dir"),
     showItemInFolder: (filePath: string, cwd?: string | null) =>
         ipcInvoke("show-item-in-folder", filePath, cwd ?? undefined),
+    createTempSessionDir: () =>
+        ipcInvoke("create-temp-session-dir"),
+    copyFilesToDir: (filePaths: string[], targetDir: string) =>
+        ipcInvoke("copy-files-to-dir", filePaths, targetDir),
+    selectFiles: () =>
+        ipcInvoke("select-files"),
+    getPathForFile: (file: File) =>
+        (file as any).path ?? "",
 } satisfies Window['electron'])
 
 function ipcInvoke<Key extends keyof EventPayloadMapping>(key: Key, ...args: any[]): Promise<EventPayloadMapping[Key]> {
