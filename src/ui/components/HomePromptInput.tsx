@@ -162,22 +162,24 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
     if (dragCounterRef.current === 0) setIsDragging(false);
   };
 
+  // Listen for file paths resolved by the preload drop interceptor
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const paths = (e as CustomEvent<string[]>).detail;
+      if (paths?.length) handleAttachFiles(paths);
+    };
+    window.addEventListener("electron-drop-paths", handler);
+    return () => window.removeEventListener("electron-drop-paths", handler);
+  }, [handleAttachFiles]);
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     dragCounterRef.current = 0;
     setIsDragging(false);
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length === 0) return;
-    const paths = files.map((f) => {
-      try { return window.electron.getPathForFile(f); } catch { return ""; }
-    }).filter(Boolean);
-    if (paths.length > 0) {
-      handleAttachFiles(paths);
-    } else {
-      console.warn("Dropped files had no path:", files);
-      setGlobalError("Could not read dropped files. Try using the + button instead.");
-    }
+    // File paths are resolved by the preload drop interceptor and delivered
+    // via the "electron-drop-paths" custom event (see useEffect above).
+    // No need to call getPathForFile here.
   };
 
   return (

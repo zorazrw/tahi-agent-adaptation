@@ -54,8 +54,24 @@ electron.contextBridge.exposeInMainWorld("electron", {
     selectFiles: () =>
         ipcInvoke("select-files"),
     getPathForFile: (file: File) =>
-        (file as any).path ?? "",
+        electron.webUtils.getPathForFile(file),
 } satisfies Window['electron'])
+
+// Intercept drop events in the preload context where webUtils has direct
+// access to native File handles (avoids contextBridge serialization issues).
+document.addEventListener("drop", (e) => {
+    if (!e.dataTransfer?.files?.length) return;
+    const paths: string[] = [];
+    for (const file of Array.from(e.dataTransfer.files)) {
+        try {
+            const p = electron.webUtils.getPathForFile(file);
+            if (p) paths.push(p);
+        } catch { /* skip */ }
+    }
+    if (paths.length > 0) {
+        window.dispatchEvent(new CustomEvent("electron-drop-paths", { detail: paths }));
+    }
+}, true); // capture phase so it fires before renderer handlers
 
 function ipcInvoke<Key extends keyof EventPayloadMapping>(key: Key, ...args: any[]): Promise<EventPayloadMapping[Key]> {
     return electron.ipcRenderer.invoke(key, ...args);
