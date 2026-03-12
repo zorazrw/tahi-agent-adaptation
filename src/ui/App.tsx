@@ -104,7 +104,17 @@ function App() {
   const onEvent = useCallback((event: ServerEvent) => {
     handleServerEvent(event);
     handlePartialMessages(event);
-  }, [handleServerEvent, handlePartialMessages]);
+    // When session stops (idle/error/completed), clear "Thinking..." so it doesn't stick after Stop
+    if (
+      event.type === "session.status" &&
+      event.payload.status !== "running" &&
+      event.payload.sessionId === activeSessionId
+    ) {
+      setShowPartialMessage(false);
+      setPartialMessage("");
+      partialMessageRef.current = "";
+    }
+  }, [handleServerEvent, handlePartialMessages, activeSessionId]);
 
   const { connected, sendEvent } = useIPC(onEvent);
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
