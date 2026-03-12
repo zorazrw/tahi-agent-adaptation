@@ -1,6 +1,6 @@
 import { BrowserWindow } from "electron";
 import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
-import { runClaude, buildPromptForNode, type RunnerHandle } from "./libs/runner.js";
+import { runClaude, buildPromptForNode, buildRegenerateWorkflowPrompt, type RunnerHandle } from "./libs/runner.js";
 import { SessionStore } from "./libs/session-store.js";
 import {
   findNodeById,
@@ -61,15 +61,16 @@ function emit(event: ServerEvent) {
   if (event.type === "workflow.plan") {
     const { sessionId, workflowTree } = event.payload;
     const session = sessions.getSession(sessionId);
-    if (session && (!session.workflowTree || session.workflowTree.length === 0)) {
-      // Set default verification depth to middle of tree
+    if (session) {
       const maxD = getMaxDepth(workflowTree);
       const defaultDepth = Math.max(0, Math.floor(maxD / 2));
-      sessions.updateSession(sessionId, { workflowTree, verificationDepth: defaultDepth });
+      sessions.updateSession(sessionId, {
+        workflowTree,
+        verificationDepth: defaultDepth,
+        status: "idle"
+      });
       broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree } });
       broadcast({ type: "session.verificationDepth", payload: { sessionId, verificationDepth: defaultDepth } });
-
-      sessions.updateSession(sessionId, { status: "idle" });
       broadcast({
         type: "session.status",
         payload: { sessionId, status: "idle", title: session.title, cwd: session.cwd }
@@ -463,6 +464,49 @@ export function handleClientEvent(event: ClientEvent) {
       sessions.updateSession(sessionId, { title });
       broadcast({ type: "session.title", payload: { sessionId, title } });
     }
+    return;
+  }
+
+  if (event.type === "session.regenerateWorkflow") {
+    const sessionId = event.payload.sessionId;
+    const session = sessions.getSession(sessionId);
+    if (!session) {
+      emit({ type: "session.deleted", payload: { sessionId } });
+      return;
+    }
+    const messages = sessions.getMessages(sessionId);
+    const userPrompts = messages
+      .filter((m): m is { type: "user_prompt"; prompt: string } => m.type === "user_prompt")
+      .map((m) => m.prompt.trim())
+      .filter(Boolean);
+    const taskSummary =
+      userPrompts.length > 0
+        ? userPrompts.map((p, i) => `Message ${i + 1}:\n${p}`).join("\n\n")
+        : session.lastPrompt?.trim() || session.title || "Current task";
+    sessions.updateSession(sessionId, { status: "running" });
+    emit({
+      type: "session.status",
+      payload: { sessionId, status: "running", title: session.title, cwd: session.cwd }
+    });
+    runClaude({
+      prompt: buildRegenerateWorkflowPrompt(taskSummary),
+      session,
+      regenerateWorkflow: true,
+      onEvent: emit,
+      onSessionUpdate: (updates) => {
+        sessions.updateSession(sessionId, updates);
+      }
+    }).catch((error) => {
+      sessions.updateSession(sessionId, { status: "idle" });
+      emit({
+        type: "session.status",
+        payload: { sessionId, status: "idle", title: session.title, cwd: session.cwd }
+      });
+      emit({
+        type: "runner.error",
+        payload: { sessionId, message: String(error) }
+      });
+    });
     return;
   }
 

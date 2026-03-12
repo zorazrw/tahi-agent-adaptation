@@ -23,6 +23,8 @@ function log(msg: string) {
 export type RunnerOptions = {
   prompt: string;
   session: Session;
+  /** When true, run only to get a new workflow plan; do not update session.claudeSessionId. */
+  regenerateWorkflow?: boolean;
   resumeSessionId?: string;
   /** When rerunning a node, resume the SDK conversation up to this message UUID. */
   resumeSessionAt?: string;
@@ -41,16 +43,27 @@ const WORKFLOW_PLAN_INSTRUCTION = [
   "",
   "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
   "Do NOT write out steps as text. Use the tool with structured JSON input.",
-  "Keep it simple. For small tasks use a flat list (no children). For medium tasks use one level of children. Only use 3 levels for genuinely complex tasks.",
-  "Do NOT add separate validation/verification/testing steps — our system handles verification natively via verifier criteria on each node.",
+  "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
+  "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to a path (e.g. report.md, summary.txt) or use verifiers to describe what the operator can check (e.g. file exists, content contains X).",
+  "For control mode (detailed view): add optional children to any main step to break it into detailed sub-steps; the number of sub-steps can depend on that step's complexity.",
+  "Do NOT add separate validation/verification/testing steps — our system handles verification via verifier criteria on each node.",
   "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
-  "For outputFiles: prefer .md for any document-style output (reports, summaries, lists, notes) so the file preview shows formatted markdown; use .txt only when markdown does not apply (e.g. raw data, plain log).",
-  "Aim for fewer, meaningful steps rather than many granular ones.",
+  "For outputFiles: prefer .md for document-style output so the UI shows markdown preview; use .txt when markdown does not apply.",
   "After calling the tool, STOP. Do NOT execute any steps yourself.",
   "The human operator will trigger each step individually.",
   "",
   "Task instruction:"
 ].join("\n");
+
+/** Builds the prompt used when re-generating the workflow plan (regenerateWorkflow run). */
+export function buildRegenerateWorkflowPrompt(taskSummary: string): string {
+  const task = (taskSummary || "Current task").trim();
+  return (
+    WORKFLOW_PLAN_INSTRUCTION +
+    "\nRe-generate the workflow plan for this task. Call the WorkflowPlan tool with a new plan. Do not execute any steps.\n\nTask: " +
+    task
+  );
+}
 
 function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): string {
   const trimmed = userPrompt.trim();
@@ -73,10 +86,10 @@ export function buildPromptForNode(
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
-  const { prompt, session, resumeSessionId, resumeSessionAt, onEvent, onSessionUpdate } = options;
+  const { prompt, session, regenerateWorkflow, resumeSessionId, resumeSessionAt, onEvent, onSessionUpdate } = options;
   const abortController = new AbortController();
   const isFirstMessage = resumeSessionId == null;
-  const promptToSend = buildPromptForQuery(prompt, isFirstMessage);
+  const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
 
   const sendMessage = (message: SDKMessage) => {
     onEvent({
@@ -197,9 +210,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         }${message.type === "result" ? ` cost=$${(message as any).total_cost_usd?.toFixed(4)}` : ""}`);
 
         if (message.type === "system" && "subtype" in message && message.subtype === "init") {
-          const sdkSessionId = message.session_id;
-          if (sdkSessionId) {
-            session.claudeSessionId = sdkSessionId;
+          if (!regenerateWorkflow) {
+            const sdkSessionId = message.session_id;
+            if (sdkSessionId) session.claudeSessionId = sdkSessionId;
           }
         }
 
@@ -217,11 +230,21 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         }
       }
 
-      if (gotSuccessResult || planRegistered) {
-        onSessionUpdate?.({ claudeSessionId: session.claudeSessionId });
-      } else {
-        log(`[runner] Run did not succeed; restoring claudeSessionId to ${savedClaudeSessionId}`);
+      if (regenerateWorkflow) {
         session.claudeSessionId = savedClaudeSessionId;
+        if (!planRegistered) {
+          onEvent({
+            type: "session.status",
+            payload: { sessionId: session.id, status: "idle", title: session.title, cwd: session.cwd }
+          });
+        }
+      } else {
+        if (gotSuccessResult || planRegistered) {
+          onSessionUpdate?.({ claudeSessionId: session.claudeSessionId });
+        } else {
+          log(`[runner] Run did not succeed; restoring claudeSessionId to ${savedClaudeSessionId}`);
+          session.claudeSessionId = savedClaudeSessionId;
+        }
       }
 
       log(`[runner] Query finished. Total messages: ${messageCount}`);

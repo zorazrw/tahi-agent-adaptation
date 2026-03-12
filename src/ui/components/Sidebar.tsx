@@ -30,10 +30,6 @@ function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
   return undefined;
 }
 
-function depthLabel(depth: number): string {
-  return `Level ${depth}`;
-}
-
 // ─── Compact Tree Node ────────────────────────────────────────────────
 
 function TreeNode({
@@ -184,38 +180,6 @@ function TreeNode({
   );
 }
 
-// ─── Granularity Slider ───────────────────────────────────────────────
-
-function GranularitySlider({
-  maxDepth, verificationDepth, highlightDepth,
-  onHighlightChange, onDepthCommit,
-}: {
-  maxDepth: number; verificationDepth: number; highlightDepth: number | null;
-  onHighlightChange: (depth: number | null) => void;
-  onDepthCommit: (depth: number) => void;
-}) {
-  if (maxDepth <= 0) return null;
-  return (
-    <div className="flex flex-col gap-0.5 px-0.5">
-      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-        <span>Verify at:</span>
-        <span className="font-medium text-ink-600">{depthLabel(highlightDepth ?? verificationDepth)}</span>
-      </div>
-      <input
-        type="range" min={0} max={maxDepth}
-        value={highlightDepth ?? verificationDepth}
-        className="w-full h-1 accent-primary cursor-pointer"
-        onInput={(e) => onHighlightChange(Number((e.target as HTMLInputElement).value))}
-        onChange={(e) => { onHighlightChange(null); onDepthCommit(Number((e.target as HTMLInputElement).value)); }}
-        onMouseLeave={() => onHighlightChange(null)}
-      />
-      <div className="flex justify-between text-[9px] text-muted-foreground">
-        {Array.from({ length: maxDepth + 1 }, (_, i) => <span key={i}>{depthLabel(i)}</span>)}
-      </div>
-    </div>
-  );
-}
-
 // ─── Main Sidebar ─────────────────────────────────────────────────────
 
 export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarProps) {
@@ -229,8 +193,6 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const collapsedNodeIds = useAppStore((s) => s.collapsedNodeIds);
   const toggleNodeCollapsed = useAppStore((s) => s.toggleNodeCollapsed);
   const setCollapsedNodeIds = useAppStore((s) => s.setCollapsedNodeIds);
-  const highlightDepth = useAppStore((s) => s.highlightDepth);
-  const setHighlightDepth = useAppStore((s) => s.setHighlightDepth);
   const updateWorkflowTree = useAppStore((s) => s.updateWorkflowTree);
   const updateVerificationDepth = useAppStore((s) => s.updateVerificationDepth);
   const updateSessionTitle = useAppStore((s) => s.updateSessionTitle);
@@ -248,7 +210,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const verificationDepth = activeSession?.verificationDepth ?? 0;
   const maxDepth = useMemo(() => getMaxDepth(workflowTree), [workflowTree]);
   const selectedNode = useMemo(() => selectedNodeId ? findNode(workflowTree, selectedNodeId) : undefined, [workflowTree, selectedNodeId]);
-  const effectiveDepth = highlightDepth ?? verificationDepth;
+  const effectiveDepth = verificationDepth;
 
   // Auto-collapse nodes below verification depth when depth changes
   const prevDepthRef = useRef(verificationDepth);
@@ -463,16 +425,62 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
       {/* Progress: tree + slider + run button — takes all remaining space */}
       {sessionList.length > 0 && (
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-          <div className="flex items-center gap-2 mb-1.5 shrink-0">
-            <div className="h-3 w-0.5 rounded-full bg-primary" />
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Progress</span>
-          </div>
-
-          {workflowTree.length > 0 && maxDepth > 0 && (
-            <div className="shrink-0 mb-1.5">
-              <GranularitySlider maxDepth={maxDepth} verificationDepth={verificationDepth} highlightDepth={highlightDepth} onHighlightChange={setHighlightDepth} onDepthCommit={handleDepthCommit} />
+          <div className="flex items-center justify-between gap-2 mb-1.5 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="h-3 w-0.5 shrink-0 rounded-full bg-primary" />
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Progress</span>
             </div>
-          )}
+            {workflowTree.length > 0 && maxDepth > 0 && (
+              <div className="flex items-center gap-1 rounded-lg border border-ink-900/10 bg-surface p-0.5 shrink-0">
+                <TooltipProvider delayDuration={300}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => handleDepthCommit(0)}
+                        className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${verificationDepth === 0 ? "bg-primary text-white shadow-sm" : "text-ink-500 hover:text-ink-700 hover:bg-ink-900/5"}`}
+                      >
+                        Automation
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">verify at high level</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => handleDepthCommit(maxDepth)}
+                        className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${verificationDepth === maxDepth ? "bg-primary text-white shadow-sm" : "text-ink-500 hover:text-ink-700 hover:bg-ink-900/5"}`}
+                      >
+                        Control
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">verify at detailed level</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+            )}
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    disabled={!activeSessionId || activeSession?.status === "running"}
+                    onClick={() => {
+                      if (activeSessionId) {
+                        sendEvent({ type: "session.regenerateWorkflow", payload: { sessionId: activeSessionId } });
+                      }
+                    }}
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-primary hover:bg-ink-900/5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                    aria-label="Re-generate workflow steps"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21h5v-5" /></svg>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Re-generate workflow steps</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
 
           {workflowTree.length === 0 ? (
             <p className="text-xs text-muted-foreground py-1">No workflow yet. Send a message to generate the plan.</p>
