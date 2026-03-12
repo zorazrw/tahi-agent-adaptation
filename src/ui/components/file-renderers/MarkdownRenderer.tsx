@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import hljs from "highlight.js";
 import { ViewToggle, useViewToggle } from "./ViewToggle";
@@ -25,7 +27,7 @@ export function MarkdownRenderer({ data }: { data: { kind: "md"; content: string
       </div>
       {mode === "preview" ? (
         <div className="md-prose">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight, rehypeRaw]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeRaw]}>
             {data.content}
           </ReactMarkdown>
         </div>

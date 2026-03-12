@@ -5,13 +5,13 @@ import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
 import type { ServerEvent } from "./types";
 import { Sidebar } from "./components/Sidebar";
-import { StartSessionModal } from "./components/StartSessionModal";
+import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
-import { PromptInput, usePromptActions } from "./components/PromptInput";
+import { PromptInput } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
-import { FilePreview, getPreviewFileForStep } from "./components/FilePreview";
+import { FilePreview, getPreviewFileForNode } from "./components/FilePreview";
 import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PanelRightOpenIcon, PanelRightCloseIcon } from "lucide-react";
@@ -46,8 +46,7 @@ function App() {
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const showStartModal = useAppStore((s) => s.showStartModal);
-  const setShowStartModal = useAppStore((s) => s.setShowStartModal);
+
   const showSettingsModal = useAppStore((s) => s.showSettingsModal);
   const setShowSettingsModal = useAppStore((s) => s.setShowSettingsModal);
   const globalError = useAppStore((s) => s.globalError);
@@ -63,7 +62,7 @@ function App() {
   const pendingStart = useAppStore((s) => s.pendingStart);
   const apiConfigChecked = useAppStore((s) => s.apiConfigChecked);
   const setApiConfigChecked = useAppStore((s) => s.setApiConfigChecked);
-  const previewStepIndex = useAppStore((s) => s.previewStepIndex);
+  const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const previewPanelOpen = useAppStore((s) => s.previewPanelOpen);
   const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
 
@@ -108,8 +107,6 @@ function App() {
   }, [handleServerEvent, handlePartialMessages]);
 
   const { connected, sendEvent } = useIPC(onEvent);
-  const { handleStartFromModal } = usePromptActions(sendEvent);
-
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
@@ -249,9 +246,13 @@ function App() {
   }, [resetToLatest]);
 
   const handleNewSession = useCallback(() => {
-    useAppStore.getState().setActiveSessionId(null);
-    setShowStartModal(true);
-  }, [setShowStartModal]);
+    const store = useAppStore.getState();
+    store.setActiveSessionId(null);
+    store.setAttachedFiles([]);
+    store.setTempCwd(null);
+    store.setCwd("");
+    store.setPrompt("");
+  }, []);
 
   const handleDeleteSession = useCallback((sessionId: string) => {
     sendEvent({ type: "session.delete", payload: { sessionId } });
@@ -339,14 +340,9 @@ function App() {
             </div>
             <div>
               <h2 className="text-lg font-semibold text-ink-800">Agent Cowork</h2>
-              <p className="mt-1 text-sm text-muted-foreground max-w-md">Create a new task to start working with an AI agent. Define steps, set verification criteria, and preview outputs.</p>
+              <p className="mt-1 text-sm text-muted-foreground max-w-md">Create a new task to start working with an AI agent. Select a folder or upload files to get started.</p>
             </div>
-            <button
-              className="rounded-full bg-primary px-6 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors"
-              onClick={handleNewSession}
-            >
-              + New Task
-            </button>
+            <HomePromptInput sendEvent={sendEvent} />
           </div>
         ) : (
         <>
@@ -358,9 +354,33 @@ function App() {
               <div className="flex flex-col h-full">
                 <ErrorBoundary>
                   <FilePreview
-                    filePath={getPreviewFileForStep(activeSession?.outputFiles, previewStepIndex)}
+                    filePath={(() => {
+                      if (!selectedNodeId || !activeSession?.workflowTree) return null;
+                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                        for (const n of tree) {
+                          if (n.id === id) return n;
+                          const f = findNode(n.children, id);
+                          if (f) return f;
+                        }
+                        return undefined;
+                      };
+                      const node = findNode(activeSession.workflowTree, selectedNodeId);
+                      return getPreviewFileForNode(node?.outputFiles);
+                    })()}
                     cwd={activeSession?.cwd}
-                    stepCompleted={activeSession?.completedStepIndices?.includes(previewStepIndex) ?? false}
+                    stepCompleted={(() => {
+                      if (!selectedNodeId || !activeSession?.workflowTree) return false;
+                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                        for (const n of tree) {
+                          if (n.id === id) return n;
+                          const f = findNode(n.children, id);
+                          if (f) return f;
+                        }
+                        return undefined;
+                      };
+                      const node = findNode(activeSession.workflowTree, selectedNodeId);
+                      return node?.status === "completed";
+                    })()}
                   />
                 </ErrorBoundary>
               </div>
@@ -497,18 +517,6 @@ function App() {
           </button>
         )}
       </main>
-
-      {showStartModal && (
-        <StartSessionModal
-          cwd={cwd}
-          prompt={prompt}
-          pendingStart={pendingStart}
-          onCwdChange={setCwd}
-          onPromptChange={setPrompt}
-          onStart={handleStartFromModal}
-          onClose={() => setShowStartModal(false)}
-        />
-      )}
 
       {showSettingsModal && (
         <SettingsModal onClose={() => setShowSettingsModal(false)} />

@@ -1,6 +1,6 @@
 import { FileIcon, ImageIcon, EyeIcon } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
-import type { StepCompletedMessage } from "../types";
+import type { NodeCompletedMessage, WorkflowNode } from "../types";
 import { pathHasPreviewExt } from "./FilePreview";
 
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"];
@@ -10,18 +10,28 @@ function isImageFile(path: string): boolean {
   return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
-export function StepOutputSnippet({ message }: { message: StepCompletedMessage }) {
+function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
+  for (const node of tree) {
+    if (node.id === id) return node;
+    const found = findNode(node.children, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+export function NodeOutputSnippet({ message }: { message: NodeCompletedMessage }) {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const sessions = useAppStore((s) => s.sessions);
-  const setPreviewStepIndex = useAppStore((s) => s.setPreviewStepIndex);
+  const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId);
   const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
 
   const session = activeSessionId ? sessions[activeSessionId] : undefined;
-  const outputFiles = session?.outputFiles?.[message.stepIndex] ?? [];
+  const tree = session?.workflowTree ?? [];
+  const node = findNode(tree, message.nodeId);
+  const outputFiles = node?.outputFiles ?? [];
   const previewableFiles = outputFiles.filter(pathHasPreviewExt);
 
   if (previewableFiles.length === 0) {
-    // Step completed but no previewable output files — show minimal indicator
     return (
       <div className="flex items-center gap-2 py-2 mt-3">
         <div className="h-px flex-1 bg-ink-900/10" />
@@ -29,7 +39,7 @@ export function StepOutputSnippet({ message }: { message: StepCompletedMessage }
           <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M5 12l4 4L19 6" />
           </svg>
-          Step {message.stepIndex + 1} completed
+          {message.nodeLabel} completed
         </span>
         <div className="h-px flex-1 bg-ink-900/10" />
       </div>
@@ -37,7 +47,7 @@ export function StepOutputSnippet({ message }: { message: StepCompletedMessage }
   }
 
   const handleClick = () => {
-    setPreviewStepIndex(message.stepIndex);
+    setSelectedNodeId(message.nodeId);
     setPreviewPanelOpen(true);
   };
 
@@ -56,7 +66,7 @@ export function StepOutputSnippet({ message }: { message: StepCompletedMessage }
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-ink-800">
-            Step {message.stepIndex + 1}: {message.stepLabel}
+            {message.nodeLabel}
           </span>
         </div>
         <div className="mt-1 flex flex-wrap gap-1.5">

@@ -1,8 +1,10 @@
 import { useState, useCallback, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 function extractTextContent(node: ReactNode): string {
   if (typeof node === "string") return node;
@@ -40,8 +42,8 @@ export default function MDContent({ text }: { text: string }) {
   return (
     <div className="md-chat">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, rehypeHighlight]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex, rehypeRaw, rehypeHighlight]}
         components={{
           pre: ({ children, ...props }) => {
             const text = extractTextContent(children);

@@ -76,30 +76,44 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
 
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const sessions = useAppStore((state) => state.sessions);
-  const selectedStepIndex = useAppStore((state) => state.selectedStepIndex);
-  const setRunningStepIndex = useAppStore((state) => state.setRunningStepIndex);
+  const selectedNodeId = useAppStore((state) => state.selectedNodeId);
+  const setRunningNodeId = useAppStore((state) => state.setRunningNodeId);
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
 
-  // Determine if there's a pending (not yet completed) step that can be started
-  const hasPendingStep = !!(
+  // Find the selected node in the workflow tree
+  const findNode = (tree: import("../types").WorkflowNode[], id: string): import("../types").WorkflowNode | undefined => {
+    for (const node of tree) {
+      if (node.id === id) return node;
+      const found = findNode(node.children, id);
+      if (found) return found;
+    }
+    return undefined;
+  };
+
+  const selectedNode = selectedNodeId && activeSession?.workflowTree
+    ? findNode(activeSession.workflowTree, selectedNodeId)
+    : undefined;
+
+  // Determine if the selected node is pending (can be started)
+  const hasPendingNode = !!(
     activeSessionId &&
     activeSession &&
     activeSession.status !== "running" &&
-    activeSession.steps &&
-    activeSession.steps.length > 0 &&
-    !activeSession.completedStepIndices?.includes(selectedStepIndex)
+    selectedNode &&
+    selectedNode.status !== "completed" &&
+    selectedNode.status !== "running"
   );
 
-  const pendingStepLabel = hasPendingStep
-    ? activeSession!.steps![selectedStepIndex] || `Step ${selectedStepIndex + 1}`
+  const pendingStepLabel = hasPendingNode
+    ? selectedNode!.description || "Selected node"
     : null;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Tab to start next pending step
-    if (e.key === "Tab" && hasPendingStep && !prompt.trim()) {
+    if (e.key === "Tab" && hasPendingNode && selectedNodeId && !prompt.trim()) {
       e.preventDefault();
-      setRunningStepIndex(selectedStepIndex);
-      sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId!, stepIndex: selectedStepIndex } });
+      setRunningNodeId(selectedNodeId);
+      sendEvent({ type: "session.solveNode", payload: { sessionId: activeSessionId!, nodeId: selectedNodeId } });
       return;
     }
     if (disabled && !isRunning) return;
@@ -161,7 +175,7 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
             ref={promptRef}
             disabled={disabled && !isRunning}
           />
-          {hasPendingStep && !prompt.trim() && (
+          {hasPendingNode && !prompt.trim() && (
             <div className="absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
               <kbd className="inline-flex items-center rounded border border-ink-900/15 bg-ink-900/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground leading-none">TAB</kbd>
               <span className="text-xs text-muted-foreground whitespace-nowrap">to start next step</span>

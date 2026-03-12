@@ -1,5 +1,18 @@
 import type { SDKMessage, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 
+export type NodeStatus = "pending" | "running" | "completed" | "error";
+
+export type WorkflowNode = {
+  id: string;
+  description: string;
+  outputFiles: string[];
+  verifiers: string[];
+  verifierMarks: VerifierMark[];
+  children: WorkflowNode[];
+  status: NodeStatus;
+  depth: number;
+  resumePoint?: { uuid: string; claudeSessionId: string };
+};
 
 export type UserPromptMessage = {
   type: "user_prompt";
@@ -18,11 +31,8 @@ export type SessionInfo = {
   status: SessionStatus;
   claudeSessionId?: string;
   cwd?: string;
-  steps?: string[];
-  completedStepIndices?: number[];
-  outputFiles?: string[][];
-  verificationCriteria?: string[][];
-  verifierMarks?: VerifierMark[][];
+  workflowTree?: WorkflowNode[];
+  verificationDepth?: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -33,18 +43,16 @@ export type ServerEvent =
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
   | { type: "session.status"; payload: { sessionId: string; status: SessionStatus; title?: string; cwd?: string; error?: string } }
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
-  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; steps?: string[]; completedStepIndices?: number[]; outputFiles?: string[][]; verificationCriteria?: string[][]; verifierMarks?: VerifierMark[][]; title?: string } }
-  | { type: "session.steps"; payload: { sessionId: string; steps: string[] } }
-  | { type: "session.outputFiles"; payload: { sessionId: string; outputFiles: string[][] } }
-  | { type: "session.verificationCriteria"; payload: { sessionId: string; verificationCriteria: string[][] } }
-  | { type: "session.verifierMarks"; payload: { sessionId: string; verifierMarks: VerifierMark[][] } }
+  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; workflowTree?: WorkflowNode[]; verificationDepth?: number; title?: string } }
+  | { type: "session.workflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
+  | { type: "session.verificationDepth"; payload: { sessionId: string; verificationDepth: number } }
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }
-  | { type: "session.stepCompleted"; payload: { sessionId: string; stepIndex: number } }
+  | { type: "session.nodeCompleted"; payload: { sessionId: string; nodeId: string } }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } }
-  | { type: "workflow.plan"; payload: { sessionId: string; steps: string[]; outputFiles: string[][]; verificationCriteria: string[][] } }
-  | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[]; completedStepIndices: number[] } };
+  | { type: "workflow.plan"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
+  | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[] } };
 
 // Client -> Server events
 export type ClientEvent =
@@ -52,11 +60,10 @@ export type ClientEvent =
   | { type: "session.continue"; payload: { sessionId: string; prompt: string } }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }
-  | { type: "session.updateSteps"; payload: { sessionId: string; steps: string[] } }
-  | { type: "session.updateVerificationCriteria"; payload: { sessionId: string; verificationCriteria: string[][] } }
-  | { type: "session.updateVerifierMarks"; payload: { sessionId: string; verifierMarks: VerifierMark[][] } }
+  | { type: "session.updateWorkflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
+  | { type: "session.updateVerificationDepth"; payload: { sessionId: string; verificationDepth: number } }
   | { type: "session.updateTitle"; payload: { sessionId: string; title: string } }
   | { type: "session.list" }
   | { type: "session.history"; payload: { sessionId: string } }
-  | { type: "session.solveStep"; payload: { sessionId: string; stepIndex: number } }
+  | { type: "session.solveNode"; payload: { sessionId: string; nodeId: string } }
   | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: PermissionResult } };

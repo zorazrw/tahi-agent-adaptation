@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ServerEvent, SessionStatus, StreamMessage, StepCompletedMessage, VerifierMark } from "../types";
+import type { ServerEvent, SessionStatus, StreamMessage, NodeCompletedMessage, VerifierMark, WorkflowNode } from "../types";
 
 export type PermissionRequest = {
   toolUseId: string;
@@ -12,11 +12,8 @@ export type SessionView = {
   title: string;
   status: SessionStatus;
   cwd?: string;
-  steps?: string[];
-  completedStepIndices?: number[];
-  outputFiles?: string[][];
-  verificationCriteria?: string[][];
-  verifierMarks?: VerifierMark[][];
+  workflowTree?: WorkflowNode[];
+  verificationDepth?: number;
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
   lastPrompt?: string;
@@ -28,10 +25,10 @@ export type SessionView = {
 interface AppState {
   sessions: Record<string, SessionView>;
   activeSessionId: string | null;
-  selectedStepIndex: number;
-  previewStepIndex: number;
-  previewPanelOpen: boolean;
-  runningStepIndex: number | null;
+  selectedNodeId: string | null;
+  runningNodeId: string | null;
+  collapsedNodeIds: Set<string>;
+  highlightDepth: number | null;
   prompt: string;
   cwd: string;
   pendingStart: boolean;
@@ -41,6 +38,9 @@ interface AppState {
   showSettingsModal: boolean;
   historyRequested: Set<string>;
   apiConfigChecked: boolean;
+  attachedFiles: string[];
+  tempCwd: string | null;
+  previewPanelOpen: boolean;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -48,17 +48,20 @@ interface AppState {
   setGlobalError: (error: string | null) => void;
   setShowStartModal: (show: boolean) => void;
   setShowSettingsModal: (show: boolean) => void;
+  setAttachedFiles: (files: string[]) => void;
+  setTempCwd: (dir: string | null) => void;
   setActiveSessionId: (id: string | null) => void;
-  setSelectedStepIndex: (index: number) => void;
-  setPreviewStepIndex: (index: number) => void;
+  setSelectedNodeId: (id: string | null) => void;
+  setRunningNodeId: (id: string | null) => void;
+  toggleNodeCollapsed: (nodeId: string) => void;
+  setCollapsedNodeIds: (ids: Set<string>) => void;
+  setHighlightDepth: (depth: number | null) => void;
   setPreviewPanelOpen: (open: boolean) => void;
-  setRunningStepIndex: (index: number | null) => void;
   setApiConfigChecked: (checked: boolean) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
-  updateSessionSteps: (sessionId: string, steps: string[]) => void;
-  updateSessionVerificationCriteria: (sessionId: string, verificationCriteria: string[][]) => void;
-  updateSessionVerifierMarks: (sessionId: string, verifierMarks: VerifierMark[][]) => void;
+  updateWorkflowTree: (sessionId: string, workflowTree: WorkflowNode[]) => void;
+  updateVerificationDepth: (sessionId: string, verificationDepth: number) => void;
   updateSessionTitle: (sessionId: string, title: string) => void;
   handleServerEvent: (event: ServerEvent) => void;
 
@@ -73,13 +76,23 @@ function createSession(id: string): SessionView {
   return { id, title: "", status: "idle", messages: [], permissionRequests: [], hydrated: false };
 }
 
+/** Find a node by id in a workflow tree. */
+function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
+  for (const node of tree) {
+    if (node.id === id) return node;
+    const found = findNode(node.children, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   sessions: {},
   activeSessionId: null,
-  selectedStepIndex: 0,
-  previewStepIndex: 0,
-  previewPanelOpen: false,
-  runningStepIndex: null,
+  selectedNodeId: null,
+  runningNodeId: null,
+  collapsedNodeIds: new Set(),
+  highlightDepth: null,
   prompt: "",
   cwd: "",
   pendingStart: false,
@@ -89,18 +102,29 @@ export const useAppStore = create<AppState>((set, get) => ({
   showSettingsModal: false,
   historyRequested: new Set(),
   apiConfigChecked: false,
+  attachedFiles: [],
+  tempCwd: null,
+  previewPanelOpen: false,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
+  setAttachedFiles: (attachedFiles) => set({ attachedFiles }),
+  setTempCwd: (tempCwd) => set({ tempCwd }),
   setPendingStart: (pendingStart) => set({ pendingStart }),
   setGlobalError: (globalError) => set({ globalError }),
   setShowStartModal: (showStartModal) => set({ showStartModal }),
   setShowSettingsModal: (showSettingsModal) => set({ showSettingsModal }),
-  setActiveSessionId: (id) => set({ activeSessionId: id, selectedStepIndex: 0, previewStepIndex: 0, previewPanelOpen: false }),
-  setSelectedStepIndex: (index) => set({ selectedStepIndex: index, previewStepIndex: index }),
-  setPreviewStepIndex: (index) => set({ previewStepIndex: index }),
+  setActiveSessionId: (id) => set({ activeSessionId: id, selectedNodeId: null, previewPanelOpen: false }),
+  setSelectedNodeId: (id) => set({ selectedNodeId: id }),
+  setRunningNodeId: (runningNodeId) => set({ runningNodeId }),
+  toggleNodeCollapsed: (nodeId) => set((state) => {
+    const next = new Set(state.collapsedNodeIds);
+    if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
+    return { collapsedNodeIds: next };
+  }),
+  setCollapsedNodeIds: (collapsedNodeIds) => set({ collapsedNodeIds }),
+  setHighlightDepth: (highlightDepth) => set({ highlightDepth }),
   setPreviewPanelOpen: (previewPanelOpen) => set({ previewPanelOpen }),
-  setRunningStepIndex: (runningStepIndex) => set({ runningStepIndex }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
 
   toolStatuses: {},
@@ -113,40 +137,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     toolMeta: { ...state.toolMeta, [toolUseId]: meta }
   })),
 
-  updateSessionSteps: (sessionId, steps) => {
+  updateWorkflowTree: (sessionId, workflowTree) => {
     set((state) => {
       const existing = state.sessions[sessionId];
       if (!existing) return {};
       return {
         sessions: {
           ...state.sessions,
-          [sessionId]: { ...existing, steps }
+          [sessionId]: { ...existing, workflowTree }
         }
       };
     });
   },
 
-  updateSessionVerificationCriteria: (sessionId, verificationCriteria) => {
+  updateVerificationDepth: (sessionId, verificationDepth) => {
     set((state) => {
       const existing = state.sessions[sessionId];
       if (!existing) return {};
       return {
         sessions: {
           ...state.sessions,
-          [sessionId]: { ...existing, verificationCriteria }
-        }
-      };
-    });
-  },
-
-  updateSessionVerifierMarks: (sessionId, verifierMarks) => {
-    set((state) => {
-      const existing = state.sessions[sessionId];
-      if (!existing) return {};
-      return {
-        sessions: {
-          ...state.sessions,
-          [sessionId]: { ...existing, verifierMarks }
+          [sessionId]: { ...existing, verificationDepth }
         }
       };
     });
@@ -202,11 +213,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             status: session.status,
             title: session.title ?? existing.title,
             cwd: session.cwd,
-            steps: session.steps ?? existing.steps,
-            completedStepIndices: session.completedStepIndices ?? existing.completedStepIndices,
-            outputFiles: session.outputFiles ?? existing.outputFiles,
-            verificationCriteria: session.verificationCriteria ?? existing.verificationCriteria,
-            verifierMarks: session.verifierMarks ?? existing.verifierMarks,
+            workflowTree: session.workflowTree ?? existing.workflowTree,
+            verificationDepth: session.verificationDepth ?? existing.verificationDepth,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
           };
@@ -243,7 +251,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, steps, completedStepIndices, outputFiles, verificationCriteria, verifierMarks, title } = event.payload;
+        const { sessionId, messages, status, workflowTree, verificationDepth, title } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -253,11 +261,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 ...existing,
                 status,
                 messages,
-                ...(steps !== undefined && { steps }),
-                ...(completedStepIndices !== undefined && { completedStepIndices }),
-                ...(outputFiles !== undefined && { outputFiles }),
-                ...(verificationCriteria !== undefined && { verificationCriteria }),
-                ...(verifierMarks !== undefined && { verifierMarks }),
+                ...(workflowTree !== undefined && { workflowTree }),
+                ...(verificationDepth !== undefined && { verificationDepth }),
                 ...(title !== undefined && { title }),
                 hydrated: true
               }
@@ -267,56 +272,28 @@ export const useAppStore = create<AppState>((set, get) => ({
         break;
       }
 
-      case "session.steps": {
-        const { sessionId, steps } = event.payload;
+      case "session.workflowTree": {
+        const { sessionId, workflowTree } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, steps }
+              [sessionId]: { ...existing, workflowTree }
             }
           };
         });
         break;
       }
 
-      case "session.outputFiles": {
-        const { sessionId, outputFiles } = event.payload;
+      case "session.verificationDepth": {
+        const { sessionId, verificationDepth } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, outputFiles }
-            }
-          };
-        });
-        break;
-      }
-
-      case "session.verificationCriteria": {
-        const { sessionId, verificationCriteria } = event.payload;
-        set((state) => {
-          const existing = state.sessions[sessionId] ?? createSession(sessionId);
-          return {
-            sessions: {
-              ...state.sessions,
-              [sessionId]: { ...existing, verificationCriteria }
-            }
-          };
-        });
-        break;
-      }
-
-      case "session.verifierMarks": {
-        const { sessionId, verifierMarks } = event.payload;
-        set((state) => {
-          const existing = state.sessions[sessionId] ?? createSession(sessionId);
-          return {
-            sessions: {
-              ...state.sessions,
-              [sessionId]: { ...existing, verifierMarks }
+              [sessionId]: { ...existing, verificationDepth }
             }
           };
         });
@@ -338,47 +315,39 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.messagesReset": {
-        const { sessionId, messages, completedStepIndices } = event.payload;
+        const { sessionId, messages } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           const isActive = sessionId === state.activeSessionId;
           return {
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, messages, completedStepIndices }
+              [sessionId]: { ...existing, messages }
             },
-            // Reset preview state when rewinding
             ...(isActive ? { previewPanelOpen: false } : {})
           };
         });
         break;
       }
 
-      case "session.stepCompleted": {
-        const { sessionId, stepIndex } = event.payload;
+      case "session.nodeCompleted": {
+        const { sessionId, nodeId } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
-          const completed = existing.completedStepIndices ?? [];
-          if (completed.includes(stepIndex)) return {};
-          const nextCompleted = [...completed, stepIndex].sort((a, b) => a - b);
           const isActive = sessionId === state.activeSessionId;
-          const nextStepIndex = Math.min(stepIndex + 1, (existing.steps?.length ?? 1) - 1);
-          const stepLabel = existing.steps?.[stepIndex] ?? `Step ${stepIndex + 1}`;
+          const tree = existing.workflowTree ?? [];
+          const node = findNode(tree, nodeId);
+          const nodeLabel = node?.description ?? nodeId;
 
-          // Inject synthetic step_completed message into chat
-          const syntheticMsg: StepCompletedMessage = { type: "step_completed", stepIndex, stepLabel };
+          // Inject synthetic node_completed message into chat
+          const syntheticMsg: NodeCompletedMessage = { type: "node_completed", nodeId, nodeLabel };
           const nextMessages = [...existing.messages, syntheticMsg];
 
           return {
-            selectedStepIndex: isActive ? nextStepIndex : state.selectedStepIndex,
-            previewStepIndex: isActive ? stepIndex : state.previewStepIndex,
-            // Chat panel is user-toggled; preview is always visible in center
-            previewPanelOpen: state.previewPanelOpen,
-            // Clear running indicator when the step completes
-            runningStepIndex: isActive && state.runningStepIndex === stepIndex ? null : state.runningStepIndex,
+            runningNodeId: isActive && state.runningNodeId === nodeId ? null : state.runningNodeId,
             sessions: {
               ...state.sessions,
-              [sessionId]: { ...existing, completedStepIndices: nextCompleted, messages: nextMessages }
+              [sessionId]: { ...existing, messages: nextMessages }
             }
           };
         });
@@ -391,8 +360,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           const isActive = sessionId === state.activeSessionId;
           return {
-            // Clear running step when session stops running
-            ...(isActive && status !== "running" ? { runningStepIndex: null } : {}),
+            ...(isActive && status !== "running" ? { runningNodeId: null } : {}),
             sessions: {
               ...state.sessions,
               [sessionId]: {
@@ -442,8 +410,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       case "stream.message": {
         const { sessionId, message } = event.payload;
-        // Skip intermediate stream events (content_block_delta, etc.)
-        // These are handled by partial message state in App.tsx
         if ((message as any).type === "stream_event") break;
 
         set((state) => {

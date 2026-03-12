@@ -50,6 +50,9 @@ type EventPayloadMapping = {
     "get-skill-content": { content: string } | { error: string };
     "get-skills-dir": string;
     "show-item-in-folder": void;
+    "create-temp-session-dir": string;
+    "copy-files-to-dir": string[];
+    "select-files": string[];
 }
 
 interface Window {
@@ -71,5 +74,9 @@ interface Window {
         getSkillContent: (path: string) => Promise<{ content: string } | { error: string }>;
         getSkillsDir: () => Promise<string>;
         showItemInFolder: (filePath: string, cwd?: string | null) => Promise<void>;
+        createTempSessionDir: () => Promise<string>;
+        copyFilesToDir: (filePaths: string[], targetDir: string) => Promise<string[]>;
+        selectFiles: () => Promise<string[]>;
+        getPathForFile: (file: File) => string;
     }
 }

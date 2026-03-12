@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/ui/components/ui/combobox";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/ui/components/ui/tooltip";
-import type { ClientEvent } from "../types";
+import type { ClientEvent, WorkflowNode, VerifierMark } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
 interface SidebarProps {
@@ -12,79 +12,306 @@ interface SidebarProps {
   onDeleteSession: (sessionId: string) => void;
 }
 
-export function Sidebar({
-  sendEvent,
-  onNewSession,
-  onDeleteSession
-}: SidebarProps) {
-  const sessions = useAppStore((state) => state.sessions);
-  const activeSessionId = useAppStore((state) => state.activeSessionId);
-  const setActiveSessionId = useAppStore((state) => state.setActiveSessionId);
-  const selectedStepIndex = useAppStore((state) => state.selectedStepIndex);
-  const setSelectedStepIndex = useAppStore((state) => state.setSelectedStepIndex);
-  const updateSessionSteps = useAppStore((state) => state.updateSessionSteps);
-  const updateSessionVerificationCriteria = useAppStore((state) => state.updateSessionVerificationCriteria);
-  const updateSessionVerifierMarks = useAppStore((state) => state.updateSessionVerifierMarks);
-  const updateSessionTitle = useAppStore((state) => state.updateSessionTitle);
-  const runningStepIndex = useAppStore((state) => state.runningStepIndex);
-  const setRunningStepIndex = useAppStore((state) => state.setRunningStepIndex);
+function getMaxDepth(tree: WorkflowNode[]): number {
+  let max = 0;
+  for (const node of tree) {
+    max = Math.max(max, node.depth);
+    if (node.children.length > 0) max = Math.max(max, getMaxDepth(node.children));
+  }
+  return max;
+}
+
+function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
+  for (const node of tree) {
+    if (node.id === id) return node;
+    const found = findNode(node.children, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function depthLabel(depth: number): string {
+  return `Level ${depth}`;
+}
+
+// ─── Compact Tree Node ────────────────────────────────────────────────
+
+function TreeNode({
+  node,
+  selectedNodeId,
+  runningNodeId,
+  collapsedNodeIds,
+  effectiveDepth,
+  editingNodeId,
+  editingNodeDraft,
+  editingNodeInputRef,
+  onSelectNode,
+  onToggleCollapse,
+  onEditNode,
+  onDeleteNode,
+  onEditDraftChange,
+  onEditSave,
+  onEditCancel,
+}: {
+  node: WorkflowNode;
+  selectedNodeId: string | null;
+  runningNodeId: string | null;
+  collapsedNodeIds: Set<string>;
+  effectiveDepth: number;
+  editingNodeId: string | null;
+  editingNodeDraft: string;
+  editingNodeInputRef: React.RefObject<HTMLInputElement | null>;
+  onSelectNode: (id: string) => void;
+  onToggleCollapse: (id: string) => void;
+  onEditNode: (id: string) => void;
+  onDeleteNode: (id: string) => void;
+  onEditDraftChange: (val: string) => void;
+  onEditSave: () => void;
+  onEditCancel: () => void;
+}) {
+  const isSelected = selectedNodeId === node.id;
+  const isRunning = runningNodeId === node.id && node.status === "running";
+  const isCompleted = node.status === "completed";
+  const isCollapsed = collapsedNodeIds.has(node.id);
+  const hasChildren = node.children.length > 0;
+  const isEditing = editingNodeId === node.id;
+  const isHighlighted = node.depth === effectiveDepth;
+
+  return (
+    <div style={{ paddingLeft: node.depth > 0 ? 20 : 0 }}>
+      {/* Node row */}
+      <div
+        className={`group flex items-start gap-1 py-[3px] px-1 rounded-md cursor-pointer select-none transition-colors ${isSelected ? "bg-primary/8" : "hover:bg-ink-900/4"}`}
+        style={isHighlighted ? { borderLeft: '2px solid rgba(217, 119, 87, 0.6)', paddingLeft: 2, backgroundColor: isSelected ? undefined : 'rgba(217, 119, 87, 0.04)' } : undefined}
+        onClick={() => onSelectNode(node.id)}
+      >
+        {/* Chevron for collapsible */}
+        {hasChildren ? (
+          <button
+            type="button"
+            className="shrink-0 mt-[2px] p-0 text-ink-400 hover:text-ink-600"
+            onClick={(e) => { e.stopPropagation(); onToggleCollapse(node.id); }}
+          >
+            <svg viewBox="0 0 16 16" className={`h-3.5 w-3.5 transition-transform ${isCollapsed ? "" : "rotate-90"}`} fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M6 3l5 5-5 5" />
+            </svg>
+          </button>
+        ) : (
+          <span className="shrink-0 w-3.5 mt-[2px]" />
+        )}
+
+        {/* Status circle */}
+        <span className="shrink-0 mt-[5px]">
+          {isRunning ? (
+            <span className="block h-2.5 w-2.5 rounded-full border-[1.5px] border-primary border-t-transparent animate-spin" />
+          ) : (
+            <span className={`block h-2.5 w-2.5 rounded-full border-[1.5px] ${
+              isCompleted
+                ? "border-emerald-500 bg-emerald-500"
+                : node.status === "error"
+                  ? "border-error bg-error/30"
+                  : isSelected
+                    ? "border-primary bg-primary/25"
+                    : "border-ink-900/25 bg-transparent"
+            }`} />
+          )}
+        </span>
+
+        {/* Label */}
+        {isEditing ? (
+          <input
+            ref={editingNodeInputRef}
+            type="text"
+            className="flex-1 min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] text-ink-800 focus:border-primary focus:outline-none"
+            value={editingNodeDraft}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onEditDraftChange(e.target.value)}
+            onBlur={onEditSave}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); onEditSave(); }
+              if (e.key === "Escape") onEditCancel();
+            }}
+          />
+        ) : (
+          <span className={`flex-1 min-w-0 text-[12px] leading-[18px] break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-600"}`}>
+            {node.description || <span className="italic text-ink-400">Untitled</span>}
+          </span>
+        )}
+
+        {/* Hover actions */}
+        {!isEditing && (
+          <span className="shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              type="button"
+              className="p-0.5 rounded text-ink-300 hover:text-ink-600"
+              onClick={(e) => { e.stopPropagation(); onEditNode(node.id); }}
+            >
+              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 1.5l3 3L5 14l-3.5.5L2 11l9.5-9.5z" /></svg>
+            </button>
+            <button
+              type="button"
+              className="p-0.5 rounded text-ink-300 hover:text-error"
+              onClick={(e) => { e.stopPropagation(); onDeleteNode(node.id); }}
+            >
+              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 4L4 12M4 4l8 8" /></svg>
+            </button>
+          </span>
+        )}
+      </div>
+
+      {/* Children */}
+      {hasChildren && !isCollapsed && node.children.map((child) => (
+        <TreeNode
+          key={child.id}
+          node={child}
+          selectedNodeId={selectedNodeId}
+          runningNodeId={runningNodeId}
+          collapsedNodeIds={collapsedNodeIds}
+          effectiveDepth={effectiveDepth}
+          editingNodeId={editingNodeId}
+          editingNodeDraft={editingNodeDraft}
+          editingNodeInputRef={editingNodeInputRef}
+          onSelectNode={onSelectNode}
+          onToggleCollapse={onToggleCollapse}
+          onEditNode={onEditNode}
+          onDeleteNode={onDeleteNode}
+          onEditDraftChange={onEditDraftChange}
+          onEditSave={onEditSave}
+          onEditCancel={onEditCancel}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ─── Granularity Slider ───────────────────────────────────────────────
+
+function GranularitySlider({
+  maxDepth, verificationDepth, highlightDepth,
+  onHighlightChange, onDepthCommit,
+}: {
+  maxDepth: number; verificationDepth: number; highlightDepth: number | null;
+  onHighlightChange: (depth: number | null) => void;
+  onDepthCommit: (depth: number) => void;
+}) {
+  if (maxDepth <= 0) return null;
+  return (
+    <div className="flex flex-col gap-0.5 px-0.5">
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>Verify at:</span>
+        <span className="font-medium text-ink-600">{depthLabel(highlightDepth ?? verificationDepth)}</span>
+      </div>
+      <input
+        type="range" min={0} max={maxDepth}
+        value={highlightDepth ?? verificationDepth}
+        className="w-full h-1 accent-primary cursor-pointer"
+        onInput={(e) => onHighlightChange(Number((e.target as HTMLInputElement).value))}
+        onChange={(e) => { onHighlightChange(null); onDepthCommit(Number((e.target as HTMLInputElement).value)); }}
+        onMouseLeave={() => onHighlightChange(null)}
+      />
+      <div className="flex justify-between text-[9px] text-muted-foreground">
+        {Array.from({ length: maxDepth + 1 }, (_, i) => <span key={i}>{depthLabel(i)}</span>)}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Sidebar ─────────────────────────────────────────────────────
+
+export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarProps) {
+  const sessions = useAppStore((s) => s.sessions);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const setActiveSessionId = useAppStore((s) => s.setActiveSessionId);
+  const selectedNodeId = useAppStore((s) => s.selectedNodeId);
+  const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId);
+  const runningNodeId = useAppStore((s) => s.runningNodeId);
+  const setRunningNodeId = useAppStore((s) => s.setRunningNodeId);
+  const collapsedNodeIds = useAppStore((s) => s.collapsedNodeIds);
+  const toggleNodeCollapsed = useAppStore((s) => s.toggleNodeCollapsed);
+  const setCollapsedNodeIds = useAppStore((s) => s.setCollapsedNodeIds);
+  const highlightDepth = useAppStore((s) => s.highlightDepth);
+  const setHighlightDepth = useAppStore((s) => s.setHighlightDepth);
+  const updateWorkflowTree = useAppStore((s) => s.updateWorkflowTree);
+  const updateVerificationDepth = useAppStore((s) => s.updateVerificationDepth);
+  const updateSessionTitle = useAppStore((s) => s.updateSessionTitle);
+
   const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [editingNodeDraft, setEditingNodeDraft] = useState("");
+  const editingNodeInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
-  const progressSteps = activeSession?.steps ?? [];
+  const workflowTree = activeSession?.workflowTree ?? [];
+  const verificationDepth = activeSession?.verificationDepth ?? 0;
+  const maxDepth = useMemo(() => getMaxDepth(workflowTree), [workflowTree]);
+  const selectedNode = useMemo(() => selectedNodeId ? findNode(workflowTree, selectedNodeId) : undefined, [workflowTree, selectedNodeId]);
+  const effectiveDepth = highlightDepth ?? verificationDepth;
 
-  const [verificationCriteriaByStep, setVerificationCriteriaByStep] = useState<string[][]>([]);
-  const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
-  const [editingStepDraft, setEditingStepDraft] = useState("");
-  const editingStepInputRef = useRef<HTMLInputElement | null>(null);
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [draftText, setDraftText] = useState("");
-  const editInputRef = useRef<HTMLTextAreaElement | null>(null);
-
-  // Sync verification criteria from store when session or steps change (and not editing a criterion).
+  // Auto-collapse nodes below verification depth when depth changes
+  const prevDepthRef = useRef(verificationDepth);
   useEffect(() => {
-    if (editingIndex !== null) return;
-    const fromStore = activeSession?.verificationCriteria ?? [];
-    const n = progressSteps.length;
-    const synced =
-      fromStore.length >= n
-        ? fromStore.slice(0, n)
-        : [...fromStore, ...Array.from({ length: n - fromStore.length }, () => [])];
-    setVerificationCriteriaByStep(synced);
-  }, [activeSessionId, activeSession?.verificationCriteria, progressSteps.length, editingIndex]);
-
-  useEffect(() => {
-    if (selectedStepIndex >= progressSteps.length) {
-      setSelectedStepIndex(Math.max(0, progressSteps.length - 1));
+    if (workflowTree.length === 0) return;
+    // Only reset collapsed state when verificationDepth actually changes
+    if (prevDepthRef.current === verificationDepth) return;
+    prevDepthRef.current = verificationDepth;
+    const toCollapse = new Set<string>();
+    function walk(nodes: WorkflowNode[]) {
+      for (const node of nodes) {
+        if (node.children.length > 0 && node.depth >= verificationDepth) {
+          toCollapse.add(node.id);
+        }
+        walk(node.children);
+      }
     }
-  }, [progressSteps.length, selectedStepIndex]);
+    walk(workflowTree);
+    setCollapsedNodeIds(toCollapse);
+  }, [verificationDepth, workflowTree]);
 
+  // Auto-collapse on initial tree load
+  const initialCollapseRef = useRef(false);
   useEffect(() => {
-    if (editingStepIndex !== null) {
-      editingStepInputRef.current?.focus();
+    if (workflowTree.length === 0 || initialCollapseRef.current) return;
+    initialCollapseRef.current = true;
+    const toCollapse = new Set<string>();
+    function walk(nodes: WorkflowNode[]) {
+      for (const node of nodes) {
+        if (node.children.length > 0 && node.depth >= verificationDepth) {
+          toCollapse.add(node.id);
+        }
+        walk(node.children);
+      }
     }
-  }, [editingStepIndex]);
+    walk(workflowTree);
+    setCollapsedNodeIds(toCollapse);
+  }, [workflowTree]);
 
+  // Auto-select first node at effective depth if nothing selected
   useEffect(() => {
-    if (editingTitle) {
-      titleInputRef.current?.focus();
+    if (selectedNodeId || workflowTree.length === 0) return;
+    function findFirstAtDepth(nodes: WorkflowNode[], target: number): WorkflowNode | undefined {
+      for (const node of nodes) {
+        if (node.depth === target) return node;
+        const found = findFirstAtDepth(node.children, target);
+        if (found) return found;
+      }
+      return undefined;
     }
-  }, [editingTitle]);
+    const first = findFirstAtDepth(workflowTree, verificationDepth);
+    if (first) setSelectedNodeId(first.id);
+  }, [workflowTree, selectedNodeId, verificationDepth]);
 
-  useEffect(() => {
-    setEditingTitle(false);
-    setTitleDraft("");
-  }, [activeSessionId]);
+  useEffect(() => { if (editingNodeId) editingNodeInputRef.current?.focus(); }, [editingNodeId]);
+  useEffect(() => { if (editingTitle) titleInputRef.current?.focus(); }, [editingTitle]);
+  useEffect(() => { setEditingTitle(false); setTitleDraft(""); }, [activeSessionId]);
 
   const startEditTitle = () => {
     if (!activeSessionId || !sessions[activeSessionId]) return;
     setTitleDraft(sessions[activeSessionId].title ?? "");
     setEditingTitle(true);
   };
-
   const saveTitle = () => {
     if (!activeSessionId || !editingTitle) return;
     const trimmed = titleDraft.trim();
@@ -92,79 +319,75 @@ export function Sidebar({
       updateSessionTitle(activeSessionId, trimmed);
       sendEvent({ type: "session.updateTitle", payload: { sessionId: activeSessionId, title: trimmed } });
     }
-    setEditingTitle(false);
-    setTitleDraft("");
+    setEditingTitle(false); setTitleDraft("");
   };
 
-  const startEditStepLabel = (index: number) => {
-    setEditingStepIndex(index);
-    setEditingStepDraft(progressSteps[index] ?? "");
+  const handleEditNode = useCallback((nodeId: string) => {
+    const node = findNode(workflowTree, nodeId);
+    if (!node) return;
+    setEditingNodeId(nodeId); setEditingNodeDraft(node.description);
+  }, [workflowTree]);
+
+  const saveNodeEdit = () => {
+    if (!editingNodeId || !activeSessionId) return;
+    const trimmed = editingNodeDraft.trim();
+    if (!trimmed) { setEditingNodeId(null); return; }
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, editingNodeId);
+    if (node) node.description = trimmed;
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+    setEditingNodeId(null); setEditingNodeDraft("");
   };
 
-  const saveStepLabelEdit = () => {
-    if (editingStepIndex === null || !activeSessionId) return;
-    const trimmed = editingStepDraft.trim();
-    const newSteps = [...progressSteps];
-    if (trimmed) {
-      newSteps[editingStepIndex] = trimmed;
-    } else {
-      newSteps.splice(editingStepIndex, 1);
-    }
-    const stepsToSave = newSteps.length > 0 ? newSteps : [];
-    if (newSteps.length > 0) {
-      updateSessionSteps(activeSessionId, newSteps);
-    } else {
-      updateSessionSteps(activeSessionId, []);
-    }
-    sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: stepsToSave } });
-    const n = newSteps.length;
-    const criteria = verificationCriteriaByStep.slice(0, n);
-    while (criteria.length < n) criteria.push([]);
-    setVerificationCriteriaByStep(criteria);
-    updateSessionVerificationCriteria(activeSessionId, criteria);
-    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: criteria } });
-    setEditingStepIndex(null);
-    setEditingStepDraft("");
-  };
-
-  const deleteStep = (index: number) => {
+  const handleDeleteNode = useCallback((nodeId: string) => {
     if (!activeSessionId) return;
-    const newSteps = progressSteps.filter((_, i) => i !== index);
-    const stepsToSave = newSteps.length > 0 ? newSteps : [];
-    updateSessionSteps(activeSessionId, stepsToSave);
-    sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: stepsToSave } });
-    const criteria = verificationCriteriaByStep.filter((_, i) => i !== index);
-    setVerificationCriteriaByStep(criteria);
-    updateSessionVerificationCriteria(activeSessionId, criteria);
-    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: criteria } });
-    setEditingStepIndex(null);
-    if (selectedStepIndex >= newSteps.length) {
-      setSelectedStepIndex(Math.max(0, newSteps.length - 1));
-    } else if (selectedStepIndex > index) {
-      setSelectedStepIndex(selectedStepIndex - 1);
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    function removeNode(nodes: WorkflowNode[]): WorkflowNode[] {
+      return nodes.filter(n => { if (n.id === nodeId) return false; n.children = removeNode(n.children); return true; });
     }
-  };
+    const pruned = removeNode(newTree);
+    updateWorkflowTree(activeSessionId, pruned);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: pruned } });
+    if (selectedNodeId === nodeId) setSelectedNodeId(null);
+  }, [activeSessionId, workflowTree, selectedNodeId]);
 
-  const addStep = () => {
+  const handleDepthCommit = useCallback((depth: number) => {
     if (!activeSessionId) return;
-    const newSteps = [...progressSteps, ""];
-    updateSessionSteps(activeSessionId, newSteps);
-    sendEvent({ type: "session.updateSteps", payload: { sessionId: activeSessionId, steps: newSteps } });
-    const criteria = [...verificationCriteriaByStep, []];
-    setVerificationCriteriaByStep(criteria);
-    updateSessionVerificationCriteria(activeSessionId, criteria);
-    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: criteria } });
-    setEditingStepIndex(newSteps.length - 1);
-    setEditingStepDraft("");
-  };
+    updateVerificationDepth(activeSessionId, depth);
+    sendEvent({ type: "session.updateVerificationDepth", payload: { sessionId: activeSessionId, verificationDepth: depth } });
+    // Auto-select first node at the new depth
+    function findFirstAtDepth(nodes: WorkflowNode[], target: number): WorkflowNode | undefined {
+      for (const node of nodes) {
+        if (node.depth === target) return node;
+        const found = findFirstAtDepth(node.children, target);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    const first = findFirstAtDepth(workflowTree, depth);
+    if (first) setSelectedNodeId(first.id);
+  }, [activeSessionId, workflowTree]);
 
-  const verificationCriteria = verificationCriteriaByStep[selectedStepIndex] ?? [];
+  const currentVerifiers = selectedNode?.verifiers ?? [];
+  const currentVerifierMarks = selectedNode?.verifierMarks ?? [];
+
+  const toggleVerifierMark = (index: number) => {
+    if (!activeSessionId || !selectedNodeId) return;
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, selectedNodeId);
+    if (!node) return;
+    while (node.verifierMarks.length <= index) node.verifierMarks.push(undefined);
+    const cur = node.verifierMarks[index];
+    node.verifierMarks[index] = cur === undefined ? "check" : cur === "check" ? "cross" : undefined;
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+  };
 
   const formatCwd = (cwd?: string) => {
     if (!cwd) return "Working dir unavailable";
     const parts = cwd.split(/[\\/]+/).filter(Boolean);
-    const tail = parts.slice(-2).join("/");
-    return `/${tail || cwd}`;
+    return `/${parts.slice(-2).join("/") || cwd}`;
   };
 
   const sessionList = useMemo(() => {
@@ -173,466 +396,190 @@ export function Sidebar({
     return list;
   }, [sessions]);
 
-  useEffect(() => {
-    if (editingIndex !== null) {
-      editInputRef.current?.focus();
-    }
-  }, [editingIndex]);
-
-  const startAddCriterion = () => {
-    if (!activeSessionId) return;
-    const list = verificationCriteriaByStep[selectedStepIndex] ?? [];
-    const newIndex = list.length;
-    const next = verificationCriteriaByStep.slice();
-    const stepList = next[selectedStepIndex] ?? [];
-    next[selectedStepIndex] = [...stepList, ""];
-    setVerificationCriteriaByStep(next);
-    setEditingIndex(newIndex);
-    setDraftText("");
-    updateSessionVerificationCriteria(activeSessionId, next);
-    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: next } });
-  };
-
-  const startEditCriterion = (index: number) => {
-    setEditingIndex(index);
-    setDraftText(verificationCriteria[index] ?? "");
-  };
-
-  const saveEdit = () => {
-    if (editingIndex === null || !activeSessionId) return;
-    const trimmed = draftText.trim();
-    const next = verificationCriteriaByStep.slice();
-    const stepList = [...(next[selectedStepIndex] ?? [])];
-    if (trimmed) {
-      stepList[editingIndex] = trimmed;
-    } else {
-      stepList.splice(editingIndex, 1);
-    }
-    next[selectedStepIndex] = stepList;
-    setVerificationCriteriaByStep(next);
-    setEditingIndex(null);
-    setDraftText("");
-    updateSessionVerificationCriteria(activeSessionId, next);
-    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: next } });
-  };
-
-  const currentVerifierMarks = activeSession?.verifierMarks?.[selectedStepIndex] ?? [];
-
-  const removeCriterion = (index: number) => {
-    if (!activeSessionId) return;
-    const nextCriteria = verificationCriteriaByStep.slice();
-    const stepList = [...(nextCriteria[selectedStepIndex] ?? [])];
-    stepList.splice(index, 1);
-    nextCriteria[selectedStepIndex] = stepList;
-    setVerificationCriteriaByStep(nextCriteria);
-    updateSessionVerificationCriteria(activeSessionId, nextCriteria);
-    sendEvent({ type: "session.updateVerificationCriteria", payload: { sessionId: activeSessionId, verificationCriteria: nextCriteria } });
-    const allMarks = activeSession?.verifierMarks ?? [];
-    const stepMarks = [...(allMarks[selectedStepIndex] ?? [])];
-    stepMarks.splice(index, 1);
-    const nextFull = allMarks.slice(0, progressSteps.length);
-    while (nextFull.length <= selectedStepIndex) nextFull.push([]);
-    nextFull[selectedStepIndex] = stepMarks;
-    updateSessionVerifierMarks(activeSessionId, nextFull);
-    sendEvent({ type: "session.updateVerifierMarks", payload: { sessionId: activeSessionId, verifierMarks: nextFull } });
-    if (editingIndex === index) {
-      setEditingIndex(null);
-      setDraftText("");
-    } else if (editingIndex != null && editingIndex > index) {
-      setEditingIndex(editingIndex - 1);
-    }
-  };
-
-  const toggleVerifierMark = (index: number) => {
-    if (!activeSessionId) return;
-    const allMarks = activeSession?.verifierMarks ?? [];
-    const stepMarks = [...(allMarks[selectedStepIndex] ?? [])];
-    while (stepMarks.length <= index) stepMarks.push(undefined);
-    const cur = stepMarks[index];
-    stepMarks[index] = cur === undefined ? "check" : cur === "check" ? "cross" : undefined;
-    const nextFull = allMarks.slice(0, progressSteps.length);
-    while (nextFull.length <= selectedStepIndex) nextFull.push([]);
-    nextFull[selectedStepIndex] = stepMarks;
-    updateSessionVerifierMarks(activeSessionId, nextFull);
-    sendEvent({ type: "session.updateVerifierMarks", payload: { sessionId: activeSessionId, verifierMarks: nextFull } });
-  };
-
   return (
-    <aside className="fixed inset-y-0 left-0 flex h-full w-[var(--sidebar-width)] flex-col border-r border-ink-900/5 bg-[#FAF9F6] px-4 pb-4 pt-12">
-      <div 
-        className="absolute top-0 left-0 right-0 h-12"
-        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
-      />
+    <aside className="fixed inset-y-0 left-0 flex h-full w-[var(--sidebar-width)] flex-col border-r border-ink-900/5 bg-[#FAF9F6] px-3 pb-3 pt-12">
+      <div className="absolute top-0 left-0 right-0 h-12" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
+
+      {/* New Task + Settings */}
       <div className="flex shrink-0 gap-2 mt-4">
-        <button
-          className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors"
-          onClick={onNewSession}
-        >
-          + New Task
-        </button>
-        <button
-          className="rounded-xl border border-ink-900/10 bg-surface px-4 py-3 text-sm text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors"
-          onClick={() => useAppStore.getState().setShowSettingsModal(true)}
-          aria-label="Settings"
-        >
-          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
+        <button className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors" onClick={onNewSession}>+ New Task</button>
+        <button className="rounded-xl border border-ink-900/10 bg-surface px-4 py-3 text-sm text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors" onClick={() => useAppStore.getState().setShowSettingsModal(true)} aria-label="Settings">
+          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
         </button>
       </div>
-      {/* Top half: current task box + switch dropdown */}
-      <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        <div className="py-2">
-          {sessionList.length === 0 ? (
-            <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted-foreground">
-              No sessions yet. Click "+ New Task" to start.
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <Combobox
-                items={sessionList}
-                value={activeSessionId ? sessionList.find((s) => s.id === activeSessionId) ?? null : null}
-                onValueChange={(session) => { if (session) setActiveSessionId(session.id); }}
-                itemToStringLabel={(session) => session.title}
-                itemToStringValue={(session) => session.title}
-              >
-                <ComboboxInput placeholder="Search tasks..." className="w-full" />
-                <ComboboxContent>
-                  <ComboboxEmpty>No tasks found.</ComboboxEmpty>
-                  <ComboboxList>
-                    {(session) => (
-                      <ComboboxItem key={session.id} value={session}>
-                        <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${session.status === "running" ? "bg-info" : session.status === "completed" ? "bg-success" : session.status === "error" ? "bg-error" : "bg-ink-300"}`} />
-                        <span className="truncate">{session.title}</span>
-                      </ComboboxItem>
-                    )}
-                  </ComboboxList>
-                </ComboboxContent>
-              </Combobox>
-              {activeSessionId && sessions[activeSessionId] && (
-                <div className="flex items-center gap-1 px-0.5">
-                  <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground">{formatCwd(sessions[activeSessionId].cwd)}</span>
-                  <TooltipProvider delayDuration={300}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          className="shrink-0 rounded p-1 text-ink-400 hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
-                          onClick={startEditTitle}
-                          aria-label="Edit title"
-                        >
-                          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="right">Edit</TooltipContent>
-                    </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          className="shrink-0 rounded p-1 text-ink-400 hover:text-error hover:bg-ink-900/5 transition-colors"
-                          onClick={() => setDeleteConfirmSessionId(activeSessionId)}
-                          aria-label="Delete session"
-                        >
-                          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" /></svg>
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="right">Delete</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-              )}
-              {editingTitle && activeSessionId && (
-                <div className="mt-1.5 px-0.5">
-                  <input
-                    ref={titleInputRef}
-                    type="text"
-                    className="w-full rounded-md border border-ink-900/20 bg-white px-2 py-1 text-sm text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
-                    value={titleDraft}
-                    onChange={(e) => setTitleDraft(e.target.value)}
-                    onBlur={saveTitle}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") saveTitle();
-                      if (e.key === "Escape") { setEditingTitle(false); setTitleDraft(""); }
-                    }}
-                    aria-label="Edit task title"
-                  />
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-        {/* Progress: vertical timeline */}
-        {sessionList.length > 0 && (
-          <div className="shrink-0 border-t border-ink-900/10 pt-3">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="h-3 w-0.5 rounded-full bg-primary" />
-              <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Progress</span>
-            </div>
-            {progressSteps.length === 0 ? (
-              <p className="text-xs text-muted-foreground py-1 mb-1">No steps defined yet. Add steps to track progress.</p>
-            ) : (
-              <div className="flex flex-col gap-0">
-                {progressSteps.map((label, i) => {
-                  const isCompleted = activeSession?.completedStepIndices?.includes(i);
-                  const isSelected = selectedStepIndex === i;
-                  const isRunning = runningStepIndex === i && activeSession?.status === "running";
-                  return (
-                    <div key={i} className="flex gap-2.5 min-w-0">
-                      {/* Timeline column: dot + connector */}
-                      <div className="flex flex-col items-center shrink-0 w-4 pt-[3px]">
-                        <button
-                          type="button"
-                          className="shrink-0 focus:outline-none"
-                          onClick={() => { setSelectedStepIndex(i); setEditingIndex(null); }}
-                          aria-label={`Select step ${i + 1}`}
-                        >
-                          {isRunning ? (
-                            <div className="h-3 w-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                          ) : (
-                            <div className={`h-3 w-3 rounded-full border-2 transition-colors ${
-                              isCompleted
-                                ? "step-circle-completed"
-                                : isSelected
-                                  ? "border-primary bg-primary/20"
-                                  : "border-ink-900/25 bg-surface"
-                            }`} />
-                          )}
-                        </button>
-                        {i < progressSteps.length - 1 && (
-                          <div className="w-px flex-1 min-h-[12px] bg-ink-900/15 mt-0.5" />
-                        )}
-                      </div>
-                      {/* Label column */}
-                      <div className="flex-1 min-w-0 pb-2.5">
-                        {editingStepIndex === i ? (
-                          <input
-                            ref={editingStepIndex === i ? (el) => { editingStepInputRef.current = el; } : undefined}
-                            type="text"
-                            className="w-full rounded border border-ink-900/20 bg-surface px-2 py-1 text-xs text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
-                            value={editingStepDraft}
-                            onChange={(e) => setEditingStepDraft(e.target.value)}
-                            onBlur={saveStepLabelEdit}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") { e.preventDefault(); saveStepLabelEdit(); }
-                              if (e.key === "Escape") { setEditingStepIndex(null); setEditingStepDraft(""); }
-                            }}
-                          />
-                        ) : (
-                          <div className="group flex items-start gap-1 min-w-0">
-                            <button
-                              type="button"
-                              className={`flex-1 text-left text-xs leading-snug rounded px-1 -mx-1 py-0.5 transition-colors hover:bg-ink-900/5 line-clamp-2 break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-700"}`}
-                              onClick={() => { setSelectedStepIndex(i); setEditingIndex(null); }}
-                            >
-                              {label || <span className="italic text-muted-foreground">Untitled step</span>}
-                            </button>
-                            <div className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                              <button
-                                type="button"
-                                className="rounded p-0.5 text-ink-400 hover:text-ink-600 hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                onClick={(e) => { e.stopPropagation(); startEditStepLabel(i); }}
-                                aria-label="Edit step label"
-                              >
-                                <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
-                                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                                </svg>
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded p-0.5 text-ink-400 hover:text-error hover:bg-ink-900/10 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                                onClick={(e) => { e.stopPropagation(); deleteStep(i); }}
-                                aria-label="Delete step"
-                              >
-                                <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
-                                  <path d="M18 6L6 18M6 6l12 12" />
-                                </svg>
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+
+      {/* Session picker + meta */}
+      <div className="shrink-0 py-2">
+        {sessionList.length === 0 ? (
+          <div className="rounded-xl border border-ink-900/5 bg-surface px-4 py-5 text-center text-xs text-muted-foreground">No sessions yet. Click "+ New Task" to start.</div>
+        ) : (
+          <div className="space-y-1">
+            <Combobox items={sessionList} value={activeSessionId ? sessionList.find((s) => s.id === activeSessionId) ?? null : null} onValueChange={(session) => { if (session) setActiveSessionId(session.id); }} itemToStringLabel={(s) => s.title} itemToStringValue={(s) => s.title}>
+              <ComboboxInput placeholder="Search tasks..." className="w-full" />
+              <ComboboxContent>
+                <ComboboxEmpty>No tasks found.</ComboboxEmpty>
+                <ComboboxList>
+                  {(session) => (
+                    <ComboboxItem key={session.id} value={session}>
+                      <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${session.status === "running" ? "bg-info" : session.status === "completed" ? "bg-success" : session.status === "error" ? "bg-error" : "bg-ink-300"}`} />
+                      <span className="truncate">{session.title}</span>
+                    </ComboboxItem>
+                  )}
+                </ComboboxList>
+              </ComboboxContent>
+            </Combobox>
+            {activeSessionId && sessions[activeSessionId] && (
+              <div className="flex items-center gap-1 px-0.5">
+                <span className="flex-1 min-w-0 truncate text-[11px] text-muted-foreground">{formatCwd(sessions[activeSessionId].cwd)}</span>
+                <TooltipProvider delayDuration={300}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button className="shrink-0 rounded p-1 text-ink-400 hover:text-ink-700 hover:bg-ink-900/5 transition-colors" onClick={startEditTitle} aria-label="Edit title">
+                        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">Edit</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button className="shrink-0 rounded p-1 text-ink-400 hover:text-error hover:bg-ink-900/5 transition-colors" onClick={() => setDeleteConfirmSessionId(activeSessionId)} aria-label="Delete session">
+                        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16" /><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /><path d="M7 7l1 12a1 1 0 0 0 1 .9h6a1 1 0 0 0 1-.9l1-12" /></svg>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">Delete</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
             )}
-            {/* Action buttons: Add step + Run selected step */}
-            <div className="flex gap-2 mt-1">
-              <button
-                type="button"
-                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-900/20 px-2 py-1.5 text-xs text-muted-foreground hover:border-ink-900/30 hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
-                onClick={addStep}
-                aria-label="Add step"
-              >
-                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-                <span>Add step</span>
-              </button>
-              {progressSteps.length > 0 && activeSessionId && (() => {
-                const isStepCompleted = activeSession?.completedStepIndices?.includes(selectedStepIndex);
-                const isSelectedStepRunning = runningStepIndex === selectedStepIndex && activeSession?.status === "running";
-                if (isSelectedStepRunning) {
-                  return (
-                    <div className="flex items-center justify-center gap-1.5 rounded-lg bg-ink-900/8 px-3 py-1.5 text-xs font-medium text-muted-foreground">
-                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
-                        <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
-                      </svg>
-                      <span>Running step {selectedStepIndex + 1}...</span>
-                    </div>
-                  );
-                }
-                return (
-                  <button
-                    type="button"
-                    className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover transition-colors shadow-soft"
-                    onClick={() => {
-                      setRunningStepIndex(selectedStepIndex);
-                      sendEvent({ type: "session.solveStep", payload: { sessionId: activeSessionId, stepIndex: selectedStepIndex } });
-                    }}
-                    aria-label={`${isStepCompleted ? "Rerun" : "Run"} step ${selectedStepIndex + 1}`}
-                  >
-                    {isStepCompleted ? (
-                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="1 4 1 10 7 10" />
-                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-                      </svg>
-                    ) : (
-                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="currentColor">
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                    )}
-                    <span>{isStepCompleted ? "Rerun" : "Run"} step {selectedStepIndex + 1}</span>
-                  </button>
-                );
-              })()}
-            </div>
+            {editingTitle && activeSessionId && (
+              <div className="px-0.5">
+                <input ref={titleInputRef} type="text" className="w-full rounded-md border border-ink-900/20 bg-white px-2 py-1 text-sm text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20" value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} onBlur={saveTitle} onKeyDown={(e) => { if (e.key === "Enter") saveTitle(); if (e.key === "Escape") { setEditingTitle(false); setTitleDraft(""); } }} />
+              </div>
+            )}
           </div>
         )}
       </div>
-      {/* Files: expected output file name(s) for the current step */}
-      <div className="shrink-0 flex flex-col border-t border-ink-900/10 pt-2 pb-2">
-        <div className="shrink-0 flex items-center gap-2 mb-1.5">
-          <div className="h-3 w-0.5 rounded-full bg-ink-400" />
-          <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-            Files {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
-          </span>
-        </div>
-        <div className="min-h-0 overflow-y-auto max-h-[88px] flex flex-col gap-1">
-          {(activeSession?.outputFiles?.[selectedStepIndex] ?? []).length === 0 ? (
-            <p className="text-xs text-muted-foreground py-0.5">No output file name for this step.</p>
-          ) : (
-            (activeSession?.outputFiles?.[selectedStepIndex] ?? []).map((fileName, i) => (
-              <div key={i} className="font-mono text-xs text-ink-700 truncate rounded bg-ink-900/5 px-2 py-1" title={fileName}>
-                {fileName}
-              </div>
-            ))
+
+      {/* Progress: tree + slider + run button — takes all remaining space */}
+      {sessionList.length > 0 && (
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
+          <div className="flex items-center gap-2 mb-1.5 shrink-0">
+            <div className="h-3 w-0.5 rounded-full bg-primary" />
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Progress</span>
+          </div>
+
+          {workflowTree.length > 0 && maxDepth > 0 && (
+            <div className="shrink-0 mb-1.5">
+              <GranularitySlider maxDepth={maxDepth} verificationDepth={verificationDepth} highlightDepth={highlightDepth} onHighlightChange={setHighlightDepth} onDepthCommit={handleDepthCommit} />
+            </div>
           )}
-        </div>
-      </div>
-      {/* Verifier area (per-step criteria from workflow or user) */}
-      <div className="flex-1 min-h-0 max-h-[260px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-        <div className="shrink-0 flex items-center gap-2 mb-2">
-          <div className="h-3 w-0.5 rounded-full bg-ink-400" />
-          <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">
-            Verifier {progressSteps.length > 0 ? `(Step ${selectedStepIndex + 1})` : ""}
-          </span>
-        </div>
-        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
-          {verificationCriteria.length === 0 && !editingIndex ? (
-            <p className="text-xs text-muted-foreground py-1">No verifiers for this step. Add criteria to check output files and quality.</p>
-          ) : null}
-          {verificationCriteria.map((text, index) => {
-            const mark = currentVerifierMarks[index];
-            return (
-              <div key={index} className="shrink-0 flex items-start gap-2">
-                <div className="flex-1 min-w-0">
-                  {editingIndex === index ? (
-                    <div className="rounded-xl border border-primary/40 bg-surface p-1.5">
-                      <textarea
-                        ref={editingIndex === index ? (el) => { editInputRef.current = el; } : undefined}
-                        className="w-full min-h-[52px] resize-none rounded-lg border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-800 placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
-                        placeholder="Enter verification criterion..."
-                        value={draftText}
-                        onChange={(e) => setDraftText(e.target.value)}
-                        onBlur={saveEdit}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            saveEdit();
-                          }
-                        }}
-                      />
-                    </div>
-                  ) : (
-                    <div
-                      className="cursor-pointer rounded-xl border border-ink-900/10 bg-surface px-3 py-2 text-left text-xs text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors min-h-[38px] flex items-center"
-                      onClick={() => startEditCriterion(index)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); startEditCriterion(index); } }}
-                    >
-                      <span className="line-clamp-2 break-words">{text || "Click to edit"}</span>
-                    </div>
-                  )}
+
+          {workflowTree.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-1">No workflow yet. Send a message to generate the plan.</p>
+          ) : (
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              {workflowTree.map((root) => (
+                <TreeNode
+                  key={root.id}
+                  node={root}
+                  selectedNodeId={selectedNodeId}
+                  runningNodeId={runningNodeId}
+                  collapsedNodeIds={collapsedNodeIds}
+                  effectiveDepth={effectiveDepth}
+                  editingNodeId={editingNodeId}
+                  editingNodeDraft={editingNodeDraft}
+                  editingNodeInputRef={editingNodeInputRef}
+                  onSelectNode={setSelectedNodeId}
+                  onToggleCollapse={toggleNodeCollapsed}
+                  onEditNode={handleEditNode}
+                  onDeleteNode={handleDeleteNode}
+                  onEditDraftChange={setEditingNodeDraft}
+                  onEditSave={saveNodeEdit}
+                  onEditCancel={() => { setEditingNodeId(null); setEditingNodeDraft(""); }}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Run button */}
+          {workflowTree.length > 0 && activeSessionId && selectedNode && (() => {
+            const isNodeRunning = runningNodeId === selectedNodeId && activeSession?.status === "running";
+            const isNodeCompleted = selectedNode.status === "completed";
+            if (isNodeRunning) {
+              return (
+                <div className="shrink-0 mt-1.5 flex items-center justify-center gap-1.5 rounded-lg bg-ink-900/8 px-3 py-2 text-xs font-medium text-muted-foreground">
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" strokeOpacity="0.25" /><path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" /></svg>
+                  Running...
                 </div>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleVerifierMark(index);
-                  }}
-                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-ink-900/10 hover:text-ink-700 focus:outline-none focus:ring-2 focus:ring-primary/30 transition-colors mt-0.5"
-                  aria-label={mark === "check" ? "Mark as failed (cross)" : "Mark as passed (check)"}
-                  title={mark === "check" ? "Mark as failed" : "Mark as passed"}
-                >
-                  {mark === "check" ? (
-                    <svg viewBox="0 0 24 24" className="h-4 w-4 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M20 6L9 17l-5-5" />
-                    </svg>
-                  ) : mark === "cross" ? (
-                    <svg viewBox="0 0 24 24" className="h-4 w-4 text-red-500" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M18 6L6 18M6 6l12 12" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="10" />
-                    </svg>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeCriterion(index);
-                  }}
-                  className="shrink-0 flex items-center justify-center w-8 min-h-[38px] rounded-lg border border-ink-900/15 bg-surface text-ink-500 hover:bg-red-50 hover:text-red-600 hover:border-red-200 focus:outline-none focus:ring-2 focus:ring-primary/30 transition-colors mt-0.5"
-                  aria-label="Remove verifier"
-                  title="Remove verifier"
-                >
-                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                    <line x1="10" y1="11" x2="10" y2="17" />
-                    <line x1="14" y1="11" x2="14" y2="17" />
-                  </svg>
-                </button>
-              </div>
+              );
+            }
+            return (
+              <button
+                type="button"
+                className="shrink-0 mt-1.5 flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-white hover:bg-primary-hover transition-colors shadow-soft w-full"
+                onClick={() => { setRunningNodeId(selectedNodeId); sendEvent({ type: "session.solveNode", payload: { sessionId: activeSessionId, nodeId: selectedNodeId! } }); }}
+              >
+                {isNodeCompleted ? (
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                )}
+                {isNodeCompleted ? "Rerun" : "Run"}
+              </button>
             );
-          })}
-          <button
-            type="button"
-            className="flex shrink-0 items-center justify-center rounded-xl border border-dashed border-ink-900/20 bg-surface/50 py-2.5 text-muted-foreground hover:bg-surface hover:border-ink-900/30 hover:text-ink-600 transition-colors min-h-[38px] w-full"
-            onClick={startAddCriterion}
-            aria-label="Add verification criterion"
-          >
-            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
+          })()}
         </div>
-      </div>
+      )}
+
+      {/* Files (compact) */}
+      {selectedNode && (selectedNode.outputFiles.length > 0) && (
+        <div className="shrink-0 border-t border-ink-900/10 pt-1.5 pb-1">
+          <div className="flex items-center gap-1.5 mb-1">
+            <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">Files</span>
+          </div>
+          <div className="flex flex-col gap-0.5 max-h-[60px] overflow-y-auto">
+            {selectedNode.outputFiles.map((f, i) => (
+              <span key={i} className="font-mono text-[11px] text-ink-600 rounded bg-ink-900/5 px-1.5 py-0.5 break-all">{f}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Verifiers (compact) */}
+      {selectedNode && currentVerifiers.length > 0 && (
+        <div className="shrink-0 max-h-[180px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-1.5">
+          <div className="flex items-center gap-1.5 mb-1 shrink-0">
+            <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">Verifiers</span>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
+            {currentVerifiers.map((text, index) => {
+              const mark = currentVerifierMarks[index];
+              return (
+                <div key={index} className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => toggleVerifierMark(index)}
+                    className="shrink-0 flex items-center justify-center w-5 h-5 rounded border border-ink-900/15 bg-surface text-ink-400 hover:bg-ink-900/8 transition-colors"
+                  >
+                    {mark === "check" ? (
+                      <svg viewBox="0 0 16 16" className="h-3 w-3 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 4L6 11 3 8" /></svg>
+                    ) : mark === "cross" ? (
+                      <svg viewBox="0 0 16 16" className="h-3 w-3 text-red-500" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 4L4 12M4 4l8 8" /></svg>
+                    ) : (
+                      <span className="block h-1.5 w-1.5 rounded-full bg-ink-900/15" />
+                    )}
+                  </button>
+                  <span className="text-[11px] text-ink-600 leading-tight break-words min-w-0">{text}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation dialog */}
       <Dialog.Root open={!!deleteConfirmSessionId} onOpenChange={(open) => !open && setDeleteConfirmSessionId(null)}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 bg-ink-900/40 backdrop-blur-sm animate-fade-in" />
@@ -641,21 +588,9 @@ export function Sidebar({
             <p className="mt-2 text-sm text-muted-foreground">This action cannot be undone. The session and its history will be permanently removed.</p>
             <div className="mt-5 flex gap-3">
               <Dialog.Close asChild>
-                <button className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors">
-                  Cancel
-                </button>
+                <button className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors">Cancel</button>
               </Dialog.Close>
-              <button
-                className="flex-1 rounded-xl bg-error px-4 py-2.5 text-sm font-medium text-white hover:bg-error/90 transition-colors"
-                onClick={() => {
-                  if (deleteConfirmSessionId) {
-                    onDeleteSession(deleteConfirmSessionId);
-                    setDeleteConfirmSessionId(null);
-                  }
-                }}
-              >
-                Delete
-              </button>
+              <button className="flex-1 rounded-xl bg-error px-4 py-2.5 text-sm font-medium text-white hover:bg-error/90 transition-colors" onClick={() => { if (deleteConfirmSessionId) { onDeleteSession(deleteConfirmSessionId); setDeleteConfirmSessionId(null); } }}>Delete</button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
