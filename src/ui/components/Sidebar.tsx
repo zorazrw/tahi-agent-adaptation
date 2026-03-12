@@ -30,6 +30,19 @@ function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
   return undefined;
 }
 
+function createEmptyNode(depth: number): WorkflowNode {
+  return {
+    id: crypto.randomUUID(),
+    description: "",
+    outputFiles: [],
+    verifiers: [],
+    verifierMarks: [],
+    children: [],
+    status: "pending",
+    depth,
+  };
+}
+
 // ─── Compact Tree Node ────────────────────────────────────────────────
 
 function TreeNode({
@@ -45,6 +58,7 @@ function TreeNode({
   onToggleCollapse,
   onEditNode,
   onDeleteNode,
+  onAddChild,
   onEditDraftChange,
   onEditSave,
   onEditCancel,
@@ -61,6 +75,7 @@ function TreeNode({
   onToggleCollapse: (id: string) => void;
   onEditNode: (id: string) => void;
   onDeleteNode: (id: string) => void;
+  onAddChild?: (parentId: string) => void;
   onEditDraftChange: (val: string) => void;
   onEditSave: () => void;
   onEditCancel: () => void;
@@ -137,6 +152,23 @@ function TreeNode({
         {/* Hover actions */}
         {!isEditing && (
           <span className="shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            {onAddChild && (
+              <TooltipProvider delayDuration={300}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="p-0.5 rounded text-ink-300 hover:text-primary"
+                      onClick={(e) => { e.stopPropagation(); onAddChild(node.id); }}
+                      aria-label="Add sub-step"
+                    >
+                      <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">Add sub-step</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
             <button
               type="button"
               className="p-0.5 rounded text-ink-300 hover:text-ink-600"
@@ -171,6 +203,7 @@ function TreeNode({
           onToggleCollapse={onToggleCollapse}
           onEditNode={onEditNode}
           onDeleteNode={onDeleteNode}
+          onAddChild={onAddChild}
           onEditDraftChange={onEditDraftChange}
           onEditSave={onEditSave}
           onEditCancel={onEditCancel}
@@ -313,6 +346,33 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: pruned } });
     if (selectedNodeId === nodeId) setSelectedNodeId(null);
   }, [activeSessionId, workflowTree, selectedNodeId]);
+
+  const handleAddStepAtRoot = useCallback(() => {
+    if (!activeSessionId) return;
+    const newNode = createEmptyNode(0);
+    const newTree = [...workflowTree, newNode];
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+    setSelectedNodeId(newNode.id);
+    setEditingNodeId(newNode.id);
+    setEditingNodeDraft("");
+  }, [activeSessionId, workflowTree]);
+
+  const handleAddChildNode = useCallback((parentId: string) => {
+    if (!activeSessionId) return;
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const parent = findNode(newTree, parentId);
+    if (!parent) return;
+    const childDepth = parent.depth + 1;
+    const newNode = createEmptyNode(childDepth);
+    parent.children = [...parent.children, newNode];
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+    setCollapsedNodeIds(new Set([...collapsedNodeIds].filter((id) => id !== parentId)));
+    setSelectedNodeId(newNode.id);
+    setEditingNodeId(newNode.id);
+    setEditingNodeDraft("");
+  }, [activeSessionId, workflowTree, collapsedNodeIds]);
 
   const handleDepthCommit = useCallback((depth: number) => {
     if (!activeSessionId) return;
@@ -485,7 +545,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
           {workflowTree.length === 0 ? (
             <p className="text-xs text-muted-foreground py-1">No workflow yet. Send a message to generate the plan.</p>
           ) : (
-            <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5">
               {workflowTree.map((root) => (
                 <TreeNode
                   key={root.id}
@@ -501,11 +561,20 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                   onToggleCollapse={toggleNodeCollapsed}
                   onEditNode={handleEditNode}
                   onDeleteNode={handleDeleteNode}
+                  onAddChild={handleAddChildNode}
                   onEditDraftChange={setEditingNodeDraft}
                   onEditSave={saveNodeEdit}
                   onEditCancel={() => { setEditingNodeId(null); setEditingNodeDraft(""); }}
                 />
               ))}
+              <button
+                type="button"
+                className="shrink-0 flex items-center gap-1.5 py-1.5 px-1 rounded-md text-[11px] text-muted-foreground hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
+                onClick={handleAddStepAtRoot}
+              >
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
+                <span>Add step</span>
+              </button>
             </div>
           )}
 
