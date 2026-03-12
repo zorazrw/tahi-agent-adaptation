@@ -25,7 +25,7 @@ export function createWorkflowMcpServer(
     tools: [
       tool(
         "WorkflowPlan",
-        "Register a hierarchical workflow plan. Structure as a tree: one root task containing 3-5 phases, each with child tasks. Each node has description, outputFiles, verifiers, and optionally children.",
+        "Register a hierarchical workflow plan. Structure as a tree: one root task containing 3-5 phases, each with child tasks. Each node has description, outputFiles, verifiers, and optionally children. Prefer .md for outputFiles when the step produces document-style content (reports, summaries, lists) so the UI shows markdown preview; use .txt only when markdown does not apply.",
         { tasks: z.array(workflowNodeSchema) },
         async ({ tasks }) => {
           const tree = hydrateWorkflowTree(tasks);

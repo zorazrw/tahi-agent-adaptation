@@ -231,7 +231,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
 
   sessionCurrentNodeId.set(sessionId, nodeId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
-  const nodePrompt = buildPromptForNode(node.description, pathContext);
+  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",

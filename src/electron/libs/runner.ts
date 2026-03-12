@@ -44,6 +44,7 @@ const WORKFLOW_PLAN_INSTRUCTION = [
   "Keep it simple. For small tasks use a flat list (no children). For medium tasks use one level of children. Only use 3 levels for genuinely complex tasks.",
   "Do NOT add separate validation/verification/testing steps — our system handles verification natively via verifier criteria on each node.",
   "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
+  "For outputFiles: prefer .md for any document-style output (reports, summaries, lists, notes) so the file preview shows formatted markdown; use .txt only when markdown does not apply (e.g. raw data, plain log).",
   "Aim for fewer, meaningful steps rather than many granular ones.",
   "After calling the tool, STOP. Do NOT execute any steps yourself.",
   "The human operator will trigger each step individually.",
@@ -59,8 +60,16 @@ function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): strin
 }
 
 /** Builds the resume prompt for executing a single workflow node. */
-export function buildPromptForNode(nodeDescription: string, pathContext: string): string {
-  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}`;
+export function buildPromptForNode(
+  nodeDescription: string,
+  pathContext: string,
+  outputFiles: string[] = []
+): string {
+  const hasMd = outputFiles.some((f) => f.toLowerCase().endsWith(".md"));
+  const formatNote = hasMd
+    ? "\n\nWhen writing output to .md files, use markdown format (headers, lists, code blocks, etc.) so the file preview shows formatted content."
+    : "";
+  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${formatNote}`;
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
