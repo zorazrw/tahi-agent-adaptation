@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
-import { CopyIcon, FolderOpenIcon } from "lucide-react";
+import { CopyIcon, FolderOpenIcon, RefreshCcwIcon } from "lucide-react";
 import { getRenderer } from "./file-renderers";
 import { ZoomControls } from "./file-renderers/DocxRenderer";
 
@@ -120,6 +120,7 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
   const [loading, setLoading] = useState(false);
   const [zoom, setZoom] = useState(0.6);
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const handleCopyFileContent = () => {
     const text = getCopyableContent(result);
@@ -143,7 +144,7 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
       .then((res) => setResult(res))
       .catch((err) => setResult({ error: err instanceof Error ? err.message : String(err) }))
       .finally(() => setLoading(false));
-  }, [filePath, cwd, stepCompleted]);
+  }, [filePath, cwd, stepCompleted, refreshKey]);
 
   if (!filePath) {
     return (
@@ -166,6 +167,14 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
         <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}
         </span>
+        <button
+          onClick={() => setRefreshKey((k) => k + 1)}
+          className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors"
+          aria-label="Refresh preview"
+          title="Refresh preview"
+        >
+          <RefreshCcwIcon className="size-4" />
+        </button>
         {getCopyableContent(result) != null && (
           <button
             onClick={handleCopyFileContent}
@@ -216,7 +225,15 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
         {result && "error" in result && !isNotFound && !loading && (
           <p className="text-sm text-error">{result.error}</p>
         )}
-        {Renderer && !loading && <Renderer data={result} zoom={showZoom ? zoom : undefined} />}
+        {Renderer && !loading && (
+          <Renderer
+            data={result}
+            zoom={showZoom ? zoom : undefined}
+            filePath={filePath}
+            cwd={cwd ?? undefined}
+            onReload={() => setRefreshKey((k) => k + 1)}
+          />
+        )}
       </div>
     </div>
   );

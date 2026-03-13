@@ -45,6 +45,7 @@ type EventPayloadMapping = {
     "save-api-config": { success: boolean; error?: string };
     "check-api-config": { hasConfig: boolean; config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null };
     "preview-file": PreviewFileResult;
+    "write-file": { success: boolean; error?: string };
     "list-skills": SkillInfo[];
     "remove-skill": { success: boolean; error?: string };
     "get-skill-content": { content: string } | { error: string };
@@ -69,6 +70,7 @@ interface Window {
         saveApiConfig: (config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" }) => Promise<{ success: boolean; error?: string }>;
         checkApiConfig: () => Promise<{ hasConfig: boolean; config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null }>;
         previewFile: (filePath: string, cwd?: string | null) => Promise<PreviewFileResult>;
+        writeFile: (filePath: string, cwd?: string | null, content?: string) => Promise<{ success: boolean; error?: string }>;
         listSkills: () => Promise<SkillInfo[]>;
         removeSkill: (dirName: string) => Promise<{ success: boolean; error?: string }>;
         getSkillContent: (path: string) => Promise<{ content: string } | { error: string }>;

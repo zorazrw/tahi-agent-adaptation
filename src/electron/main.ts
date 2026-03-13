@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, globalShortcut, Menu, shell } from "electron"
 import { execSync } from "child_process";
-import { readFile, mkdir, copyFile } from "fs/promises";
+import { readFile, writeFile, mkdir, copyFile } from "fs/promises";
 import { resolve, isAbsolute, basename, join } from "path";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
@@ -287,6 +287,24 @@ app.on("ready", () => {
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             return { error: message };
+        }
+    });
+
+    ipcMainHandle("write-file", async (_: any, filePath: string, cwd?: string | null, content?: string) => {
+        try {
+            if (!filePath || typeof filePath !== "string") {
+                return { success: false, error: "Invalid file path" };
+            }
+            if (typeof content !== "string") {
+                return { success: false, error: "Invalid content" };
+            }
+            const base = (cwd && typeof cwd === "string") ? cwd : process.cwd();
+            const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
+            await writeFile(resolved, content, "utf8");
+            return { success: true };
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
         }
     });
 

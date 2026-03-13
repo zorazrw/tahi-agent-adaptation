@@ -536,6 +536,8 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
   const currentVerifiers = selectedNode?.verifiers ?? [];
   const currentVerifierMarks = selectedNode?.verifierMarks ?? [];
+  const [newVerifierDraft, setNewVerifierDraft] = useState("");
+  const [addingVerifier, setAddingVerifier] = useState(false);
 
   const toggleVerifierMark = (index: number) => {
     if (!activeSessionId || !selectedNodeId) return;
@@ -544,9 +546,44 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     if (!node) return;
     while (node.verifierMarks.length <= index) node.verifierMarks.push(undefined);
     const cur = node.verifierMarks[index];
-    node.verifierMarks[index] = cur === undefined ? "check" : cur === "check" ? "cross" : undefined;
+    node.verifierMarks[index] = cur === "check" ? "cross" : "check";
     updateWorkflowTree(activeSessionId, newTree);
     sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+  };
+
+  const handleDeleteVerifier = (index: number) => {
+    if (!activeSessionId || !selectedNodeId) return;
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, selectedNodeId);
+    if (!node) return;
+    if (index < 0 || index >= node.verifiers.length) return;
+    node.verifiers.splice(index, 1);
+    if (Array.isArray(node.verifierMarks)) {
+      node.verifierMarks.splice(index, 1);
+    }
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+  };
+
+  const handleAddVerifier = () => {
+    if (!activeSessionId || !selectedNodeId) return;
+    const text = newVerifierDraft.trim();
+    if (!text) {
+      setAddingVerifier(false);
+      setNewVerifierDraft("");
+      return;
+    }
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, selectedNodeId);
+    if (!node) return;
+    node.verifiers.push(text);
+    if (Array.isArray(node.verifierMarks)) {
+      node.verifierMarks.push(undefined);
+    }
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+    setAddingVerifier(false);
+    setNewVerifierDraft("");
   };
 
   const formatCwd = (cwd?: string) => {
@@ -631,7 +668,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
           <div className="flex items-center justify-between gap-2 mb-1.5 shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <div className="h-3 w-0.5 shrink-0 rounded-full bg-primary" />
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Progress</span>
+              <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Progress</span>
             </div>
             {workflowTree.length > 0 && maxDepth > 0 && (
               <div className="flex items-center gap-1 rounded-lg border border-ink-900/10 bg-surface p-0.5 shrink-0">
@@ -763,7 +800,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
         <div className="shrink-0 border-t border-ink-900/10 pt-1.5 pb-1">
           <div className="flex items-center gap-1.5 mb-1">
             <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">Files</span>
+            <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Files</span>
           </div>
           <div className="flex flex-col gap-0.5 max-h-[60px] overflow-y-auto">
             {selectedNode.outputFiles.map((f, i) => (
@@ -774,13 +811,42 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
       )}
 
       {/* Verifiers (compact) */}
-      {selectedNode && currentVerifiers.length > 0 && (
-        <div className="shrink-0 max-h-[180px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-1.5">
-          <div className="flex items-center gap-1.5 mb-1 shrink-0">
-            <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">Verifiers</span>
+      {selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
+        <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-1.5">
+          <div className="flex items-center justify-between gap-1.5 mb-1 shrink-0">
+            <div className="flex items-center gap-1.5">
+              <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
+              <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Verifiers</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setAddingVerifier(true); setNewVerifierDraft(""); }}
+              className="shrink-0 p-0.5 rounded text-ink-300 hover:text-primary hover:bg-ink-900/5 transition-colors"
+              aria-label="Add verifier"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M8 3v10M3 8h10" />
+              </svg>
+            </button>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
+            {addingVerifier && (
+              <div className="flex items-center gap-1.5">
+                <span className="block h-1.5 w-1.5 rounded-full bg-ink-900/15" />
+                <input
+                  type="text"
+                  value={newVerifierDraft}
+                  onChange={(e) => setNewVerifierDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAddVerifier();
+                    if (e.key === "Escape") { setAddingVerifier(false); setNewVerifierDraft(""); }
+                  }}
+                  onBlur={handleAddVerifier}
+                  placeholder="Describe what to verify…"
+                  className="flex-1 text-[11px] text-ink-700 leading-tight min-w-0 px-1.5 py-0.5 rounded border border-ink-900/15 bg-white/80 focus:outline-none focus:ring-1 focus:ring-primary/30"
+                />
+              </div>
+            )}
             {currentVerifiers.map((text, index) => {
               const mark = currentVerifierMarks[index];
               return (
@@ -788,17 +854,29 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                   <button
                     type="button"
                     onClick={() => toggleVerifierMark(index)}
-                    className="shrink-0 flex items-center justify-center w-5 h-5 rounded border border-ink-900/15 bg-surface text-ink-400 hover:bg-ink-900/8 transition-colors"
+                    className="shrink-0 flex items-center justify-center w-4 h-4 rounded-full border border-ink-900/25 bg-white text-ink-400 hover:bg-ink-900/5 transition-colors"
                   >
                     {mark === "check" ? (
                       <svg viewBox="0 0 16 16" className="h-3 w-3 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 4L6 11 3 8" /></svg>
                     ) : mark === "cross" ? (
                       <svg viewBox="0 0 16 16" className="h-3 w-3 text-red-500" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 4L4 12M4 4l8 8" /></svg>
                     ) : (
-                      <span className="block h-1.5 w-1.5 rounded-full bg-ink-900/15" />
+                      null
                     )}
                   </button>
-                  <span className="text-[11px] text-ink-600 leading-tight break-words min-w-0">{text}</span>
+                  <span className="text-[11px] text-ink-600 leading-tight break-words min-w-0 flex-1">
+                    {text}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteVerifier(index)}
+                    className="shrink-0 p-0.5 rounded text-ink-300 hover:text-error hover:bg-ink-900/5 transition-colors"
+                    aria-label="Delete verifier"
+                  >
+                    <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M12 4L4 12M4 4l8 8" />
+                    </svg>
+                  </button>
                 </div>
               );
             })}

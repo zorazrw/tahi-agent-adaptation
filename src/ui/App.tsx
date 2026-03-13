@@ -43,6 +43,7 @@ function App() {
   const animatedIndicesRef = useRef(new Set<number>());
   const scrollHeightBeforeLoadRef = useRef(0);
   const shouldRestoreScrollRef = useRef(false);
+  const [showPromptInspector, setShowPromptInspector] = useState(false);
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -55,11 +56,6 @@ function App() {
   const markHistoryRequested = useAppStore((s) => s.markHistoryRequested);
   const resolvePermissionRequest = useAppStore((s) => s.resolvePermissionRequest);
   const handleServerEvent = useAppStore((s) => s.handleServerEvent);
-  const prompt = useAppStore((s) => s.prompt);
-  const setPrompt = useAppStore((s) => s.setPrompt);
-  const cwd = useAppStore((s) => s.cwd);
-  const setCwd = useAppStore((s) => s.setCwd);
-  const pendingStart = useAppStore((s) => s.pendingStart);
   const apiConfigChecked = useAppStore((s) => s.apiConfigChecked);
   const setApiConfigChecked = useAppStore((s) => s.setApiConfigChecked);
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
@@ -410,6 +406,24 @@ function App() {
           {/* Right column: chat / model log (only when Chat is toggled) */}
           {showChatPanel && (
             <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
+              <div className="flex items-center justify-between px-4 pt-3 pb-1 border-b border-ink-900/10">
+                <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Conversation</span>
+                <button
+                  type="button"
+                  onClick={() => setShowPromptInspector((v) => !v)}
+                  className="text-[11px] px-2 py-1 rounded-md border border-ink-900/10 bg-white/70 text-ink-500 hover:text-ink-800 hover:border-ink-900/30 hover:bg-white transition-colors"
+                >
+                  {showPromptInspector ? "Hide LM input" : "Show LM input"}
+                </button>
+              </div>
+              {showPromptInspector && (
+                <div className="px-4 pt-2 pb-1 border-b border-ink-900/10 bg-surface">
+                  <div className="text-[11px] font-medium text-ink-600 mb-1">Last LM input</div>
+                  <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-[11px] text-ink-700 bg-white/80 rounded-md border border-ink-900/10 px-3 py-2">
+                    {activeSession?.lastEffectivePrompt ?? "No LM input captured yet. Run a task or send a message to see the constructed prompt."}
+                  </pre>
+                </div>
+              )}
               <div
                 ref={scrollContainerRef}
                 onScroll={handleScroll}

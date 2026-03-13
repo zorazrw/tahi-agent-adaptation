@@ -12,8 +12,16 @@ import { HtmlRenderer } from "./HtmlRenderer";
 import { VideoRenderer } from "./VideoRenderer";
 import { AudioRenderer } from "./AudioRenderer";
 
+export type EditableRendererProps = {
+  filePath?: string;
+  cwd?: string | null;
+  onReload?: () => void;
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type RendererComponent = ComponentType<{ data: any; zoom?: number }>;
+type RendererComponent = ComponentType<
+  { data: any; zoom?: number } & EditableRendererProps
+>;
 
 const renderers: Record<string, RendererComponent> = {
   txt: TextRenderer,

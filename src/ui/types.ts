@@ -12,6 +12,7 @@ export type WorkflowNode = {
   status: NodeStatus;
   depth: number;
   resumePoint?: { uuid: string; claudeSessionId: string };
+  originalOutputs?: { path: string; content: string }[];
 };
 
 export type UserPromptMessage = {
@@ -57,7 +58,8 @@ export type ServerEvent =
   | { type: "session.nodeCompleted"; payload: { sessionId: string; nodeId: string } }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } }
-  | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[] } };
+  | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[] } }
+  | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } };
 
 // Client -> Server events
 export type ClientEvent =

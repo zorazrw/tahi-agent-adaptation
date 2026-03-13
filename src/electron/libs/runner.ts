@@ -76,13 +76,31 @@ function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): strin
 export function buildPromptForNode(
   nodeDescription: string,
   pathContext: string,
-  outputFiles: string[] = []
+  outputFiles: string[] = [],
+  humanEdits?: string
 ): string {
   const hasMd = outputFiles.some((f) => f.toLowerCase().endsWith(".md"));
   const formatNote = hasMd
     ? "\n\nWhen writing output to .md files, use markdown format (headers, lists, code blocks, etc.) so the file preview shows formatted content."
     : "";
-  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${formatNote}`;
+  const filesNote =
+    outputFiles.length > 0
+      ? "\n\nRelevant output files for this step (these should be treated as the source of truth when refining your work):\n" +
+        outputFiles.map((f) => `- ${f}`).join("\n")
+      : "";
+  const refinementNote =
+    "\n\nWhen refining or updating existing outputs, you MUST first call the Read tool to load the latest on-disk contents of any relevant output files, " +
+    "then apply edits on top of that version using Edit or Write. Do NOT recreate files from memory or discard existing content, and do NOT revert to older model-only drafts.";
+  const editsNote = humanEdits
+    ? "\n\nThe human has manually edited your previous outputs. For each file below you will see:\n" +
+      "(1) the original model-written output, and\n" +
+      "(2) the current version after human edits.\n\n" +
+      "You MUST treat version (2) as the authoritative base text and ONLY apply further changes on top of it. " +
+      "Never discard or overwrite the human-edited version, and never recreate content purely from memory of earlier drafts.\n\n" +
+      "Human-edited files (showing original vs current):\n" +
+      humanEdits
+    : "";
+  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${filesNote}${formatNote}${refinementNote}${editsNote}`;
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
@@ -90,6 +108,12 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
   const abortController = new AbortController();
   const isFirstMessage = resumeSessionId == null;
   const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
+
+  // Emit the fully constructed prompt being sent to the LM for debugging/inspection in the UI.
+  onEvent({
+    type: "session.effectivePrompt",
+    payload: { sessionId: session.id, prompt: promptToSend }
+  });
 
   const sendMessage = (message: SDKMessage) => {
     onEvent({

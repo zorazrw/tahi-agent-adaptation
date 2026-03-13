@@ -17,6 +17,7 @@ export type SessionView = {
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
   lastPrompt?: string;
+  lastEffectivePrompt?: string;
   createdAt?: number;
   updatedAt?: number;
   hydrated: boolean;
@@ -247,6 +248,20 @@ export const useAppStore = create<AppState>((set, get) => ({
             get().setActiveSessionId(null);
           }
         }
+        break;
+      }
+
+      case "session.effectivePrompt": {
+        const { sessionId, prompt } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, lastEffectivePrompt: prompt }
+            }
+          };
+        });
         break;
       }
 

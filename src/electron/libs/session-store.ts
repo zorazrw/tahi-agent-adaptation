@@ -21,6 +21,14 @@ const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
     status: z.enum(["pending", "running", "completed", "error"]),
     depth: z.number(),
     resumePoint: z.object({ uuid: z.string(), claudeSessionId: z.string() }).optional(),
+    originalOutputs: z
+      .array(
+        z.object({
+          path: z.string(),
+          content: z.string(),
+        })
+      )
+      .optional(),
   })
 );
 

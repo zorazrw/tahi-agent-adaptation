@@ -1,4 +1,6 @@
-import { useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import type { EditableRendererProps } from "./index";
+import { EditableTextPanel } from "./EditableTextPanel";
 
 function parseCsv(content: string): string[][] {
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
@@ -40,43 +42,110 @@ function parseCsv(content: string): string[][] {
   });
 }
 
-export function CsvRenderer({ data }: { data: { kind: "csv"; content: string } }) {
+type ViewMode = "table" | "text";
+
+export function CsvRenderer({
+  data,
+  filePath,
+  cwd,
+  onReload,
+}: { data: { kind: "csv"; content: string } } & EditableRendererProps) {
+  const [viewMode, setViewMode] = useState<ViewMode>("table");
   const rows = useMemo(() => parseCsv(data.content), [data.content]);
+  const canEdit = Boolean(filePath && onReload);
+
+  useEffect(() => {
+    if (!canEdit) setViewMode("table");
+  }, [canEdit]);
+
+  if (canEdit && viewMode === "text") {
+    return (
+      <div className="flex flex-col flex-1 min-h-0">
+        <div className="flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setViewMode("table")}
+            className="text-xs text-muted-foreground hover:text-ink-700"
+          >
+            ← Table
+          </button>
+          <span className="text-xs text-muted-foreground">Edit as text</span>
+        </div>
+        <EditableTextPanel
+          content={data.content}
+          contentKey={data.content}
+          monospace
+          onSave={async (content) =>
+            window.electron.writeFile(filePath!, cwd ?? undefined, content)
+          }
+          onSaved={onReload}
+        />
+      </div>
+    );
+  }
 
   if (rows.length === 0) {
-    return <p className="text-sm text-muted-foreground">Empty file</p>;
+    return (
+      <div className="flex flex-col flex-1 min-h-0">
+        {canEdit && (
+          <div className="flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2">
+            <button
+              type="button"
+              onClick={() => setViewMode("text")}
+              className="text-xs text-muted-foreground hover:text-ink-700"
+            >
+              Edit as text
+            </button>
+          </div>
+        )}
+        <p className="text-sm text-muted-foreground">Empty file</p>
+      </div>
+    );
   }
 
   const header = rows[0]!;
   const body = rows.slice(1);
 
   return (
-    <div className="overflow-auto">
-      <table className="text-sm text-ink-700 border-collapse border border-ink-900/20">
-        <thead>
-          <tr>
-            {header.map((cell, j) => (
-              <th
-                key={j}
-                className="border border-ink-900/20 px-2 py-1.5 text-left font-semibold bg-ink-900/5"
-              >
-                {cell}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {body.map((row, i) => (
-            <tr key={i}>
-              {row.map((cell, j) => (
-                <td key={j} className="border border-ink-900/20 px-2 py-1.5 align-top">
+    <div className="flex flex-col flex-1 min-h-0">
+      {canEdit && (
+        <div className="flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setViewMode("text")}
+            className="text-xs text-muted-foreground hover:text-ink-700"
+          >
+            Edit as text
+          </button>
+        </div>
+      )}
+      <div className="overflow-auto">
+        <table className="text-sm text-ink-700 border-collapse border border-ink-900/20">
+          <thead>
+            <tr>
+              {header.map((cell, j) => (
+                <th
+                  key={j}
+                  className="border border-ink-900/20 px-2 py-1.5 text-left font-semibold bg-ink-900/5"
+                >
                   {cell}
-                </td>
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {body.map((row, i) => (
+              <tr key={i}>
+                {row.map((cell, j) => (
+                  <td key={j} className="border border-ink-900/20 px-2 py-1.5 align-top">
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

@@ -12,6 +12,7 @@ export type WorkflowNode = {
   status: NodeStatus;
   depth: number;
   resumePoint?: { uuid: string; claudeSessionId: string };
+  originalOutputs?: { path: string; content: string }[];
 };
 
 /** Find a node by id in the tree. */

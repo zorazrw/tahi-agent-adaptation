@@ -15,6 +15,84 @@ import {
 } from "./libs/workflow-tree-utils.js";
 import { app } from "electron";
 import { join } from "path";
+import { readFileSync } from "fs";
+
+/** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
+function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
+  const origLines = original.split(/\r?\n/);
+  const currLines = current.split(/\r?\n/);
+  const n = origLines.length;
+  const m = currLines.length;
+
+  // LCS DP table
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      if (origLines[i] === currLines[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
+      else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  type Op = { type: "equal" | "del" | "add"; line: string; i: number; j: number };
+  const ops: Op[] = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (origLines[i] === currLines[j]) {
+      ops.push({ type: "equal", line: origLines[i], i, j });
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: "del", line: origLines[i], i, j });
+      i++;
+    } else {
+      ops.push({ type: "add", line: currLines[j], i, j });
+      j++;
+    }
+  }
+  while (i < n) {
+    ops.push({ type: "del", line: origLines[i], i, j });
+    i++;
+  }
+  while (j < m) {
+    ops.push({ type: "add", line: currLines[j], i, j });
+    j++;
+  }
+
+  // Group into hunks with context
+  const hunks: { start: number; end: number }[] = [];
+  for (let k = 0; k < ops.length; k++) {
+    if (ops[k].type === "equal") continue;
+    const start = Math.max(0, k - contextLines);
+    let end = Math.min(ops.length - 1, k + contextLines);
+    // extend end forward while within context window and diff continues
+    while (end + 1 < ops.length && ops[end + 1].type !== "equal") end++;
+    // merge with previous hunk if overlapping
+    if (hunks.length > 0 && start <= hunks[hunks.length - 1].end + 1) {
+      hunks[hunks.length - 1].end = Math.max(hunks[hunks.length - 1].end, end);
+    } else {
+      hunks.push({ start, end });
+    }
+  }
+
+  if (hunks.length === 0) return "";
+
+  const lines: string[] = [];
+  const limitedHunks = hunks.slice(0, maxHunks);
+  for (let h = 0; h < limitedHunks.length; h++) {
+    const { start: s, end: e } = limitedHunks[h];
+    if (h > 0) lines.push("...");
+    for (let k = s; k <= e; k++) {
+      const op = ops[k];
+      if (op.type === "equal") {
+        lines.push(`  ${op.line}`);
+      } else if (op.type === "del") {
+        lines.push(`- ${op.line}`);
+      } else {
+        lines.push(`+ ${op.line}`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
@@ -93,6 +171,24 @@ function emit(event: ServerEvent) {
           if (session && session.workflowTree) {
             const completedNode = findNodeById(session.workflowTree, nodeId);
             if (completedNode) {
+              // If we don't yet have an originalOutputs snapshot, capture the initial model-written content now
+              if (!completedNode.originalOutputs && completedNode.outputFiles.length > 0) {
+                const cwd = session.cwd ?? process.cwd();
+                const originals: { path: string; content: string }[] = [];
+                for (const relPath of completedNode.outputFiles) {
+                  try {
+                    const absPath = join(cwd, relPath);
+                    const content = readFileSync(absPath, "utf8");
+                    originals.push({ path: relPath, content });
+                  } catch {
+                    // ignore missing/unreadable files
+                  }
+                }
+                if (originals.length > 0) {
+                  completedNode.originalOutputs = originals;
+                }
+              }
+
               // Mark this node and all its descendants as completed
               completeNodeAndDescendants(completedNode);
             }
@@ -177,6 +273,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   const isRerun = node.status === "completed";
   let resumeSessionAt: string | undefined;
   let claudeSessionIdForResume = session.claudeSessionId;
+  let humanEdits: string | undefined;
 
   if (isRerun) {
     const resumeData = node.resumePoint;
@@ -211,6 +308,36 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
       claudeSessionId: claudeSessionIdForResume
     });
 
+    // Compute human edits summary between originalOutputs snapshot and current file contents
+    if (node.originalOutputs && node.originalOutputs.length > 0) {
+      const cwd = session.cwd ?? process.cwd();
+      const parts: string[] = [];
+      for (const snap of node.originalOutputs) {
+        try {
+          const absPath = join(cwd, snap.path);
+          const current = readFileSync(absPath, "utf8");
+          if (current !== snap.content) {
+            parts.push(
+              [
+                `File: ${snap.path}`,
+                "",
+                "(1) Original model output:",
+                snap.content,
+                "",
+                "(2) Current version after human edits (USE THIS as the base for any further updates):",
+                current,
+              ].join("\n")
+            );
+          }
+        } catch {
+          // ignore if file missing or unreadable
+        }
+      }
+      if (parts.length > 0) {
+        humanEdits = parts.join("\n\n");
+      }
+    }
+
     const messages = store.getMessages(sessionId);
     broadcast({
       type: "session.messagesReset",
@@ -232,7 +359,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
 
   sessionCurrentNodeId.set(sessionId, nodeId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
-  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles);
+  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",
