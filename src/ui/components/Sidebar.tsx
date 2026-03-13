@@ -235,65 +235,66 @@ function TreeNode({
           )}
         </span>
 
-        {/* Label */}
-        {isEditing ? (
-          <input
-            ref={editingNodeInputRef}
-            type="text"
-            className="flex-1 min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] text-ink-800 focus:border-primary focus:outline-none"
-            value={editingNodeDraft}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => onEditDraftChange(e.target.value)}
-            onBlur={onEditSave}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") { e.preventDefault(); onEditSave(); }
-              if (e.key === "Escape") onEditCancel();
-            }}
-          />
-        ) : (
-          <span className={`flex-1 min-w-0 text-[12px] leading-[18px] break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-600"}`}>
-            {node.description || <span className="italic text-ink-400">Untitled</span>}
-          </span>
-        )}
+        {/* Label + hover actions overlayed to give label more width */}
+        <div className="flex-1 min-w-0 relative">
+          {isEditing ? (
+            <input
+              ref={editingNodeInputRef}
+              type="text"
+              className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] text-ink-800 focus:border-primary focus:outline-none"
+              value={editingNodeDraft}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => onEditDraftChange(e.target.value)}
+              onBlur={onEditSave}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); onEditSave(); }
+                if (e.key === "Escape") onEditCancel();
+              }}
+            />
+          ) : (
+            <span className={`block pr-6 text-[12px] leading-[18px] break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-600"}`}>
+              {node.description || <span className="italic text-ink-400">Untitled</span>}
+            </span>
+          )}
 
-        {/* Hover actions: edit, add, remove */}
-        {!isEditing && (
-          <span className="shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button
-              type="button"
-              className="p-0.5 rounded text-ink-300 hover:text-ink-600"
-              onClick={(e) => { e.stopPropagation(); onEditNode(node.id); }}
-              aria-label="Edit"
-            >
-              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 1.5l3 3L5 14l-3.5.5L2 11l9.5-9.5z" /></svg>
-            </button>
-            {onAddChild && (
-              <TooltipProvider delayDuration={300}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      className="p-0.5 rounded text-ink-300 hover:text-primary"
-                      onClick={(e) => { e.stopPropagation(); onAddChild(node.id); }}
-                      aria-label="Add sub-step"
-                    >
-                      <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">Add sub-step</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
-            <button
-              type="button"
-              className="p-0.5 rounded text-ink-300 hover:text-error"
-              onClick={(e) => { e.stopPropagation(); onDeleteNode(node.id); }}
-              aria-label="Remove"
-            >
-              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 4L4 12M4 4l8 8" /></svg>
-            </button>
-          </span>
-        )}
+          {!isEditing && (
+            <span className="absolute right-0 bottom-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button
+                type="button"
+                className="p-0.5 rounded text-ink-300 hover:text-ink-600"
+                onClick={(e) => { e.stopPropagation(); onEditNode(node.id); }}
+                aria-label="Edit"
+              >
+                <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 1.5l3 3L5 14l-3.5.5L2 11l9.5-9.5z" /></svg>
+              </button>
+              {onAddChild && (
+                <TooltipProvider delayDuration={300}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="p-0.5 rounded text-ink-300 hover:text-primary"
+                        onClick={(e) => { e.stopPropagation(); onAddChild(node.id); }}
+                        aria-label="Add sub-step"
+                      >
+                        <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">Add sub-step</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
+              <button
+                type="button"
+                className="p-0.5 rounded text-ink-300 hover:text-error"
+                onClick={(e) => { e.stopPropagation(); onDeleteNode(node.id); }}
+                aria-label="Remove"
+              >
+                <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 4L4 12M4 4l8 8" /></svg>
+              </button>
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Children */}
