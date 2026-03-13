@@ -43,6 +43,77 @@ function createEmptyNode(depth: number): WorkflowNode {
   };
 }
 
+/** Whether nodeId is the same as or a descendant of ancestorId. */
+function isDescendant(tree: WorkflowNode[], nodeId: string, ancestorId: string): boolean {
+  if (nodeId === ancestorId) return true;
+  for (const node of tree) {
+    if (node.id === ancestorId) {
+      return findNode(node.children, nodeId) != null;
+    }
+    if (isDescendant(node.children, nodeId, ancestorId)) return true;
+  }
+  return false;
+}
+
+/** Remove node by id from tree (mutates). Returns the removed node or null. */
+function removeNodeFromTree(nodes: WorkflowNode[], nodeId: string): WorkflowNode | null {
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].id === nodeId) {
+      const [removed] = nodes.splice(i, 1);
+      return removed ?? null;
+    }
+    const found = removeNodeFromTree(nodes[i].children, nodeId);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Set depth on node and all descendants. */
+function setDepthRecursive(node: WorkflowNode, depth: number): void {
+  node.depth = depth;
+  for (const child of node.children) setDepthRecursive(child, depth + 1);
+}
+
+/** Insert node into tree: under parentId as last child, or at root before index. Mutates tree. */
+function insertNodeIntoTree(
+  roots: WorkflowNode[],
+  node: WorkflowNode,
+  parentId: string | null,
+  siblingIndex: number
+): void {
+  if (parentId === null) {
+    setDepthRecursive(node, 0);
+    roots.splice(siblingIndex, 0, node);
+    return;
+  }
+  const parent = findNode(roots, parentId);
+  if (!parent) return;
+  setDepthRecursive(node, parent.depth + 1);
+  parent.children.splice(siblingIndex, 0, node);
+}
+
+type ParentAndIndex = { parentId: string | null; siblings: WorkflowNode[]; index: number } | null;
+
+/** Find parent of node and its index among siblings. Roots have parentId null. */
+function findParentAndIndex(roots: WorkflowNode[], nodeId: string): ParentAndIndex {
+  for (let i = 0; i < roots.length; i++) {
+    if (roots[i].id === nodeId) return { parentId: null, siblings: roots, index: i };
+  }
+  function walk(nodes: WorkflowNode[], parentId: string): ParentAndIndex {
+    for (let i = 0; i < nodes.length; i++) {
+      if (nodes[i].id === nodeId) return { parentId, siblings: nodes, index: i };
+      const found = walk(nodes[i].children, nodes[i].id);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const root of roots) {
+    const result = walk(root.children, root.id);
+    if (result) return result;
+  }
+  return null;
+}
+
 // ─── Compact Tree Node ────────────────────────────────────────────────
 
 function TreeNode({
@@ -54,11 +125,18 @@ function TreeNode({
   editingNodeId,
   editingNodeDraft,
   editingNodeInputRef,
+  draggedNodeId,
+  dropTargetNodeId,
   onSelectNode,
   onToggleCollapse,
   onEditNode,
   onDeleteNode,
   onAddChild,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
   onEditDraftChange,
   onEditSave,
   onEditCancel,
@@ -71,11 +149,18 @@ function TreeNode({
   editingNodeId: string | null;
   editingNodeDraft: string;
   editingNodeInputRef: React.RefObject<HTMLInputElement | null>;
+  draggedNodeId: string | null;
+  dropTargetNodeId: string | null;
   onSelectNode: (id: string) => void;
   onToggleCollapse: (id: string) => void;
   onEditNode: (id: string) => void;
   onDeleteNode: (id: string) => void;
   onAddChild?: (parentId: string) => void;
+  onDragStart?: (nodeId: string) => void;
+  onDragOver?: (nodeId: string) => void;
+  onDragLeave?: () => void;
+  onDrop?: (targetNodeId: string) => void;
+  onDragEnd?: () => void;
   onEditDraftChange: (val: string) => void;
   onEditSave: () => void;
   onEditCancel: () => void;
@@ -87,14 +172,36 @@ function TreeNode({
   const hasChildren = node.children.length > 0;
   const isEditing = editingNodeId === node.id;
   const isHighlighted = node.depth === effectiveDepth;
+  const isDragging = draggedNodeId === node.id;
+  const isDropTarget = dropTargetNodeId === node.id;
 
   return (
     <div style={{ paddingLeft: node.depth > 0 ? 20 : 0 }}>
       {/* Node row */}
       <div
-        className={`group flex items-start gap-1 py-[3px] px-1 rounded-md cursor-pointer select-none transition-colors ${isSelected ? "bg-primary/8" : "hover:bg-ink-900/4"}`}
+        className={`group flex items-start gap-1 py-[3px] px-1 rounded-md cursor-pointer select-none transition-colors ${isSelected ? "bg-primary/8" : "hover:bg-ink-900/4"} ${isDragging ? "opacity-50" : ""} ${isDropTarget ? "ring-1 ring-primary/50 ring-inset" : ""}`}
         style={isHighlighted ? { borderLeft: '2px solid rgba(217, 119, 87, 0.6)', paddingLeft: 2, backgroundColor: isSelected ? undefined : 'rgba(217, 119, 87, 0.04)' } : undefined}
         onClick={() => onSelectNode(node.id)}
+        draggable={!isEditing}
+        onDragStart={(e) => {
+          if (isEditing) return;
+          e.dataTransfer.setData("application/x-workflow-node-id", node.id);
+          e.dataTransfer.effectAllowed = "move";
+          onDragStart?.(node.id);
+        }}
+        onDragOver={(e) => {
+          if (!draggedNodeId || draggedNodeId === node.id) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          onDragOver?.(node.id);
+        }}
+        onDragLeave={() => onDragLeave?.()}
+        onDrop={(e) => {
+          e.preventDefault();
+          const id = e.dataTransfer.getData("application/x-workflow-node-id");
+          if (id && id !== node.id) onDrop?.(node.id);
+        }}
+        onDragEnd={() => onDragEnd?.()}
       >
         {/* Chevron for collapsible */}
         {hasChildren ? (
@@ -149,9 +256,17 @@ function TreeNode({
           </span>
         )}
 
-        {/* Hover actions */}
+        {/* Hover actions: edit, add, remove */}
         {!isEditing && (
           <span className="shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              type="button"
+              className="p-0.5 rounded text-ink-300 hover:text-ink-600"
+              onClick={(e) => { e.stopPropagation(); onEditNode(node.id); }}
+              aria-label="Edit"
+            >
+              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 1.5l3 3L5 14l-3.5.5L2 11l9.5-9.5z" /></svg>
+            </button>
             {onAddChild && (
               <TooltipProvider delayDuration={300}>
                 <Tooltip>
@@ -171,15 +286,9 @@ function TreeNode({
             )}
             <button
               type="button"
-              className="p-0.5 rounded text-ink-300 hover:text-ink-600"
-              onClick={(e) => { e.stopPropagation(); onEditNode(node.id); }}
-            >
-              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 1.5l3 3L5 14l-3.5.5L2 11l9.5-9.5z" /></svg>
-            </button>
-            <button
-              type="button"
               className="p-0.5 rounded text-ink-300 hover:text-error"
               onClick={(e) => { e.stopPropagation(); onDeleteNode(node.id); }}
+              aria-label="Remove"
             >
               <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 4L4 12M4 4l8 8" /></svg>
             </button>
@@ -199,11 +308,18 @@ function TreeNode({
           editingNodeId={editingNodeId}
           editingNodeDraft={editingNodeDraft}
           editingNodeInputRef={editingNodeInputRef}
+          draggedNodeId={draggedNodeId}
+          dropTargetNodeId={dropTargetNodeId}
           onSelectNode={onSelectNode}
           onToggleCollapse={onToggleCollapse}
           onEditNode={onEditNode}
           onDeleteNode={onDeleteNode}
           onAddChild={onAddChild}
+          onDragStart={onDragStart}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          onDragEnd={onDragEnd}
           onEditDraftChange={onEditDraftChange}
           onEditSave={onEditSave}
           onEditCancel={onEditCancel}
@@ -237,6 +353,8 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [editingNodeDraft, setEditingNodeDraft] = useState("");
   const editingNodeInputRef = useRef<HTMLInputElement | null>(null);
+  const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
+  const [dropTargetNodeId, setDropTargetNodeId] = useState<string | null>(null);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const workflowTree = activeSession?.workflowTree ?? [];
@@ -372,6 +490,31 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     setSelectedNodeId(newNode.id);
     setEditingNodeId(newNode.id);
     setEditingNodeDraft("");
+  }, [activeSessionId, workflowTree, collapsedNodeIds]);
+
+  const handleMoveNode = useCallback((draggedId: string, targetId: string) => {
+    if (!activeSessionId || draggedId === targetId) return;
+    if (isDescendant(workflowTree, targetId, draggedId)) return;
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const dragged = removeNodeFromTree(newTree, draggedId);
+    if (!dragged) return;
+    const from = findParentAndIndex(workflowTree, draggedId);
+    const to = findParentAndIndex(newTree, targetId);
+    if (!to) return;
+    const sameParent = from?.parentId === to.parentId && from?.parentId != null;
+    const sameParentRoot = from?.parentId === null && to.parentId === null;
+    if (sameParent || sameParentRoot) {
+      insertNodeIntoTree(newTree, dragged, to.parentId, to.index);
+    } else {
+      const targetNode = findNode(newTree, targetId);
+      if (!targetNode) return;
+      insertNodeIntoTree(newTree, dragged, targetId, targetNode.children.length);
+      if (collapsedNodeIds.has(targetId)) setCollapsedNodeIds(new Set([...collapsedNodeIds].filter((id) => id !== targetId)));
+    }
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+    setDraggedNodeId(null);
+    setDropTargetNodeId(null);
   }, [activeSessionId, workflowTree, collapsedNodeIds]);
 
   const handleDepthCommit = useCallback((depth: number) => {
@@ -557,11 +700,18 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                   editingNodeId={editingNodeId}
                   editingNodeDraft={editingNodeDraft}
                   editingNodeInputRef={editingNodeInputRef}
+                  draggedNodeId={draggedNodeId}
+                  dropTargetNodeId={dropTargetNodeId}
                   onSelectNode={setSelectedNodeId}
                   onToggleCollapse={toggleNodeCollapsed}
                   onEditNode={handleEditNode}
                   onDeleteNode={handleDeleteNode}
                   onAddChild={handleAddChildNode}
+                  onDragStart={(nodeId) => setDraggedNodeId(nodeId)}
+                  onDragOver={(nodeId) => setDropTargetNodeId(nodeId)}
+                  onDragLeave={() => setDropTargetNodeId(null)}
+                  onDrop={(targetId) => { if (draggedNodeId) handleMoveNode(draggedNodeId, targetId); }}
+                  onDragEnd={() => { setDraggedNodeId(null); setDropTargetNodeId(null); }}
                   onEditDraftChange={setEditingNodeDraft}
                   onEditSave={saveNodeEdit}
                   onEditCancel={() => { setEditingNodeId(null); setEditingNodeDraft(""); }}
