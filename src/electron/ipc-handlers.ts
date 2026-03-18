@@ -365,7 +365,9 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
     type: "session.status",
     payload: { sessionId, status: "running", title: session.title, cwd: session.cwd }
   });
-  broadcast({
+  // Persist the node-solving prompt in session message history (not just UI broadcast),
+  // so downstream exporters can segment trajectories per workflow node.
+  emit({
     type: "stream.user_prompt",
     payload: { sessionId, prompt: nodePrompt }
   });
