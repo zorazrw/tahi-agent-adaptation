@@ -25,13 +25,13 @@ import {
 } from "./libs/skill-store.js";
 import { runFullSessionExportAndExtract, setContextInductionNotifier } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
-import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
 import {
   buildExportEnvironmentSnapshot,
   buildExportEnvironmentSnapshotWithPreviewWrittenFile,
   shouldWriteSnapshotForSdkMessage,
 } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
+import { createPiSessionManager } from "./libs/pi-config.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -363,29 +363,33 @@ function emit(event: ServerEvent) {
     const messageRowId = sessions!.recordMessage(sessionId, message);
 
     // When a node-solving run completes, mark that node as completed and handle auto-cascade.
-    if (isSuccessfulAgentResult(message)) {
+    const m = message as { type?: string; subtype?: string; status?: string };
+    if (m.type === "result" || m.type === "run_result") {
       const nodeId = sessionCurrentNodeId.get(sessionId);
       if (nodeId !== undefined) {
         sessionCurrentNodeId.delete(sessionId);
-        const session = sessions!.getSession(sessionId);
-        if (session && session.workflowTree) {
-          const completedNode = findNodeById(session.workflowTree, nodeId);
-          if (completedNode) {
-            // If we don't yet have an originalOutputs snapshot, capture the initial model-written content now
-            if (!completedNode.originalOutputs && completedNode.outputFiles.length > 0) {
-              const cwd = session.cwd ?? process.cwd();
-              const originals: { path: string; content: string }[] = [];
-              for (const relPath of completedNode.outputFiles) {
-                try {
-                  const absPath = join(cwd, relPath);
-                  const content = readFileSync(absPath, "utf8");
-                  originals.push({ path: relPath, content });
-                } catch {
-                  // ignore missing/unreadable files
+        const didSucceed = m.type === "result" ? m.subtype === "success" : m.status === "success";
+        if (didSucceed) {
+          const session = sessions!.getSession(sessionId);
+          if (session && session.workflowTree) {
+            const completedNode = findNodeById(session.workflowTree, nodeId);
+            if (completedNode) {
+              // If we don't yet have an originalOutputs snapshot, capture the initial model-written content now
+              if (!completedNode.originalOutputs && completedNode.outputFiles.length > 0) {
+                const cwd = session.cwd ?? process.cwd();
+                const originals: { path: string; content: string }[] = [];
+                for (const relPath of completedNode.outputFiles) {
+                  try {
+                    const absPath = join(cwd, relPath);
+                    const content = readFileSync(absPath, "utf8");
+                    originals.push({ path: relPath, content });
+                  } catch {
+                    // ignore missing/unreadable files
+                  }
                 }
-              }
-              if (originals.length > 0) {
-                completedNode.originalOutputs = originals;
+                if (originals.length > 0) {
+                  completedNode.originalOutputs = originals;
+                }
               }
             }
 
@@ -448,7 +452,25 @@ function emit(event: ServerEvent) {
       sessions!.writeMessageSnapshot(promptRowId, buildExportEnvironmentSnapshot(sess));
     }
   }
+  if (event.type === "session.messagesReset") {
+    sessions.replaceMessages(event.payload.sessionId, event.payload.messages);
+  }
   broadcast(event);
+}
+
+function isLegacySession(sessionId: string): boolean {
+  const session = sessions.getSession(sessionId);
+  return session?.engine === "legacy-claude";
+}
+
+function emitLegacyReadonlyError(sessionId: string, action: string) {
+  broadcast({
+    type: "runner.error",
+    payload: {
+      sessionId,
+      message: `Cannot ${action}: this is a legacy Claude-backed session. Legacy sessions remain viewable but are read-only after the Pi migration.`
+    }
+  });
 }
 
 /** Starts a task-solving LLM call for the given workflow node. */
@@ -470,10 +492,13 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
     });
     return;
   }
-  if (!session.claudeSessionId) {
+  if (session.engine === "legacy-claude") {
     broadcast({
       type: "runner.error",
-      payload: { sessionId, message: "Cannot solve node: session has no resume id yet." }
+      payload: {
+        sessionId,
+        message: "Cannot solve node: this is a legacy Claude-backed session. Legacy sessions are read-only after the Pi migration."
+      }
     });
     return;
   }
@@ -505,13 +530,12 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
 
   // Execute this node directly (at or below verification depth, or leaf)
   const isRerun = node.status === "completed";
-  let resumeSessionAt: string | undefined;
-  let claudeSessionIdForResume = session.claudeSessionId;
+  let branchEntryId: string | undefined;
   let humanEdits: string | undefined;
 
   if (isRerun) {
     const resumeData = node.resumePoint;
-    if (!resumeData?.uuid) {
+    if (!resumeData || !("entryId" in resumeData) || !resumeData.entryId) {
       broadcast({
         type: "runner.error",
         payload: { sessionId, message: `Cannot rerun node: no resume point recorded.` }
@@ -519,8 +543,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
       return;
     }
 
-    resumeSessionAt = resumeData.uuid;
-    claudeSessionIdForResume = resumeData.claudeSessionId ?? session.claudeSessionId;
+    branchEntryId = resumeData.entryId;
 
     // Reset this node and all subsequent siblings + their children
     resetNode(node);
@@ -535,12 +558,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
       // Re-check parent status
       parent.status = "pending";
     }
-
-    store.deleteMessagesAfter(sessionId, resumeData.uuid);
-    store.updateSession(sessionId, {
-      workflowTree: session.workflowTree,
-      claudeSessionId: claudeSessionIdForResume
-    });
+    store.updateSession(sessionId, { workflowTree: session.workflowTree });
 
     // Compute human edits summary between originalOutputs snapshot and current file contents
     if (node.originalOutputs && node.originalOutputs.length > 0) {
@@ -578,11 +596,15 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
       payload: { sessionId, messages }
     });
   } else {
-    // First run: record resume point
-    const lastUuid = store.getLastAssistantMessageUuid(sessionId);
-    if (lastUuid) {
-      node.resumePoint = { uuid: lastUuid, claudeSessionId: session.claudeSessionId! };
-      store.updateSession(sessionId, { workflowTree: session.workflowTree });
+    try {
+      const sessionManager = createPiSessionManager(session.id, session.cwd ?? process.cwd(), session.piSessionFile);
+      const leafId = sessionManager.getLeafId();
+      if (leafId) {
+        node.resumePoint = { entryId: leafId };
+        store.updateSession(sessionId, { workflowTree: session.workflowTree });
+      }
+    } catch {
+      // Ignore missing session linkage; runner will still attempt the node solve.
     }
   }
 
@@ -611,9 +633,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   runClaude({
     prompt: nodePrompt,
     session,
-    resumeSessionId: claudeSessionIdForResume,
-    resumeSessionAt,
-    suppressSessionStatusOnSuccess: true,
+    branchEntryId,
     onEvent: emit,
     onSessionUpdate: (updates) => {
       store.updateSession(session.id, updates);
@@ -716,7 +736,8 @@ export function handleClientEvent(event: ClientEvent) {
         messages: history.messages,
         workflowTree: history.session.workflowTree,
         verificationDepth: history.session.verificationDepth,
-        title: history.session.title
+        title: history.session.title,
+        engine: history.session.engine
       }
     });
     return;
@@ -727,7 +748,8 @@ export function handleClientEvent(event: ClientEvent) {
       cwd: event.payload.cwd,
       title: event.payload.title,
       allowedTools: event.payload.allowedTools,
-      prompt: event.payload.prompt
+      prompt: event.payload.prompt,
+      engine: "pi"
     });
 
     sessions.updateSession(session.id, {
@@ -747,7 +769,6 @@ export function handleClientEvent(event: ClientEvent) {
     runClaude({
       prompt: event.payload.prompt,
       session,
-      resumeSessionId: session.claudeSessionId,
       onEvent: emit,
       onSessionUpdate: (updates) => {
         sessions.updateSession(session.id, updates);
@@ -785,11 +806,8 @@ export function handleClientEvent(event: ClientEvent) {
       return;
     }
 
-    if (!session.claudeSessionId) {
-      emit({
-        type: "runner.error",
-        payload: { sessionId: session.id, message: "Session has no resume id yet." }
-      });
+    if (session.engine === "legacy-claude") {
+      emitLegacyReadonlyError(session.id, "continue this session");
       return;
     }
 
@@ -814,65 +832,19 @@ export function handleClientEvent(event: ClientEvent) {
       sessionContinueVerificationNodeId.delete(session.id);
     }
 
-    void (async () => {
-      try {
-        if (vNode) {
-          const latest = sessions.getSession(session.id);
-          if (latest?.workflowTree) {
-            const target = findNodeById(latest.workflowTree, vNode);
-            if (target) {
-              const priorUserPrompts = sessions
-                .getMessages(session.id)
-                .filter((m): m is { type: "user_prompt"; prompt: string } => m.type === "user_prompt")
-                .map((m) => m.prompt.trim())
-                .filter(Boolean);
-              const userMessages = [...priorUserPrompts, event.payload.prompt.trim()].filter(Boolean);
-              try {
-                const updatedVerifiers = await generateUpdatedVerifiersForNode(
-                  latest,
-                  latest.workflowTree,
-                  target,
-                  userMessages,
-                  sessionVerifierExamplesByNodeId.get(session.id)?.get(vNode)?.removed ?? [],
-                  sessionVerifierExamplesByNodeId.get(session.id)?.get(vNode)?.added ?? []
-                );
-                if (updatedVerifiers && updatedVerifiers.length > 0) {
-                  target.verifiers = updatedVerifiers;
-                  target.verifierMarks = updatedVerifiers.map(() => undefined);
-                  sessions.updateSession(session.id, { workflowTree: latest.workflowTree });
-                  broadcast({
-                    type: "session.workflowTree",
-                    payload: { sessionId: session.id, workflowTree: latest.workflowTree },
-                  });
-                  const updatePayload = { type: "update_verifiers" as const, nodeId: vNode };
-                  const updateRowId = sessions.recordMessage(session.id, updatePayload);
-                  const sessAfterUpdate = sessions.getSession(session.id);
-                  if (sessAfterUpdate) {
-                    sessions.writeMessageSnapshot(updateRowId, buildExportEnvironmentSnapshot(sessAfterUpdate));
-                  }
-                  broadcast({
-                    type: "stream.message",
-                    payload: { sessionId: session.id, message: updatePayload },
-                  });
-                }
-              } catch (e) {
-                console.error("[ipc] verifier generation failed:", e);
-              }
-            }
-          }
-        }
-
-        const handle = await runClaude({
-          prompt: event.payload.prompt,
-          session,
-          resumeSessionId: session.claudeSessionId,
-          onEvent: emit,
-          onSessionUpdate: (updates) => {
-            sessions.updateSession(session.id, updates);
-          }
-        });
+    runClaude({
+      prompt: event.payload.prompt,
+      session,
+      onEvent: emit,
+      onSessionUpdate: (updates) => {
+        sessions.updateSession(session.id, updates);
+      }
+    })
+      .then((handle) => {
         runnerHandles.set(session.id, handle);
-      } catch (error) {
+        sessions.setAbortController(session.id, undefined);
+      })
+      .catch((error) => {
         sessions.updateSession(session.id, { status: "error" });
         emit({
           type: "session.status",
@@ -884,14 +856,17 @@ export function handleClientEvent(event: ClientEvent) {
             error: String(error)
           }
         });
-      }
-    })();
+      });
 
     return;
   }
 
   if (event.type === "session.solveNode") {
     const { sessionId, nodeId } = event.payload;
+    if (isLegacySession(sessionId)) {
+      emitLegacyReadonlyError(sessionId, "solve a node");
+      return;
+    }
     triggerNodeSolve(sessionId, nodeId);
     return;
   }
@@ -988,6 +963,10 @@ export function handleClientEvent(event: ClientEvent) {
     const session = sessions.getSession(sessionId);
     if (!session) {
       emit({ type: "session.deleted", payload: { sessionId } });
+      return;
+    }
+    if (session.engine === "legacy-claude") {
+      emitLegacyReadonlyError(sessionId, "regenerate the workflow");
       return;
     }
     const messages = sessions.getMessages(sessionId);
