@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { TopLevelItem } from "../hooks/useGroupedMessages";
 import type { IndexedMessage } from "../hooks/useMessageWindow";
 import type { PermissionRequest } from "../store/useAppStore";
-import type { PermissionResult, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { AppPermissionResult, LegacyAssistantMessage } from "../types";
 import { useAppStore } from "../store/useAppStore";
 import { MessageCard } from "./EventCard";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -20,7 +20,7 @@ export function TaskToolCard({
   group: TaskGroup;
   isRunning: boolean;
   permissionRequest?: PermissionRequest;
-  onPermissionResult?: (toolUseId: string, result: PermissionResult) => void;
+  onPermissionResult?: (toolUseId: string, result: AppPermissionResult) => void;
 }) {
   const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
   const setToolMeta = useAppStore((s) => s.setToolMeta);
@@ -35,8 +35,8 @@ export function TaskToolCard({
   const toolCount = useMemo(() => {
     let count = 0;
     for (const child of group.children) {
-      if (child.message.type !== "assistant") continue;
-      const assistant = child.message as SDKAssistantMessage;
+      if (child.message.type !== "assistant" || !("message" in child.message)) continue;
+      const assistant = child.message as LegacyAssistantMessage;
       for (const block of assistant.message.content) {
         if (block.type === "tool_use") count++;
       }

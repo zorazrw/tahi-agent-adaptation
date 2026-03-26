@@ -1,66 +1,75 @@
-import { unstable_v2_prompt } from "@anthropic-ai/claude-agent-sdk";
-import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
-import { getCurrentApiConfig, buildEnvForConfig, getClaudeCodePath} from "./claude-settings.js";
-import { app } from "electron";
+import { SessionManager, createAgentSession } from "@mariozechner/pi-coding-agent";
+import { createPiManagers, createPiResourceLoader } from "./pi-config.js";
 
-// Build enhanced PATH for packaged environment
 export function getEnhancedEnv(): Record<string, string | undefined> {
-
-  const config = getCurrentApiConfig();
-  if (!config) {
-    return {
-      ...process.env,
-    };
-  }
-  
-  const env = buildEnvForConfig(config);
   return {
     ...process.env,
-    ...env,
   };
+}
+
+function extractAssistantText(message: unknown): string {
+  if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") {
+    return "";
+  }
+  const candidateContent = (message as { content?: unknown }).content;
+  const content = Array.isArray(candidateContent) ? candidateContent : [];
+  return content
+    .map((block) => {
+      if (!block || typeof block !== "object" || !("type" in block)) return "";
+      if (block.type === "text" && "text" in block) return String(block.text ?? "");
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
 }
 
 export const generateSessionTitle = async (userIntent: string | null) => {
   if (!userIntent) return "New Session";
 
-  // Get the Claude Code path when needed, not at module load time
-  const claudeCodePath = getClaudeCodePath();
-  // Get fresh env each time to ensure latest API config is used
-  const currentEnv = getEnhancedEnv();
-
   try {
-    const result: SDKResultMessage = await unstable_v2_prompt(
-      `please analyze the following user input to generate a short but clear title to identify this conversation theme:
-      ${userIntent}
-      directly output the title, do not include any other content`, {
-      model: getCurrentApiConfig()?.model || "claude-sonnet",
-      env: currentEnv,
-      pathToClaudeCodeExecutable: claudeCodePath,
+    const cwd = process.cwd();
+    const { agentDir, authStorage, modelRegistry, settingsManager } = createPiManagers(cwd);
+    const resourceLoader = await createPiResourceLoader(cwd);
+
+    const { session, modelFallbackMessage } = await createAgentSession({
+      cwd,
+      agentDir,
+      authStorage,
+      modelRegistry,
+      settingsManager,
+      resourceLoader,
+      tools: [],
+      sessionManager: SessionManager.inMemory(cwd),
     });
 
-    if (result.subtype === "success") {
-      const raw = result.result?.trim() ?? "";
-      // If the model prefixed with "Title:" or similar, use only the part after the colon
-      const afterColon = raw.includes(":") ? raw.slice(raw.indexOf(":") + 1).trim() : raw;
-      return afterColon || "New Session";
+    if (modelFallbackMessage && !session.model) {
+      throw new Error(modelFallbackMessage);
     }
 
-    // Log any non-success result for debugging
-    console.error("Claude SDK returned non-success result:", result);
-    return "New Session";
+    await session.prompt(
+      [
+        "Generate a short, clear title for this conversation.",
+        "Return only the title with no prefix or explanation.",
+        "",
+        userIntent,
+      ].join("\n")
+    );
+
+    const assistantMessage = [...session.messages].reverse().find((message) => {
+      return typeof message === "object" && message !== null && "role" in message && message.role === "assistant";
+    });
+    const title = extractAssistantText(assistantMessage);
+    session.dispose();
+
+    if (title) {
+      const afterColon = title.includes(":") ? title.slice(title.indexOf(":") + 1).trim() : title;
+      if (afterColon) return afterColon;
+    }
   } catch (error) {
-    // Enhanced error logging for packaged app debugging
-    console.error("Failed to generate session title:", error);
-    console.error("Claude Code path:", claudeCodePath);
-    console.error("Is packaged:", app.isPackaged);
-    console.error("Resources path:", process.resourcesPath);
-
-    // Return a simple title based on user input as fallback
-    if (userIntent) {
-      const words = userIntent.trim().split(/\s+/).slice(0, 5);
-      return words.join(" ").toUpperCase() + (userIntent.trim().split(/\s+/).length > 5 ? "..." : "");
-    }
-
-    return "New Session";
+    console.error("Failed to generate session title with pi:", error);
   }
+
+  const words = userIntent.trim().split(/\s+/).slice(0, 5);
+  return words.join(" ").toUpperCase() + (userIntent.trim().split(/\s+/).length > 5 ? "..." : "");
 };

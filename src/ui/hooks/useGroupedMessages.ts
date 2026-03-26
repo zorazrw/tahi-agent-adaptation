@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 import type { IndexedMessage } from "./useMessageWindow";
-import type { StreamMessage } from "../types";
-import type { SDKAssistantMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { LegacyAssistantMessage, LegacyUserMessage, StreamMessage } from "../types";
 
 export type TopLevelItem =
   | { kind: "message"; originalIndex: number; message: StreamMessage }
@@ -37,8 +36,8 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
 
     for (const item of visibleMessages) {
       const msg = item.message;
-      if (msg.type !== "assistant") continue;
-      const assistant = msg as SDKAssistantMessage;
+      if (msg.type !== "assistant" || !("message" in msg)) continue;
+      const assistant = msg as LegacyAssistantMessage;
       for (const block of assistant.message.content) {
         if (block.type === "tool_use" && block.name === "Task") {
           const input = block.input as Record<string, any>;
@@ -77,8 +76,8 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
       }
 
       // Check for tool_result that matches a Task tool_use_id
-      if (item.message.type === "user") {
-        const userMsg = item.message as SDKUserMessage;
+      if (item.message.type === "user" && "message" in item.message) {
+        const userMsg = item.message as LegacyUserMessage;
         for (const block of userMsg.message.content) {
           if (
             block.type === "tool_result" &&
@@ -101,8 +100,8 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
       if (consumedIndices.has(item.originalIndex)) continue;
 
       // Check if this assistant message contains Task tool_use blocks
-      if (item.message.type === "assistant") {
-        const assistant = item.message as SDKAssistantMessage;
+      if (item.message.type === "assistant" && "message" in item.message) {
+        const assistant = item.message as LegacyAssistantMessage;
         const taskBlocks: string[] = [];
         let hasNonTaskContent = false;
 
@@ -133,7 +132,7 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
 
           let status: "running" | "completed" | "error" = "running";
           if (resultMessage) {
-            const userMsg = resultMessage as SDKUserMessage;
+            const userMsg = resultMessage as LegacyUserMessage;
             const resultBlock = userMsg.message.content.find(
               (b: any) => b.type === "tool_result" && b.tool_use_id === taskId
             ) as any;

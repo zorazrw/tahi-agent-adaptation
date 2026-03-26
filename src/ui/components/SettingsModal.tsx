@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useAppStore } from "../store/useAppStore";
 import type { WorkflowRunMode } from "../store/useAppStore";
 import { Spinner } from "./Spinner";
+import type { AvailableModel, OpenAICompatibleApiFormat, ProviderAuthStatus } from "../../lib/runtime-types";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -62,7 +63,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-ink-900/20 backdrop-blur-sm animate-fade-in" />
         <Dialog.Content className="fixed inset-0 z-50 flex items-center justify-center px-4 py-8">
-          <div className="w-full max-w-lg rounded-2xl border border-ink-900/5 bg-surface shadow-elevated animate-scale-in flex flex-col max-h-[80vh]">
+          <div
+            className={`w-full rounded-2xl border border-ink-900/5 bg-surface shadow-elevated animate-scale-in flex flex-col max-h-[84vh] ${
+              tab === "api" ? "max-w-5xl" : "max-w-3xl"
+            }`}
+          >
             {/* Header */}
             <div className="flex items-center justify-between px-6 pt-6 pb-0 shrink-0">
               <Dialog.Title className="text-base font-semibold text-ink-800">Settings</Dialog.Title>
@@ -132,27 +137,82 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 /* ---------- API Config Panel ---------- */
 
 function ApiPanel({ onClose }: { onClose: () => void }) {
-  const [apiKey, setApiKey] = useState("");
-  const [baseURL, setBaseURL] = useState("");
+  const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
+  const [thinkingLevel, setThinkingLevel] = useState<"off" | "minimal" | "low" | "medium" | "high" | "xhigh">("medium");
+  const [models, setModels] = useState<AvailableModel[]>([]);
+  const [providerStatuses, setProviderStatuses] = useState<Record<string, ProviderAuthStatus>>({});
+  const [apiKey, setApiKey] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savingApiKey, setSavingApiKey] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [customModel, setCustomModel] = useState("");
+  const [customApiFormat, setCustomApiFormat] = useState<OpenAICompatibleApiFormat>("openai-completions");
+  const [customApiKey, setCustomApiKey] = useState("");
+  const [customConfigured, setCustomConfigured] = useState(false);
+  const [savingCustomProvider, setSavingCustomProvider] = useState(false);
+  const [removingCustomProvider, setRemovingCustomProvider] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
+  const loadStatuses = async (providers: string[]) => {
+    const entries = await Promise.all(
+      providers.map(async (name) => [name, await window.electron.getProviderAuthStatus(name)] as const)
+    );
+    setProviderStatuses(Object.fromEntries(entries));
+  };
+
+  const syncModelState = async (
+    availableModels: AvailableModel[],
+    preferred?: { provider?: string; model?: string },
+    defaults?: { defaultProvider?: string; defaultModel?: string }
+  ) => {
+    setModels(availableModels);
+    const providers = [...new Set(availableModels.map((item) => item.provider))];
+    const nextProvider =
+      preferred?.provider && providers.includes(preferred.provider)
+        ? preferred.provider
+        : defaults?.defaultProvider && providers.includes(defaults.defaultProvider)
+          ? defaults.defaultProvider
+          : providers[0] || "";
+    const providerModels = availableModels.filter((item) => item.provider === nextProvider);
+    const nextModel =
+      preferred?.model && providerModels.some((item) => item.id === preferred.model)
+        ? preferred.model
+        : defaults?.defaultModel && providerModels.some((item) => item.id === defaults.defaultModel)
+          ? defaults.defaultModel
+          : providerModels[0]?.id || "";
+    setProvider(nextProvider);
+    setModel(nextModel);
+    await loadStatuses(providers);
+  };
+
+  const loadOpenAICompatibleProvider = async () => {
+    const config = await window.electron.getOpenAICompatibleProvider();
+    setCustomConfigured(Boolean(config));
+    setCustomBaseUrl(config?.baseUrl ?? "");
+    setCustomModel(config?.model ?? "");
+    setCustomApiFormat(config?.apiFormat ?? "openai-completions");
+    setCustomApiKey("");
+    return config;
+  };
+
   useEffect(() => {
     setLoading(true);
-    window.electron.getApiConfig()
-      .then((config) => {
-        if (config) {
-          setApiKey(config.apiKey);
-          setBaseURL(config.baseURL);
-          setModel(config.model);
-        }
+    Promise.all([
+      window.electron.getAgentSettings(),
+      window.electron.listAvailableModels(),
+      loadOpenAICompatibleProvider(),
+    ])
+      .then(async ([settings, availableModels]) => {
+        setThinkingLevel(settings.defaultThinkingLevel ?? "medium");
+        await syncModelState(availableModels, undefined, settings);
       })
       .catch((err) => {
-        console.error("Failed to load API config:", err);
-        setError("Failed to load configuration");
+        console.error("Failed to load agent settings:", err);
+        setError("Failed to load agent settings");
       })
       .finally(() => {
         setLoading(false);
@@ -160,20 +220,16 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   }, []);
 
   const handleSave = async () => {
-    if (!apiKey.trim()) { setError("API Key is required"); return; }
-    if (!baseURL.trim()) { setError("Base URL is required"); return; }
+    if (!provider.trim()) { setError("Provider is required"); return; }
     if (!model.trim()) { setError("Model is required"); return; }
-    try { new URL(baseURL); } catch { setError("Invalid Base URL format"); return; }
-
     setError(null);
     setSaving(true);
 
     try {
-      const result = await window.electron.saveApiConfig({
-        apiKey: apiKey.trim(),
-        baseURL: baseURL.trim(),
-        model: model.trim(),
-        apiType: "anthropic"
+      const result = await window.electron.saveAgentSettings({
+        defaultProvider: provider,
+        defaultModel: model,
+        defaultThinkingLevel: thinkingLevel,
       });
 
       if (result.success) {
@@ -187,11 +243,144 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       }
     } catch (err) {
       console.error("Failed to save API config:", err);
-      setError("Failed to save configuration");
+        setError("Failed to save configuration");
     } finally {
       setSaving(false);
     }
   };
+
+  const handleSaveOpenAICompatibleProvider = async () => {
+    if (!customBaseUrl.trim()) {
+      setError("Custom base URL is required");
+      return;
+    }
+    if (!customModel.trim()) {
+      setError("Custom model slug is required");
+      return;
+    }
+
+    setError(null);
+    setSavingCustomProvider(true);
+    try {
+      const result = await window.electron.saveOpenAICompatibleProvider({
+        baseUrl: customBaseUrl.trim(),
+        model: customModel.trim(),
+        apiFormat: customApiFormat,
+        apiKey: customApiKey.trim() || undefined,
+      });
+      if (!result.success) {
+        setError(result.error || "Failed to save custom provider");
+        return;
+      }
+
+      const [availableModels] = await Promise.all([
+        window.electron.listAvailableModels(),
+        loadOpenAICompatibleProvider(),
+      ]);
+      await syncModelState(availableModels, {
+        provider: "openai-compatible",
+        model: customModel.trim(),
+      });
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 1200);
+    } catch (err) {
+      console.error("Failed to save OpenAI-compatible provider:", err);
+      setError("Failed to save custom provider");
+    } finally {
+      setSavingCustomProvider(false);
+    }
+  };
+
+  const handleRemoveOpenAICompatibleProvider = async () => {
+    setError(null);
+    setRemovingCustomProvider(true);
+    try {
+      const result = await window.electron.removeOpenAICompatibleProvider();
+      if (!result.success) {
+        setError(result.error || "Failed to remove custom provider");
+        return;
+      }
+
+      setCustomConfigured(false);
+      setCustomBaseUrl("");
+      setCustomModel("");
+      setCustomApiFormat("openai-completions");
+      setCustomApiKey("");
+
+      const settings = await window.electron.getAgentSettings();
+      const availableModels = await window.electron.listAvailableModels();
+      await syncModelState(
+        availableModels,
+        provider === "openai-compatible" ? undefined : { provider, model },
+        settings
+      );
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 1200);
+    } catch (err) {
+      console.error("Failed to remove OpenAI-compatible provider:", err);
+      setError("Failed to remove custom provider");
+    } finally {
+      setRemovingCustomProvider(false);
+    }
+  };
+
+  const handleSaveApiKey = async () => {
+    if (!provider.trim() || !apiKey.trim()) {
+      setError("Provider and API key are required");
+      return;
+    }
+    setError(null);
+    setSavingApiKey(true);
+    try {
+      const result = await window.electron.saveProviderApiKey(provider, apiKey.trim());
+      if (!result.success) {
+        setError(result.error || "Failed to save API key");
+        return;
+      }
+      await loadStatuses([...new Set(models.map((item) => item.provider))]);
+      setApiKey("");
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 1200);
+    } catch (err) {
+      console.error("Failed to save provider API key:", err);
+      setError("Failed to save provider API key");
+    } finally {
+      setSavingApiKey(false);
+    }
+  };
+
+  const handleAuthAction = async (action: "login" | "logout") => {
+    if (!provider.trim()) return;
+    setError(null);
+    setAuthBusy(true);
+    try {
+      const result =
+        action === "login"
+          ? await window.electron.loginProvider(provider)
+          : await window.electron.logoutProvider(provider);
+      if (!result.success) {
+        setError(result.error || `Failed to ${action}`);
+        return;
+      }
+      await loadStatuses([...new Set(models.map((item) => item.provider))]);
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 1200);
+    } catch (err) {
+      console.error(`Failed to ${action} provider:`, err);
+      setError(`Failed to ${action} provider`);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const providerOptions = [...new Set(models.map((item) => item.provider))];
+  const modelOptions = models.filter((item) => item.provider === provider);
+  const currentStatus = provider ? providerStatuses[provider] : undefined;
+  const fieldClass =
+    "w-full min-w-0 rounded-xl border border-ink-900/10 bg-white px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors";
+  const cardClass = "rounded-[24px] border border-ink-900/8 bg-surface-secondary/75 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]";
+  const secondaryButtonClass =
+    "rounded-xl border border-ink-900/10 bg-white px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors disabled:cursor-not-allowed disabled:opacity-50";
 
   if (loading) {
     return (
@@ -203,67 +392,245 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <>
-      <p className="text-sm text-muted-foreground">Supports Anthropic's official API as well as third-party APIs compatible with the Anthropic format.</p>
-      <div className="mt-4 grid gap-4">
-        <label className="grid gap-1.5">
-          <span className="text-xs font-medium text-muted-foreground">Base URL</span>
-          <input
-            type="url"
-            className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
-            placeholder="https://..."
-            value={baseURL}
-            onChange={(e) => setBaseURL(e.target.value)}
-            required
-          />
-        </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-medium text-muted-foreground">API Key</span>
-          <input
-            type="password"
-            className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
-            placeholder="sk-..."
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            required
-          />
-        </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-medium text-muted-foreground">Model Name</span>
-          <input
-            type="text"
-            className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2.5 text-sm text-ink-800 placeholder:text-placeholder focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 transition-colors"
-            placeholder="claude-3-5-sonnet-20241022"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            required
-          />
-        </label>
+      <div className="rounded-[28px] border border-ink-900/6 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(249,246,241,0.88))] p-5">
+        <div className="flex flex-col gap-1">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-primary/80">Runtime Configuration</div>
+          <p className="text-sm text-muted-foreground">
+            Configure the default Pi provider on the left and manage any custom OpenAI-compatible endpoint on the right.
+          </p>
+        </div>
 
-        {error && (
-          <div className="rounded-xl border border-error/20 bg-error-light px-4 py-2.5 text-sm text-error">
-            {error}
+        <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.95fr)]">
+          <section className={cardClass}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-base font-semibold text-ink-800">Default Provider</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  Choose the provider and model used for new Pi sessions, then keep credentials in sync for that provider.
+                </p>
+              </div>
+              <div className="max-w-full truncate rounded-full bg-white px-3 py-1 text-[11px] font-medium text-ink-600 shadow-sm">
+                {provider || "No provider"}
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <label className="grid min-w-0 gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Provider</span>
+                <select
+                  className={fieldClass}
+                  value={provider}
+                  onChange={(e) => {
+                    const nextProvider = e.target.value;
+                    setProvider(nextProvider);
+                    const nextModel = models.find((item) => item.provider === nextProvider)?.id || "";
+                    setModel(nextModel);
+                  }}
+                >
+                  {providerOptions.map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid min-w-0 gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Model</span>
+                <select
+                  className={`${fieldClass} truncate`}
+                  title={model}
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                >
+                  {modelOptions.map((item) => (
+                    <option key={item.id} value={item.id}>{item.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Default Thinking Level</span>
+                <select
+                  className={fieldClass}
+                  value={thinkingLevel}
+                  onChange={(e) => setThinkingLevel(e.target.value as typeof thinkingLevel)}
+                >
+                  {["off", "minimal", "low", "medium", "high", "xhigh"].map((item) => (
+                    <option key={item} value={item}>{item}</option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="rounded-2xl border border-ink-900/8 bg-white/80 px-4 py-3">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-500">Auth Status</div>
+                <div className="mt-2 text-sm text-ink-700">
+                  {currentStatus?.hasAuth
+                    ? `Configured via ${currentStatus.authType === "env" ? "environment" : currentStatus.authType?.replace("_", " ") || "credentials"}`
+                    : "Not configured"}
+                </div>
+                {currentStatus?.supportsOAuth && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    OAuth supported: {currentStatus.oauthName || provider}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Provider API Key</span>
+                <input
+                  type="password"
+                  className={fieldClass}
+                  placeholder="sk-..."
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+              </label>
+
+              <div className={`grid gap-3 ${currentStatus?.supportsOAuth ? "md:grid-cols-3" : "md:grid-cols-1"}`}>
+                <button
+                  className={secondaryButtonClass}
+                  onClick={handleSaveApiKey}
+                  disabled={savingApiKey || !provider.trim() || !apiKey.trim()}
+                >
+                  {savingApiKey ? <Spinner className="mx-auto w-5 h-5" /> : "Save API Key"}
+                </button>
+                {currentStatus?.supportsOAuth && (
+                  <>
+                    <button
+                      className={secondaryButtonClass}
+                      onClick={() => handleAuthAction("login")}
+                      disabled={authBusy || !provider.trim()}
+                    >
+                      Login OAuth
+                    </button>
+                    <button
+                      className={secondaryButtonClass}
+                      onClick={() => handleAuthAction("logout")}
+                      disabled={authBusy || !provider.trim()}
+                    >
+                      Logout
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <section className={`${cardClass} bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(250,242,236,0.94))]`}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-base font-semibold text-ink-800">OpenAI-Compatible Endpoint</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  Save a custom `/v1`-style endpoint with its own base URL, model slug, and API protocol.
+                </p>
+              </div>
+              <div className={`rounded-full px-3 py-1 text-[11px] font-medium shadow-sm ${
+                customConfigured ? "bg-primary/10 text-primary" : "bg-white text-ink-500"
+              }`}>
+                {customConfigured ? "Configured" : "Not Configured"}
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">API Format</span>
+                <select
+                  className={fieldClass}
+                  value={customApiFormat}
+                  onChange={(e) => setCustomApiFormat(e.target.value as OpenAICompatibleApiFormat)}
+                >
+                  <option value="openai-completions">OpenAI Completions</option>
+                  <option value="openai-responses">OpenAI Responses</option>
+                </select>
+              </label>
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Base URL</span>
+                <input
+                  type="text"
+                  className={`${fieldClass} font-mono text-[13px]`}
+                  placeholder="https://your-endpoint.example.com/v1"
+                  value={customBaseUrl}
+                  onChange={(e) => setCustomBaseUrl(e.target.value)}
+                />
+              </label>
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Model Slug</span>
+                <input
+                  type="text"
+                  className={`${fieldClass} font-mono text-[13px]`}
+                  placeholder="gpt-4.1-mini or local-model"
+                  value={customModel}
+                  onChange={(e) => setCustomModel(e.target.value)}
+                />
+              </label>
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Endpoint API Key</span>
+                <input
+                  type="password"
+                  className={`${fieldClass} font-mono text-[13px]`}
+                  placeholder={customConfigured ? "Leave blank to keep the saved key" : "sk-..."}
+                  value={customApiKey}
+                  onChange={(e) => setCustomApiKey(e.target.value)}
+                />
+              </label>
+
+              <div className="rounded-2xl border border-primary/10 bg-white/80 px-4 py-3 text-xs leading-5 text-muted-foreground">
+                {customConfigured
+                  ? "This endpoint is already stored. Re-saving with a blank key preserves the existing credential."
+                  : "Once saved, this endpoint appears in the default provider picker as `openai-compatible`."}
+              </div>
+
+              <div className="grid gap-3">
+                <button
+                  className="rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={handleSaveOpenAICompatibleProvider}
+                  disabled={savingCustomProvider || !customBaseUrl.trim() || !customModel.trim()}
+                >
+                  {savingCustomProvider ? <Spinner className="mx-auto w-5 h-5" /> : "Save Endpoint"}
+                </button>
+                <button
+                  className={secondaryButtonClass}
+                  onClick={handleRemoveOpenAICompatibleProvider}
+                  disabled={removingCustomProvider || !customConfigured}
+                >
+                  {removingCustomProvider ? <Spinner className="mx-auto w-5 h-5" /> : "Remove Endpoint"}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        {(error || success) && (
+          <div className="mt-4 grid gap-3">
+            {error && (
+              <div className="rounded-xl border border-error/20 bg-error-light px-4 py-2.5 text-sm text-error">
+                {error}
+              </div>
+            )}
+            {success && (
+              <div className="rounded-xl border border-success/20 bg-success-light px-4 py-2.5 text-sm text-success">
+                Configuration saved successfully!
+              </div>
+            )}
           </div>
         )}
-        {success && (
-          <div className="rounded-xl border border-success/20 bg-success-light px-4 py-2.5 text-sm text-success">
-            Configuration saved successfully!
-          </div>
-        )}
 
-        <div className="flex gap-3">
+        <div className="mt-5 flex flex-col-reverse gap-3 border-t border-ink-900/6 pt-5 sm:flex-row sm:justify-end">
           <button
-            className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary transition-colors"
+            className={`${secondaryButtonClass} sm:min-w-36`}
             onClick={onClose}
             disabled={saving}
           >
             Cancel
           </button>
           <button
-            className="flex-1 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50 sm:min-w-36"
             onClick={handleSave}
-            disabled={saving || !apiKey.trim() || !baseURL.trim() || !model.trim()}
+            disabled={saving || !provider.trim() || !model.trim()}
           >
-            {saving ? <Spinner className="mx-auto w-5 h-5" /> : "Save"}
+            {saving ? <Spinner className="mx-auto w-5 h-5" /> : "Save Defaults"}
           </button>
         </div>
       </div>
