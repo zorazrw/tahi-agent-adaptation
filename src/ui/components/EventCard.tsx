@@ -1,12 +1,20 @@
 import { useEffect, useState } from "react";
 import type {
-  PermissionResult,
-  SDKAssistantMessage,
-  SDKMessage,
-  SDKResultMessage,
-  SDKUserMessage
-} from "@anthropic-ai/claude-agent-sdk";
-import type { StreamMessage, NodeCompletedMessage } from "../types";
+  AppPermissionResult,
+  AskUserQuestionInput,
+  LegacyAssistantMessage,
+  LegacyMessage,
+  LegacyResultMessage,
+  LegacySystemMessage,
+  LegacyToolResultBlock,
+  LegacyUserMessage,
+  NodeCompletedMessage,
+  PiAssistantMessage,
+  PiRunResultMessage,
+  PiSystemInitMessage,
+  PiToolResultMessage,
+  StreamMessage,
+} from "../types";
 import { useAppStore } from "../store/useAppStore";
 import type { PermissionRequest } from "../store/useAppStore";
 import { DecisionPanel } from "./DecisionPanel";
@@ -34,18 +42,10 @@ import {
   PencilIcon,
 } from "lucide-react";
 
-type AssistantContentBlock = SDKAssistantMessage["message"]["content"][number];
-type ToolResultBlock = SDKUserMessage["message"]["content"][number];
+type AnyAssistantContentBlock =
+  | LegacyAssistantMessage["message"]["content"][number]
+  | PiAssistantMessage["blocks"][number];
 type ToolStatus = "pending" | "success" | "error";
-
-type AskUserQuestionInput = {
-  questions?: Array<{
-    question: string;
-    header?: string;
-    options?: Array<{ label: string; description?: string }>;
-    multiSelect?: boolean;
-  }>;
-};
 
 const getAskUserQuestionSignature = (input?: AskUserQuestionInput | null) => {
   if (!input?.questions?.length) return "";
@@ -61,26 +61,33 @@ const useToolStatus = (toolUseId: string | undefined) => {
 
 /* ── Tool icon map ── */
 const getToolIcon = (name: string) => {
-  switch (name) {
-    case "Bash": return <TerminalSquareIcon className="size-4" />;
-    case "Read": return <FileTextIcon className="size-4" />;
-    case "Write": return <PencilIcon className="size-4" />;
-    case "Edit": return <FileEditIcon className="size-4" />;
-    case "Glob": case "Grep": return <SearchIcon className="size-4" />;
-    case "WebFetch": case "WebSearch": return <GlobeIcon className="size-4" />;
-    case "Task": return <WrenchIcon className="size-4" />;
+  switch (name.toLowerCase()) {
+    case "bash": return <TerminalSquareIcon className="size-4" />;
+    case "read": return <FileTextIcon className="size-4" />;
+    case "write": return <PencilIcon className="size-4" />;
+    case "edit": return <FileEditIcon className="size-4" />;
+    case "glob":
+    case "grep":
+    case "find":
+    case "ls":
+      return <SearchIcon className="size-4" />;
+    case "webfetch":
+    case "websearch":
+      return <GlobeIcon className="size-4" />;
+    case "task": return <WrenchIcon className="size-4" />;
     default: return <FileIcon className="size-4" />;
   }
 };
 
 /* ── Tool description helper ── */
 const getToolInfo = (name: string, input: Record<string, any>): string | null => {
-  switch (name) {
-    case "Bash": return input?.command || null;
-    case "Read": case "Write": case "Edit": return input?.file_path || null;
-    case "Glob": case "Grep": return input?.pattern || null;
-    case "Task": return input?.description || null;
-    case "WebFetch": return input?.url || null;
+  switch (name.toLowerCase()) {
+    case "bash": return input?.command || null;
+    case "read": case "write": case "edit": return input?.file_path || input?.path || null;
+    case "glob": case "grep": case "find": return input?.pattern || input?.path || null;
+    case "ls": return input?.path || null;
+    case "task": return input?.description || null;
+    case "webfetch": return input?.url || null;
     default: return null;
   }
 };
@@ -122,7 +129,33 @@ const getFileExtension = (filePath: string): string => {
 };
 
 /* ── Session Result ── */
-const SessionResult = ({ message }: { message: SDKResultMessage }) => {
+const SessionResult = ({ message }: { message: LegacyResultMessage | PiRunResultMessage }) => {
+  if (message.type === "run_result") {
+    const usage = message.usage;
+    const totalCost = usage?.cost?.total;
+    return (
+      <div className="flex flex-col gap-2 mt-4">
+        <div className="text-xs text-ink-500 uppercase tracking-wide font-semibold">Run Result</div>
+        <div className="flex flex-col rounded-xl px-4 py-3 border border-ink-900/10 bg-surface-secondary space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-[14px]">
+            <span className="font-normal">Status</span>
+            <span className="inline-flex items-center rounded-full bg-surface-tertiary px-2.5 py-0.5 text-ink-700 text-[13px]">
+              {message.status}
+            </span>
+            {typeof totalCost === "number" && (
+              <span className="inline-flex items-center rounded-full bg-primary/10 px-2.5 py-0.5 text-primary text-[13px]">
+                Cost ${totalCost.toFixed(4)}
+              </span>
+            )}
+          </div>
+          {message.error && (
+            <pre className="text-sm text-error whitespace-pre-wrap">{message.error}</pre>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   const formatMinutes = (ms: number | undefined) => typeof ms !== "number" ? "-" : `${(ms / 60000).toFixed(2)} min`;
   const formatUsd = (usd: number | undefined) => typeof usd !== "number" ? "-" : usd.toFixed(2);
   const formatMillions = (tokens: number | undefined) => typeof tokens !== "number" ? "-" : `${(tokens / 1_000_000).toFixed(4)} M`;
@@ -344,48 +377,56 @@ const GenericToolResult = ({ toolName, toolInfo, outputText, isError }: {
 };
 
 /* ── Tool Result (user message containing tool_result) ── */
-const ToolResult = ({ messageContent }: { messageContent: ToolResultBlock }) => {
+const ToolResult = ({
+  messageContent,
+  directToolName,
+}: {
+  messageContent: LegacyToolResultBlock | PiToolResultMessage;
+  directToolName?: string;
+}) => {
   const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
-  const toolUseId = messageContent.type === "tool_result" ? messageContent.tool_use_id : "";
+  const toolUseId =
+    "tool_use_id" in messageContent ? messageContent.tool_use_id : messageContent.toolUseId;
   const toolMeta = useAppStore((s) => toolUseId ? s.toolMeta[toolUseId] : undefined);
-  const isError = messageContent.type === "tool_result" && !!messageContent.is_error;
+  const isError = "is_error" in messageContent ? !!messageContent.is_error : !!("isError" in messageContent && messageContent.isError);
   const status: ToolStatus = isError ? "error" : "success";
 
   useEffect(() => { if (toolUseId) storeSetToolStatus(toolUseId, status); }, [toolUseId, status, storeSetToolStatus]);
 
-  if (messageContent.type !== "tool_result") return null;
-
-  const toolName = toolMeta?.name ?? "Tool";
+  const toolName = directToolName ?? toolMeta?.name ?? ("toolName" in messageContent ? messageContent.toolName : "Tool");
 
   // Suppress rendering for WorkflowPlan tool results (just "plan registered" text)
-  if (toolName.includes("WorkflowPlan")) return null;
+  if (toolName.toLowerCase().includes("workflow")) return null;
   const toolInfo = toolMeta?.info;
   const editData = toolMeta?.editData;
   const writeData = toolMeta?.writeData;
 
   // Parse output text
   let outputText = "";
-  if (messageContent.is_error) {
+  if ("content" in messageContent && typeof messageContent.content === "string") {
+    outputText = messageContent.content;
+  } else if ("is_error" in messageContent && messageContent.is_error) {
     outputText = extractTagContent(String(messageContent.content), "tool_use_error") || String(messageContent.content);
   } else {
     try {
-      if (Array.isArray(messageContent.content)) {
-        outputText = messageContent.content.map((item: any) => item.text || "").join("\n");
+      const legacyContent = (messageContent as LegacyToolResultBlock).content;
+      if (Array.isArray(legacyContent)) {
+        outputText = legacyContent.map((item: any) => item.text || "").join("\n");
       } else {
-        outputText = String(messageContent.content);
+        outputText = String(legacyContent);
       }
     } catch { outputText = JSON.stringify(messageContent, null, 2); }
   }
 
   return (
     <div className="mt-3">
-      {toolName === "Bash" ? (
+      {toolName.toLowerCase() === "bash" ? (
         <BashToolResult command={toolInfo ?? null} outputText={outputText} isError={isError} />
-      ) : toolName === "Edit" ? (
+      ) : toolName.toLowerCase() === "edit" ? (
         <EditToolResult filePath={toolInfo ?? null} editData={editData} outputText={outputText} isError={isError} />
-      ) : toolName === "Write" ? (
+      ) : toolName.toLowerCase() === "write" ? (
         <WriteToolResult filePath={toolInfo ?? null} writeData={writeData} outputText={outputText} isError={isError} />
-      ) : toolName === "Read" ? (
+      ) : toolName.toLowerCase() === "read" ? (
         <ReadToolResult filePath={toolInfo ?? null} outputText={outputText} isError={isError} />
       ) : (
         <GenericToolResult toolName={toolName} toolInfo={toolInfo ?? null} outputText={outputText} isError={isError} />
@@ -412,7 +453,7 @@ const AssistantTextBlock = ({ text, showIndicator = false }: { text: string; sho
 );
 
 /* ── WorkflowPlan Tool Use Card ── */
-const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AssistantContentBlock }) => {
+const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AnyAssistantContentBlock }) => {
   if (messageContent.type !== "tool_use") return null;
 
   const setToolMeta = useAppStore((s) => s.setToolMeta);
@@ -443,7 +484,7 @@ const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: Assistant
 };
 
 /* ── Tool Use Card (assistant side — pending state) ── */
-const ToolUseCard = ({ messageContent }: { messageContent: AssistantContentBlock }) => {
+const ToolUseCard = ({ messageContent }: { messageContent: AnyAssistantContentBlock }) => {
   if (messageContent.type !== "tool_use") return null;
 
   const toolStatus = useToolStatus(messageContent.id);
@@ -455,12 +496,12 @@ const ToolUseCard = ({ messageContent }: { messageContent: AssistantContentBlock
   const toolInfo = getToolInfo(messageContent.name, input);
 
   // Build edit data for Edit tool
-  const editData = messageContent.name === "Edit" && input?.file_path && input?.old_string && input?.new_string
+  const editData = messageContent.name.toLowerCase() === "edit" && input?.file_path && input?.old_string && input?.new_string
     ? { file_path: input.file_path, old_string: input.old_string, new_string: input.new_string }
     : undefined;
 
   // Build write data for Write tool
-  const writeData = messageContent.name === "Write" && input?.file_path && typeof input?.content === "string"
+  const writeData = messageContent.name.toLowerCase() === "write" && input?.file_path && typeof input?.content === "string"
     ? { file_path: input.file_path, content: input.content }
     : undefined;
 
@@ -481,7 +522,7 @@ const ToolUseCard = ({ messageContent }: { messageContent: AssistantContentBlock
       <Tool>
         <ToolHeader
           icon={getToolIcon(messageContent.name)}
-          title={messageContent.name === "Bash" ? "Shell" : messageContent.name}
+          title={messageContent.name.toLowerCase() === "bash" ? "Shell" : messageContent.name}
           description={toolInfo || undefined}
           state="running"
         />
@@ -496,9 +537,9 @@ const AskUserQuestionCard = ({
   permissionRequest,
   onPermissionResult
 }: {
-  messageContent: AssistantContentBlock;
+  messageContent: AnyAssistantContentBlock;
   permissionRequest?: PermissionRequest;
-  onPermissionResult?: (toolUseId: string, result: PermissionResult) => void;
+  onPermissionResult?: (toolUseId: string, result: AppPermissionResult) => void;
 }) => {
   if (messageContent.type !== "tool_use") return null;
 
@@ -532,10 +573,8 @@ const AskUserQuestionCard = ({
 };
 
 /* ── System Info Card ── */
-const SystemInfoCard = ({ message }: { message: SDKMessage }) => {
-  if (message.type !== "system" || !("subtype" in message) || message.subtype !== "init") return null;
-
-  const systemMsg = message as any;
+const LegacySystemInfoCard = ({ message }: { message: LegacySystemMessage }) => {
+  if (message.type !== "system" || message.subtype !== "init") return null;
 
   const InfoItem = ({ name, value }: { name: string; value: string }) => (
     <div className="text-[14px]">
@@ -548,10 +587,31 @@ const SystemInfoCard = ({ message }: { message: SDKMessage }) => {
     <div className="flex flex-col gap-2 mt-2">
       <span className="text-xs text-ink-500 uppercase tracking-wide font-semibold">System Init</span>
       <div className="flex flex-col rounded-xl px-4 py-2 border border-ink-900/10 bg-surface-secondary space-y-1">
-        <InfoItem name="Session ID" value={systemMsg.session_id || "-"} />
-        <InfoItem name="Model Name" value={systemMsg.model || "-"} />
-        <InfoItem name="Permission Mode" value={systemMsg.permissionMode || "-"} />
-        <InfoItem name="Working Directory" value={systemMsg.cwd || "-"} />
+        <InfoItem name="Session ID" value={message.session_id || "-"} />
+        <InfoItem name="Model Name" value={message.model || "-"} />
+        <InfoItem name="Permission Mode" value={message.permissionMode || "-"} />
+        <InfoItem name="Working Directory" value={message.cwd || "-"} />
+      </div>
+    </div>
+  );
+};
+
+const PiSystemInfoCard = ({ message }: { message: PiSystemInitMessage }) => {
+  const InfoItem = ({ name, value }: { name: string; value: string }) => (
+    <div className="text-[14px]">
+      <span className="mr-4 font-normal">{name}</span>
+      <span className="font-light">{value}</span>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-2 mt-2">
+      <span className="text-xs text-ink-500 uppercase tracking-wide font-semibold">System Init</span>
+      <div className="flex flex-col rounded-xl px-4 py-2 border border-ink-900/10 bg-surface-secondary space-y-1">
+        <InfoItem name="Session File" value={message.sessionFile || "-"} />
+        <InfoItem name="Model" value={message.model ? `${message.provider}/${message.model}` : "-"} />
+        <InfoItem name="Thinking" value={message.thinkingLevel || "-"} />
+        <InfoItem name="Working Directory" value={message.cwd || "-"} />
       </div>
     </div>
   );
@@ -602,7 +662,7 @@ export function MessageCard({
   isLast?: boolean;
   isRunning?: boolean;
   permissionRequest?: PermissionRequest;
-  onPermissionResult?: (toolUseId: string, result: PermissionResult) => void;
+  onPermissionResult?: (toolUseId: string, result: AppPermissionResult) => void;
   skipTaskToolUse?: boolean;
 }) {
   const showIndicator = isLast && isRunning;
@@ -623,41 +683,80 @@ export function MessageCard({
     return null;
   }
 
+  if (message.type === "system_init") {
+    return <PiSystemInfoCard message={message} />;
+  }
+
+  if (message.type === "tool_result") {
+    return <ToolResult messageContent={message} directToolName={message.toolName} />;
+  }
+
+  if (message.type === "run_result") {
+    return <SessionResult message={message} />;
+  }
+
   if (message.type === "node_completed") {
     return <NodeOutputSnippet message={message as NodeCompletedMessage} />;
   }
 
-  const sdkMessage = message as SDKMessage;
+  const legacyMessage = message as LegacyMessage;
 
-  if (sdkMessage.type === "system") {
-    return <SystemInfoCard message={sdkMessage} />;
+  if (legacyMessage.type === "system") {
+    return <LegacySystemInfoCard message={legacyMessage as LegacySystemMessage} />;
   }
 
-  if (sdkMessage.type === "result") {
-    if (sdkMessage.subtype === "success") {
-      return <SessionResult message={sdkMessage} />;
+  if (legacyMessage.type === "result") {
+    if ((legacyMessage as LegacyResultMessage).subtype === "success") {
+      return <SessionResult message={legacyMessage as LegacyResultMessage} />;
     }
     return (
       <div className="flex flex-col gap-2 mt-4">
         <div className="text-xs text-error uppercase tracking-wide font-semibold">Session Error</div>
         <div className="rounded-xl bg-error-light p-3">
-          <pre className="text-sm text-error whitespace-pre-wrap">{JSON.stringify(sdkMessage, null, 2)}</pre>
+          <pre className="text-sm text-error whitespace-pre-wrap">{JSON.stringify(legacyMessage, null, 2)}</pre>
         </div>
       </div>
     );
   }
 
-  if (sdkMessage.type === "assistant") {
-    let contents = sdkMessage.message.content;
+  if (message.type === "assistant" && "engine" in message && message.engine === "pi") {
+    const contents = message.blocks;
+    return (
+      <>
+        {contents.map((content, idx) => {
+          const isLastContent = idx === contents.length - 1;
+          if (content.type === "thinking") {
+            return <ThinkingBlock key={idx} text={content.thinking} isStreaming={isLastContent && showIndicator} />;
+          }
+          if (content.type === "text") {
+            return <AssistantTextBlock key={idx} text={content.text} showIndicator={isLastContent && showIndicator} />;
+          }
+          if (content.type === "tool_use") {
+            if (content.name === "ask_user_question") {
+              return <AskUserQuestionCard key={idx} messageContent={content} permissionRequest={permissionRequest} onPermissionResult={onPermissionResult} />;
+            }
+            if (content.name === "workflow_plan") {
+              return <WorkflowPlanToolUseCard key={idx} messageContent={content} />;
+            }
+            return <ToolUseCard key={idx} messageContent={content} />;
+          }
+          return null;
+        })}
+      </>
+    );
+  }
+
+  if (legacyMessage.type === "assistant") {
+    let contents = (legacyMessage as LegacyAssistantMessage).message.content;
     if (skipTaskToolUse) {
       contents = contents.filter(
-        (block: AssistantContentBlock) => !(block.type === "tool_use" && block.name === "Task")
+        (block) => !(block.type === "tool_use" && block.name === "Task")
       );
       if (contents.length === 0) return null;
     }
     return (
       <>
-        {contents.map((content: AssistantContentBlock, idx: number) => {
+        {contents.map((content, idx: number) => {
           const isLastContent = idx === contents.length - 1;
           if (content.type === "thinking") {
             return <ThinkingBlock key={idx} text={content.thinking} isStreaming={isLastContent && showIndicator} />;
@@ -680,11 +779,11 @@ export function MessageCard({
     );
   }
 
-  if (sdkMessage.type === "user") {
-    const contents = sdkMessage.message.content;
+  if (legacyMessage.type === "user") {
+    const contents = (legacyMessage as LegacyUserMessage).message.content;
     return (
       <>
-        {contents.map((content: ToolResultBlock, idx: number) => {
+        {contents.map((content, idx: number) => {
           if (content.type === "tool_result") {
             return <ToolResult key={idx} messageContent={content} />;
           }

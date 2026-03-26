@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ServerEvent, SessionStatus, StreamMessage, NodeCompletedMessage, WorkflowNode } from "../types";
+import type { NodeCompletedMessage, ServerEvent, SessionEngine, SessionStatus, StreamMessage, WorkflowNode } from "../types";
 import {
   clearAllPendingWorkflowAutoAdvance,
   clearPendingWorkflowAutoAdvance,
@@ -32,6 +32,7 @@ export type SessionView = {
   id: string;
   title: string;
   status: SessionStatus;
+  engine?: SessionEngine;
   cwd?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
@@ -265,6 +266,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             ...existing,
             status: session.status,
             title: session.title ?? existing.title,
+            engine: session.engine,
             cwd: session.cwd,
             workflowTree: session.workflowTree ?? existing.workflowTree,
             verificationDepth: session.verificationDepth ?? existing.verificationDepth,
@@ -318,7 +320,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, workflowTree, verificationDepth, title } = event.payload;
+        const { sessionId, messages, status, workflowTree, verificationDepth, title, engine } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -327,6 +329,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               [sessionId]: {
                 ...existing,
                 status,
+                engine: engine ?? existing.engine,
                 messages,
                 ...(workflowTree !== undefined && { workflowTree }),
                 ...(verificationDepth !== undefined && { verificationDepth }),

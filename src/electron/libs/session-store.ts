@@ -1,6 +1,12 @@
 import Database from "better-sqlite3";
 import { z } from "zod";
-import type { SessionStatus, StreamMessage, WorkflowNode } from "../types.js";
+import type {
+  AppPermissionResult,
+  SessionEngine,
+  SessionStatus,
+  StreamMessage,
+  WorkflowNode,
+} from "../types.js";
 import { migrateFromFlatSteps } from "./workflow-tree-utils.js";
 
 // ── Zod schemas for JSON columns ──────────────────────────────────────
@@ -20,7 +26,12 @@ const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
     children: z.array(workflowNodeSchema),
     status: z.enum(["pending", "running", "completed", "error"]),
     depth: z.number(),
-    resumePoint: z.object({ uuid: z.string(), claudeSessionId: z.string() }).optional(),
+    resumePoint: z
+      .union([
+        z.object({ entryId: z.string() }),
+        z.object({ uuid: z.string(), claudeSessionId: z.string() }),
+      ])
+      .optional(),
     originalOutputs: z
       .array(
         z.object({
@@ -62,13 +73,15 @@ export type PendingPermission = {
   toolUseId: string;
   toolName: string;
   input: unknown;
-  resolve: (result: { behavior: "allow" | "deny"; updatedInput?: unknown; message?: string }) => void;
+  resolve: (result: AppPermissionResult) => void;
 };
 
 export type Session = {
   id: string;
   title: string;
+  engine: SessionEngine;
   claudeSessionId?: string;
+  piSessionFile?: string;
   status: SessionStatus;
   cwd?: string;
   allowedTools?: string;
@@ -83,10 +96,12 @@ export type StoredSession = {
   id: string;
   title: string;
   status: SessionStatus;
+  engine: SessionEngine;
   cwd?: string;
   allowedTools?: string;
   lastPrompt?: string;
   claudeSessionId?: string;
+  piSessionFile?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
   createdAt: number;
@@ -108,12 +123,19 @@ export class SessionStore {
     this.loadSessions();
   }
 
-  createSession(options: { cwd?: string; allowedTools?: string; prompt?: string; title: string }): Session {
+  createSession(options: {
+    cwd?: string;
+    allowedTools?: string;
+    prompt?: string;
+    title: string;
+    engine?: SessionEngine;
+  }): Session {
     const id = crypto.randomUUID();
     const now = Date.now();
     const session: Session = {
       id,
       title: options.title,
+      engine: options.engine ?? "pi",
       status: "idle",
       cwd: options.cwd,
       allowedTools: options.allowedTools,
@@ -126,13 +148,15 @@ export class SessionStore {
     this.db
       .prepare(
         `insert into sessions
-          (id, title, claude_session_id, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
         session.title,
+        session.engine,
         session.claudeSessionId ?? null,
+        session.piSessionFile ?? null,
         session.status,
         session.cwd ?? null,
         session.allowedTools ?? null,
@@ -152,7 +176,7 @@ export class SessionStore {
   listSessions(): StoredSession[] {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt,
+        `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
                 workflow_tree, verification_depth, steps, verification_criteria, output_files,
                 completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
@@ -180,10 +204,12 @@ export class SessionStore {
         id,
         title: String(row.title),
         status: row.status as SessionStatus,
+        engine: row.engine ? (String(row.engine) as SessionEngine) : "legacy-claude",
         cwd: row.cwd ? String(row.cwd) : undefined,
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
+        piSessionFile: row.pi_session_file ? String(row.pi_session_file) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
         createdAt: Number(row.created_at),
@@ -209,7 +235,7 @@ export class SessionStore {
   getSessionHistory(id: string): SessionHistory | null {
     const sessionRow = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt,
+        `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
                 workflow_tree, verification_depth, steps, verification_criteria, output_files,
                 completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
@@ -245,10 +271,12 @@ export class SessionStore {
         id: String(sessionRow.id),
         title: String(sessionRow.title),
         status: sessionRow.status as SessionStatus,
+        engine: sessionRow.engine ? (String(sessionRow.engine) as SessionEngine) : "legacy-claude",
         cwd: sessionRow.cwd ? String(sessionRow.cwd) : undefined,
         allowedTools: sessionRow.allowed_tools ? String(sessionRow.allowed_tools) : undefined,
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
         claudeSessionId: sessionRow.claude_session_id ? String(sessionRow.claude_session_id) : undefined,
+        piSessionFile: sessionRow.pi_session_file ? String(sessionRow.pi_session_file) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: sessionRow.verification_depth != null ? Number(sessionRow.verification_depth) : 0,
         createdAt: Number(sessionRow.created_at),
@@ -272,9 +300,12 @@ export class SessionStore {
     session.abortController = controller;
   }
 
-  /** Inserts message row; returns message id. Optional JSON snapshot is written via ``writeMessageSnapshot`` after side effects (e.g. workflow updates). */
+  /** Inserts message row; returns the row id for optional snapshot writes. */
   recordMessage(sessionId: string, message: StreamMessage): string {
-    const id = "uuid" in message && message.uuid ? String(message.uuid) : crypto.randomUUID();
+    const id =
+      ("uuid" in message && typeof message.uuid === "string" && message.uuid) ||
+      ("id" in message && typeof message.id === "string" && message.id) ||
+      crypto.randomUUID();
     this.db
       .prepare(
         `insert or ignore into messages (id, session_id, data, created_at, state_snapshot) values (?, ?, ?, ?, ?)`
@@ -291,6 +322,23 @@ export class SessionStore {
     this.db
       .prepare(`update messages set state_snapshot = ? where id = ?`)
       .run(JSON.stringify(snapshot), messageId);
+  }
+
+  replaceMessages(sessionId: string, messages: StreamMessage[]): void {
+    const tx = this.db.transaction((items: StreamMessage[]) => {
+      this.db.prepare(`delete from messages where session_id = ?`).run(sessionId);
+      const insert = this.db.prepare(
+        `insert into messages (id, session_id, data, created_at) values (?, ?, ?, ?)`
+      );
+      for (const message of items) {
+        const id =
+          ("uuid" in message && typeof message.uuid === "string" && message.uuid) ||
+          ("id" in message && typeof message.id === "string" && message.id) ||
+          crypto.randomUUID();
+        insert.run(id, sessionId, JSON.stringify(message), Date.now());
+      }
+    });
+    tx(messages);
   }
 
   deleteSession(id: string): boolean {
@@ -340,7 +388,9 @@ export class SessionStore {
     const values: Array<string | number | null> = [];
     const updatable = {
       title: "title",
+      engine: "engine",
       claudeSessionId: "claude_session_id",
+      piSessionFile: "pi_session_file",
       status: "status",
       cwd: "cwd",
       allowedTools: "allowed_tools",
@@ -380,7 +430,9 @@ export class SessionStore {
       `create table if not exists sessions (
         id text primary key,
         title text,
+        engine text,
         claude_session_id text,
+        pi_session_file text,
         status text not null,
         cwd text,
         allowed_tools text,
@@ -399,8 +451,11 @@ export class SessionStore {
     try { this.db.exec(`alter table sessions add column verifier_marks text`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column step_resume_points text`); } catch { /* exists */ }
     // New columns
+    try { this.db.exec(`alter table sessions add column engine text`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column workflow_tree text`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column verification_depth integer default 0`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column pi_session_file text`); } catch { /* exists */ }
+    try { this.db.exec(`update sessions set engine = 'legacy-claude' where engine is null or trim(engine) = ''`); } catch { /* ignore */ }
 
     this.db.exec(
       `create table if not exists messages (
@@ -422,7 +477,7 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, claude_session_id, status, cwd, allowed_tools, last_prompt,
+        `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
                 workflow_tree, verification_depth, steps, verification_criteria, output_files,
                 verifier_marks, completed_step_indices
          from sessions`
@@ -446,7 +501,9 @@ export class SessionStore {
       const session: Session = {
         id: String(row.id),
         title: String(row.title),
+        engine: row.engine ? (String(row.engine) as SessionEngine) : "legacy-claude",
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
+        piSessionFile: row.pi_session_file ? String(row.pi_session_file) : undefined,
         status: row.status as SessionStatus,
         cwd: row.cwd ? String(row.cwd) : undefined,
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
