@@ -32,6 +32,7 @@ import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
 import {
   buildEditVerifierSnapshot,
   buildExportEnvironmentSnapshot,
+  buildFileEditEnvironmentSnapshot,
   shouldWriteSnapshotForSdkMessage,
 } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
@@ -923,6 +924,20 @@ export function handleClientEvent(event: ClientEvent) {
     }
     return;
   }
+}
+
+/** Called from main after a successful preview-panel ``write-file`` (user edited an output file on disk). */
+export function recordFileEditAfterPreviewSave(sessionId: string, editedRelPath: string): void {
+  const store = initializeSessions();
+  const sess = store.getSession(sessionId);
+  if (!sess) return;
+  const pathNorm = editedRelPath.replace(/\\/g, "/");
+  const rowId = store.recordMessage(sessionId, { type: "file_edit", path: pathNorm });
+  store.writeMessageSnapshot(rowId, buildFileEditEnvironmentSnapshot(sess));
+  broadcast({
+    type: "stream.message",
+    payload: { sessionId, message: { type: "file_edit", path: pathNorm } },
+  });
 }
 
 export function cleanupAllSessions(): void {

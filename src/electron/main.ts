@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, globalShortcut, Menu, shell } from "electron"
 import { execSync } from "child_process";
 import { readFile, writeFile, mkdir, copyFile } from "fs/promises";
-import { resolve, isAbsolute, basename, join } from "path";
+import { resolve, isAbsolute, basename, join, relative } from "path";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import * as XLSX from "xlsx";
@@ -9,7 +9,7 @@ import * as XLSX from "xlsx";
 import { ipcMainHandle, isDev, DEV_PORT } from "./util.js";
 import { getPreloadPath, getUIPath, getIconPath } from "./pathResolver.js";
 import { getStaticData, pollResources, stopPolling } from "./test.js";
-import { handleClientEvent, sessions, cleanupAllSessions } from "./ipc-handlers.js";
+import { handleClientEvent, sessions, cleanupAllSessions, recordFileEditAfterPreviewSave } from "./ipc-handlers.js";
 import { generateSessionTitle } from "./libs/util.js";
 import { saveApiConfig } from "./libs/config-store.js";
 import { getCurrentApiConfig } from "./libs/claude-settings.js";
@@ -456,23 +456,49 @@ app.on("ready", () => {
         }
     });
 
-    ipcMainHandle("write-file", async (_: any, filePath: string, cwd?: string | null, content?: string) => {
-        try {
-            if (!filePath || typeof filePath !== "string") {
-                return { success: false, error: "Invalid file path" };
+    ipcMainHandle(
+        "write-file",
+        async (
+            _: any,
+            filePath: string,
+            cwd?: string | null,
+            content?: string,
+            sessionId?: string | null
+        ) => {
+            try {
+                if (!filePath || typeof filePath !== "string") {
+                    return { success: false, error: "Invalid file path" };
+                }
+                if (typeof content !== "string") {
+                    return { success: false, error: "Invalid content" };
+                }
+                const base = cwd && typeof cwd === "string" ? cwd : process.cwd();
+                const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
+                await writeFile(resolved, content, "utf8");
+                const sid = typeof sessionId === "string" ? sessionId.trim() : "";
+                if (sid) {
+                    let relPath = filePath;
+                    if (!isAbsolute(filePath)) {
+                        relPath = filePath.replace(/\\/g, "/");
+                    } else if (base) {
+                        try {
+                            const r = relative(resolve(base), resolved);
+                            if (r && !r.startsWith("..") && !isAbsolute(r)) {
+                                relPath = r.replace(/\\/g, "/");
+                            }
+                        } catch {
+                            /* keep filePath */
+                        }
+                    }
+                    recordFileEditAfterPreviewSave(sid, relPath);
+                }
+                return { success: true };
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                return { success: false, error: message };
             }
-            if (typeof content !== "string") {
-                return { success: false, error: "Invalid content" };
-            }
-            const base = (cwd && typeof cwd === "string") ? cwd : process.cwd();
-            const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
-            await writeFile(resolved, content, "utf8");
-            return { success: true };
-        } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            return { success: false, error: message };
         }
-    });
+    );
 
     ipcMainHandle("show-item-in-folder", async (_: any, filePath: string, cwd?: string | null) => {
         try {

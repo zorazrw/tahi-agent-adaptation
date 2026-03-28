@@ -23,9 +23,9 @@ The first trajectory step is always the user ``message({initial query})``; like 
 are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
-Sidebar edits: step tree / descriptions / outputs → user ``edit_workflow()`` with full ``environment.workflow``
-+ ``file``; verifier criterion text or human check/cross status only → ``edit_verifier()`` with
-``environment.verifier`` + ``file`` (same IPC path, different snapshot shape).
+Sidebar edits: step tree / descriptions / outputs → ``edit_workflow()`` (``workflow`` + ``file``);
+verifier-only → ``edit_verifier()`` (``verifier`` + ``file``). Preview panel save → ``file_edit("path")``
+with ``environment.file`` only (all tracked output files after the write).
 
 Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, and output files)
 comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
@@ -565,8 +565,7 @@ def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
     """Return (environment dict, True if taken from persisted ``state_snapshot`` on this message)."""
     snap = norm.get("state_snapshot")
     if isinstance(snap, dict) and "file" in snap:
-        if "workflow" in snap or "verifier" in snap:
-            return snap, True
+        return snap, True
     return default_env, False
 
 
@@ -691,6 +690,15 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
+        if m.get("type") == "file_edit":
+            step_env, _snap = environment_for_norm(m, final_env)
+            p_raw = m.get("path", "")
+            p = str(p_raw) if p_raw is not None else ""
+            act = f"file_edit({json.dumps(p, ensure_ascii=False)})"
+            traj.append(trajectory_row("user", act, step_env))
+            idx += 1
+            continue
+
         if m.get("role") == "user":
             u_env, _u_snap = environment_for_norm(m, final_env)
             traj.append(trajectory_row("user", describe_human_action(m), u_env))
@@ -770,6 +778,14 @@ def build_slice_trajectory(
             if m.get("type") == "edit_verifier":
                 step_env, _snap = environment_for_norm(m, final_env)
                 traj.append(trajectory_row("user", "edit_verifier()", step_env))
+                idx += 1
+                continue
+            if m.get("type") == "file_edit":
+                step_env, _snap = environment_for_norm(m, final_env)
+                p_raw = m.get("path", "")
+                p = str(p_raw) if p_raw is not None else ""
+                act = f"file_edit({json.dumps(p, ensure_ascii=False)})"
+                traj.append(trajectory_row("user", act, step_env))
                 idx += 1
                 continue
             u_env, _u_snap = environment_for_norm(m, final_env)
@@ -972,6 +988,8 @@ def normalize_message(msg: dict) -> dict:
         return {"role": "user", "type": "edit_workflow"}
     if msg.get("type") == "edit_verifier":
         return {"role": "user", "type": "edit_verifier"}
+    if msg.get("type") == "file_edit":
+        return {"role": "user", "type": "file_edit", "path": msg.get("path", "")}
     if msg.get("type") == "verifier_label":
         return {
             "role": "agent",

@@ -108,6 +108,7 @@ function getCopyableContent(result: PreviewFileResult | null): string | null {
 type FilePreviewProps = {
   filePath: string | null;
   cwd?: string | null;
+  sessionId?: string | null;
   stepCompleted?: boolean;
 };
 
@@ -115,7 +116,7 @@ const ZOOM_STEP = 0.1;
 const ZOOM_MIN = 0.3;
 const ZOOM_MAX = 2.0;
 
-export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) {
+export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePreviewProps) {
   const [result, setResult] = useState<PreviewFileResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [zoom, setZoom] = useState(0.6);
@@ -231,6 +232,7 @@ export function FilePreview({ filePath, cwd, stepCompleted }: FilePreviewProps) 
             zoom={showZoom ? zoom : undefined}
             filePath={filePath}
             cwd={cwd ?? undefined}
+            sessionId={sessionId ?? undefined}
             onReload={() => setRefreshKey((k) => k + 1)}
           />
         )}

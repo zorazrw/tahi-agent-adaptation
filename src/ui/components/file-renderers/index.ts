@@ -15,6 +15,8 @@ import { AudioRenderer } from "./AudioRenderer";
 export type EditableRendererProps = {
   filePath?: string;
   cwd?: string | null;
+  /** When set, successful saves record a ``file_edit`` message for this task session. */
+  sessionId?: string | null;
   onReload?: () => void;
 };
 

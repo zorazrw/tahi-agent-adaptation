@@ -12,7 +12,7 @@ import { EditableTextPanel } from "./EditableTextPanel";
 
 type Props = { data: { kind: "md"; content: string } } & EditableRendererProps;
 
-export function MarkdownRenderer({ data, filePath, cwd, onReload }: Props) {
+export function MarkdownRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
   const [mode, setMode] = useViewToggle("preview");
   const codeRef = useRef<HTMLElement>(null);
   const canEdit = Boolean(filePath && onReload);
@@ -64,7 +64,7 @@ export function MarkdownRenderer({ data, filePath, cwd, onReload }: Props) {
           monospace={false}
           onSave={async (content) => {
             setEditContent(content);
-            return window.electron.writeFile(filePath!, cwd ?? undefined, content);
+            return window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined);
           }}
           onSaved={onReload}
         />

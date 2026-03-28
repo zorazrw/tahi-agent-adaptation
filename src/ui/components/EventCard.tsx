@@ -615,7 +615,11 @@ export function MessageCard({
     return null;
   }
 
-  if (message.type === "edit_workflow" || message.type === "edit_verifier") {
+  if (
+    message.type === "edit_workflow" ||
+    message.type === "edit_verifier" ||
+    message.type === "file_edit"
+  ) {
     return null;
   }
 

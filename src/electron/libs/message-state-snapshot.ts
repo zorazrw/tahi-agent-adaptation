@@ -206,6 +206,19 @@ export function buildEditVerifierSnapshot(session: Session): EditVerifierEnviron
   return { verifier: verifierTreeForExport(tree), file: files };
 }
 
+/** After a preview-panel save: same ``file`` array as full export (workflow output paths + disk/original content). */
+export type FileEditEnvironmentSnapshot = {
+  file: ReturnType<typeof buildOutputFileEntries>;
+};
+
+export function buildFileEditEnvironmentSnapshot(session: Session): FileEditEnvironmentSnapshot {
+  const tree = session.workflowTree ?? [];
+  const relPaths = orderedOutputRelPathsFromTree(tree);
+  const originals = collectOriginalOutputsMap(tree);
+  const files = buildOutputFileEntries(session.cwd, relPaths, originals);
+  return { file: files };
+}
+
 /** Whether to persist a snapshot for this SDK message (per meaningful agent turn / tool outcome). */
 export function shouldWriteSnapshotForSdkMessage(message: { type?: string }): boolean {
   const t = message.type;

@@ -420,6 +420,7 @@ function App() {
               <div className="flex flex-col h-full">
                 <ErrorBoundary>
                   <FilePreview
+                    sessionId={activeSessionId}
                     filePath={(() => {
                       if (!selectedNodeId || !activeSession?.workflowTree) return null;
                       const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {

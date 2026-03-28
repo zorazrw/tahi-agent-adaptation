@@ -6,7 +6,7 @@ import { EditableTextPanel } from "./EditableTextPanel";
 
 type Props = { data: { kind: "html"; content: string } } & EditableRendererProps;
 
-export function HtmlRenderer({ data, filePath, cwd, onReload }: Props) {
+export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
   const [mode, setMode] = useViewToggle("preview");
   const codeRef = useRef<HTMLElement>(null);
   const canEdit = Boolean(filePath && onReload);
@@ -46,7 +46,7 @@ export function HtmlRenderer({ data, filePath, cwd, onReload }: Props) {
           monospace
           onSave={async (content) => {
             setEditContent(content);
-            return window.electron.writeFile(filePath!, cwd ?? undefined, content);
+            return window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined);
           }}
           onSaved={onReload}
         />

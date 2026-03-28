@@ -48,6 +48,7 @@ export function CsvRenderer({
   data,
   filePath,
   cwd,
+  sessionId,
   onReload,
 }: { data: { kind: "csv"; content: string } } & EditableRendererProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("table");
@@ -76,7 +77,7 @@ export function CsvRenderer({
           contentKey={data.content}
           monospace
           onSave={async (content) =>
-            window.electron.writeFile(filePath!, cwd ?? undefined, content)
+            window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
           }
           onSaved={onReload}
         />

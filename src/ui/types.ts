@@ -36,13 +36,16 @@ export type EditWorkflowMessage = { type: "edit_workflow" };
 
 export type EditVerifierMessage = { type: "edit_verifier" };
 
+export type FileEditMessage = { type: "file_edit"; path: string };
+
 export type StreamMessage =
   | SDKMessage
   | UserPromptMessage
   | NodeCompletedMessage
   | VerifierLabelMessage
   | EditWorkflowMessage
-  | EditVerifierMessage;
+  | EditVerifierMessage
+  | FileEditMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 

@@ -90,8 +90,8 @@ function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<v
  * Includes all workflow levels so --task-unit-id matches nodes solved in detail mode.
  * Export JSON shape: `{ uuid, name, trajectory }` where each step has
  * `actor` ("user" | "agent"), `action` (e.g. tools, `message`, `verify`, `edit_workflow()`, `edit_verifier()`),
- * optional `tool_result`, and `environment` when present (`workflow` + `file` for ``edit_workflow()``,
- * or `verifier` + `file` for sidebar ``edit_verifier()``).
+ * optional `tool_result`, and `environment` when present (e.g. ``edit_workflow`` / ``edit_verifier``,
+ * or ``file_edit`` with `file` only after preview saves).
  */
 export function runExportAndExtractContext(sessionId: string, taskUnitId: string): void {
   const root = scriptsRootDir();

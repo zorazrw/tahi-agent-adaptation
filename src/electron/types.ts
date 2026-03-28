@@ -33,12 +33,16 @@ export type EditWorkflowMessage = { type: "edit_workflow" };
 /** User edited verifier lines or marks only (same tree skeleton). */
 export type EditVerifierMessage = { type: "edit_verifier" };
 
+/** User saved an output/intermediate file from the preview panel (path is relative to session cwd when possible). */
+export type FileEditMessage = { type: "file_edit"; path: string };
+
 export type StreamMessage =
   | SDKMessage
   | UserPromptMessage
   | VerifierLabelMessage
   | EditWorkflowMessage
-  | EditVerifierMessage;
+  | EditVerifierMessage
+  | FileEditMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 

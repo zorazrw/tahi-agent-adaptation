@@ -37,8 +37,8 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("check-api-config"),
     previewFile: (filePath: string, cwd?: string | null) =>
         ipcInvoke("preview-file", filePath, cwd ?? undefined),
-    writeFile: (filePath: string, cwd?: string | null, content?: string) =>
-        ipcInvoke("write-file", filePath, cwd ?? undefined, content ?? ""),
+    writeFile: (filePath: string, cwd?: string | null, content?: string, sessionId?: string | null) =>
+        ipcInvoke("write-file", filePath, cwd ?? undefined, content ?? "", sessionId ?? undefined),
     listSkills: () =>
         ipcInvoke("list-skills"),
     removeSkill: (dirName: string) =>

@@ -9,6 +9,7 @@ export function JsonRenderer({
   data,
   filePath,
   cwd,
+  sessionId,
   onReload,
 }: { data: { kind: "json"; content: string } } & EditableRendererProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("tree");
@@ -43,7 +44,7 @@ export function JsonRenderer({
           contentKey={data.content}
           monospace
           onSave={async (content) =>
-            window.electron.writeFile(filePath!, cwd ?? undefined, content)
+            window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
           }
           onSaved={onReload}
         />
@@ -72,7 +73,7 @@ export function JsonRenderer({
             contentKey={data.content}
             monospace
             onSave={async (content) =>
-              window.electron.writeFile(filePath!, cwd ?? undefined, content)
+              window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
             }
             onSaved={onReload}
           />

@@ -86,7 +86,12 @@ interface Window {
         saveApiConfig: (config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" }) => Promise<{ success: boolean; error?: string }>;
         checkApiConfig: () => Promise<{ hasConfig: boolean; config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null }>;
         previewFile: (filePath: string, cwd?: string | null) => Promise<PreviewFileResult>;
-        writeFile: (filePath: string, cwd?: string | null, content?: string) => Promise<{ success: boolean; error?: string }>;
+        writeFile: (
+            filePath: string,
+            cwd?: string | null,
+            content?: string,
+            sessionId?: string | null
+        ) => Promise<{ success: boolean; error?: string }>;
         listSkills: () => Promise<SkillInfo[]>;
         removeSkill: (dirName: string) => Promise<{ success: boolean; error?: string }>;
         getSkillContent: (path: string) => Promise<{ content: string } | { error: string }>;
