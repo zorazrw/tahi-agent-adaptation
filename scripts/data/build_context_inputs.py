@@ -106,7 +106,14 @@ def build_export_trajectory_text(trajectory: list[dict]) -> str:
     for step in trajectory:
         actor = step.get("actor", "?")
         action = step.get("action", "")
-        lines.append(f"[{actor}] {action}")
+        line = f"[{actor}] {action}"
+        tr = step.get("tool_result")
+        if isinstance(tr, str) and tr.strip():
+            obs = tr.strip()
+            if len(obs) > MAX_OBSERVATION_CHARS:
+                obs = obs[:MAX_OBSERVATION_CHARS] + "…"
+            line = f"{line}\n[{actor}] tool_result: {obs}"
+        lines.append(line)
     return "\n".join(lines)
 
 

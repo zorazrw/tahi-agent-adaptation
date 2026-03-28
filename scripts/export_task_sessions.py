@@ -9,19 +9,18 @@ Each exported session is:
     "trajectory": [
       {
         "actor": "user" | "agent",
-        "action": str,   # e.g. message("..."), plan("..."), tool calls, results
-        "environment": {
-          "workflow": tree of nodes; each node ``verifiers`` is
-            [ { "criterion": str, "status": "success" | "failure" }, ... ],
-          "file": [] before plan; after ``plan(...)``, object mapping each expected output path to ``null``
-          (e.g. ``{"report.md": null}``); later steps use a list of ``{path, content, ...}`` entries.
-        },
+        "action": str,
+        "tool_result": optional str; present when the SDK tool outcome was merged into the prior tool-call step,
+        "environment": { ... }  # omitted only for agent steps that are a single ``message("…")`` (no `` | ``)
       },
       ...
     ],
   }
 
 The first trajectory step is always the user ``message({initial query})`` with empty ``environment``.
+``user_prompt`` rows that are backend-built node instructions (``Proceed with: …`` + ``Task:``)
+are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
+as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 The second is always the agent ``plan({initial query})``; its ``environment`` has the workflow tree
 (with every step ``status`` ``pending``, not DB completion state); each verifier is
 ``{"criterion", "status": "failure"}``; ``file`` maps paths to ``null``.
@@ -447,7 +446,7 @@ def describe_agent_action(norm: dict) -> str:
             if block.get("type") == "text":
                 txt = block.get("text", "")
                 if isinstance(txt, str) and txt.strip():
-                    parts.append(f"assistant_text({json.dumps(txt, ensure_ascii=False)})")
+                    parts.append(f"message({json.dumps(txt, ensure_ascii=False)})")
             elif block.get("type") == "tool_use":
                 name = block.get("name", "?")
                 inp = block.get("input", {})
@@ -471,8 +470,116 @@ def describe_agent_action(norm: dict) -> str:
     return str(t or "agent_event")
 
 
+def _assistant_message_has_tool_use(m: dict) -> bool:
+    """True if normalized message is an ``assistant`` SDK turn that includes at least one ``tool_use``."""
+    if m.get("role") != "agent":
+        return False
+    raw = m.get("raw")
+    if not isinstance(raw, dict) or raw.get("type") != "assistant":
+        return False
+    for block in (raw.get("message") or {}).get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            return True
+    return False
+
+
+def _assistant_text_only_payload(m: dict) -> Optional[str]:
+    """
+    If this normalized agent message is an ``assistant`` SDK message with only text blocks (no
+    ``tool_use``), return the combined prose; otherwise None.
+    """
+    if m.get("role") != "agent":
+        return None
+    raw = m.get("raw")
+    if not isinstance(raw, dict) or raw.get("type") != "assistant":
+        return None
+    texts: List[str] = []
+    for block in (raw.get("message") or {}).get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use":
+            return None
+        if block.get("type") == "text":
+            t = block.get("text", "")
+            if isinstance(t, str) and t.strip():
+                texts.append(t.strip())
+    if not texts:
+        return None
+    return "\n\n".join(texts) if len(texts) > 1 else texts[0]
+
+
+def _result_success_string_payload(m: dict) -> Optional[str]:
+    """If this is a successful ``result`` message whose payload is a plain string, return it."""
+    if m.get("role") != "agent":
+        return None
+    raw = m.get("raw")
+    if not isinstance(raw, dict) or raw.get("type") != "result":
+        return None
+    if raw.get("subtype") != "success":
+        return None
+    r = raw.get("result")
+    if isinstance(r, str):
+        return r
+    return None
+
+
+def agent_export_action(msgs: List[dict], idx: int) -> Tuple[str, int]:
+    """
+    Serialized agent step. When an ``assistant`` text-only turn is immediately followed by a
+    ``result(success)`` whose string payload matches the same prose (SDK duplicates the text in the
+    envelope), emit a single ``message("…")`` and skip the result row (environment is unchanged).
+    Returns ``(action, extra_skip)`` where ``extra_skip`` is 0 or 1.
+    """
+    m = msgs[idx]
+    atext = _assistant_text_only_payload(m)
+    if atext is not None and idx + 1 < len(msgs):
+        nxt = msgs[idx + 1]
+        rtext = _result_success_string_payload(nxt)
+        if rtext is not None and (atext.strip() == rtext.strip()):
+            return (f"message({json.dumps(atext, ensure_ascii=False)})", 1)
+    return (describe_agent_action(m), 0)
+
+
+def _agent_step_omits_environment(action: str) -> bool:
+    """Omit env only for a prose-only step (single ``message("…")``, no tool segment)."""
+    return action.startswith("message(") and " | " not in action
+
+
+def trajectory_row(
+    actor: str,
+    action: str,
+    environment: dict,
+    *,
+    tool_result: Optional[str] = None,
+) -> dict:
+    """
+    Build one trajectory object. Agent steps that are only ``message("…")`` omit ``environment``;
+    tool calls, ``message | Tool``, and any step with ``tool_result`` keep ``environment``.
+    """
+    row: Dict[str, Any] = {"actor": actor, "action": action}
+    if tool_result is not None:
+        row["tool_result"] = tool_result
+    if not (actor == "agent" and _agent_step_omits_environment(action)):
+        row["environment"] = environment
+    return row
+
+
 def _prompts_equal(a: str, b: str) -> bool:
     return (a or "").strip() == (b or "").strip()
+
+
+def is_backend_node_user_prompt(prompt: Any) -> bool:
+    """
+    True when this ``user_prompt`` is the app's node-solving instruction (``buildPromptForNode``),
+    persisted for the LM — not text the human typed in the UI.
+    """
+    if not isinstance(prompt, str):
+        return False
+    p = prompt.strip()
+    if not p.startswith("Proceed with: "):
+        return False
+    # Matches electron ``buildPromptForNode``: … path … \\n\\nTask: …
+    return "\n\nTask: " in p
 
 
 def build_full_session_trajectory(
@@ -508,56 +615,58 @@ def build_full_session_trajectory(
     )
 
     traj: List[dict] = [
-        {
-            "actor": "user",
-            "action": f"message({json.dumps(initial_query, ensure_ascii=False)})",
-            "environment": empty_env,
-        },
-        {
-            "actor": "agent",
-            "action": f"plan({json.dumps(initial_query, ensure_ascii=False)})",
-            "environment": plan_env,
-        },
+        trajectory_row("user", f"message({json.dumps(initial_query, ensure_ascii=False)})", empty_env),
+        trajectory_row("agent", f"plan({json.dumps(initial_query, ensure_ascii=False)})", plan_env),
     ]
 
     consumed_initial_user = False
     pending_skip_tool_result = False
-
-    for m in msgs:
+    idx = 0
+    while idx < len(msgs):
+        m = msgs[idx]
         if m.get("role") == "user" and m.get("type") == "user_prompt":
             prompt = m.get("prompt", "")
             if isinstance(prompt, str) and _prompts_equal(prompt, initial_query) and not consumed_initial_user:
                 consumed_initial_user = True
+                idx += 1
+                continue
+            if is_backend_node_user_prompt(prompt):
+                idx += 1
                 continue
 
         raw = m.get("raw") if isinstance(m.get("raw"), dict) else {}
         if m.get("role") == "agent" and raw_has_workflow_tool(raw):
             pending_skip_tool_result = True
+            idx += 1
             continue
 
         if pending_skip_tool_result and m.get("role") == "agent" and is_tool_result_message(m):
             pending_skip_tool_result = False
+            idx += 1
             continue
         pending_skip_tool_result = False
 
         if m.get("role") == "user":
-            traj.append({
-                "actor": "user",
-                "action": describe_human_action(m),
-                "environment": final_env,
-            })
+            traj.append(trajectory_row("user", describe_human_action(m), final_env))
         elif m.get("role") == "agent":
-            traj.append({
-                "actor": "agent",
-                "action": describe_agent_action(m),
-                "environment": final_env,
-            })
+            action, extra = agent_export_action(msgs, idx)
+            consume = 1 + extra
+            merged_tool: Optional[str] = None
+            if _assistant_message_has_tool_use(m):
+                tail_i = idx + consume
+                if tail_i < len(msgs) and is_tool_result_message(msgs[tail_i]):
+                    tr_raw = msgs[tail_i].get("raw")
+                    if isinstance(tr_raw, dict):
+                        merged_tool = _tool_result_blob(tr_raw)
+                    consume += 1
+            traj.append(trajectory_row("agent", action, final_env, tool_result=merged_tool))
+            idx += consume
+            continue
         else:
-            traj.append({
-                "actor": "user",
-                "action": json.dumps(m, ensure_ascii=False, default=str)[:400],
-                "environment": final_env,
-            })
+            traj.append(
+                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], final_env)
+            )
+        idx += 1
 
     return traj
 
@@ -582,32 +691,43 @@ def build_slice_trajectory(
         include_files=True,
     )
     traj: List[dict] = []
-    for m in msgs:
+    idx = 0
+    while idx < len(msgs):
+        m = msgs[idx]
         if m.get("role") == "user":
-            traj.append({
-                "actor": "user",
-                "action": describe_human_action(m),
-                "environment": final_env,
-            })
+            if m.get("type") == "user_prompt" and is_backend_node_user_prompt(m.get("prompt")):
+                idx += 1
+                continue
+            traj.append(trajectory_row("user", describe_human_action(m), final_env))
         elif m.get("role") == "agent":
-            traj.append({
-                "actor": "agent",
-                "action": describe_agent_action(m),
-                "environment": final_env,
-            })
+            action, extra = agent_export_action(msgs, idx)
+            consume = 1 + extra
+            merged_tool: Optional[str] = None
+            if _assistant_message_has_tool_use(m):
+                tail_i = idx + consume
+                if tail_i < len(msgs) and is_tool_result_message(msgs[tail_i]):
+                    tr_raw = msgs[tail_i].get("raw")
+                    if isinstance(tr_raw, dict):
+                        merged_tool = _tool_result_blob(tr_raw)
+                    consume += 1
+            traj.append(trajectory_row("agent", action, final_env, tool_result=merged_tool))
+            idx += consume
+            continue
         else:
-            traj.append({
-                "actor": "user",
-                "action": json.dumps(m, ensure_ascii=False, default=str)[:400],
-                "environment": final_env,
-            })
+            traj.append(
+                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], final_env)
+            )
+        idx += 1
     return traj
 
 
 def extract_initial_task_instruction(action_trajectory: List[dict], fallback: str) -> str:
     for m in action_trajectory:
         if m.get("role") == "user" and m.get("type") == "user_prompt":
-            return m.get("prompt", "") or fallback or ""
+            prompt = m.get("prompt", "")
+            if is_backend_node_user_prompt(prompt):
+                continue
+            return (prompt if isinstance(prompt, str) else "") or fallback or ""
     return fallback or ""
 
 
@@ -768,12 +888,27 @@ def normalize_message(msg: dict) -> dict:
     return {"role": "agent", "raw": msg}
 
 
+def _is_export_noise_message(msg: dict) -> bool:
+    """
+    Messages to omit from exported trajectories.
+
+    ``stream_event``: partial streaming chunks.
+    ``system`` (e.g. subtype init): SDK session/bootstrap; the export ``environment`` on each step is
+    always derived from the stored session snapshot (workflow + files), not from these rows, so they
+    only duplicate the same env as adjacent steps.
+    """
+    if msg.get("role") != "agent":
+        return False
+    raw = msg.get("raw")
+    if not isinstance(raw, dict):
+        return False
+    t = raw.get("type")
+    return t == "stream_event" or t == "system"
+
+
 def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:
-    """Drop stream_event messages from the trajectory (keep user prompts and other agent messages)."""
-    return [
-        msg for msg in trajectory
-        if not (msg.get("role") == "agent" and (msg.get("raw") or {}).get("type") == "stream_event")
-    ]
+    """Drop streaming chunks and SDK system/bootstrap messages before building trajectories."""
+    return [msg for msg in trajectory if not _is_export_noise_message(msg)]
 
 
 def extract_session(
