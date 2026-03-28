@@ -29,6 +29,7 @@ import {
   setContextInductionNotifier,
 } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
+import { buildExportEnvironmentSnapshot, shouldWriteSnapshotForSdkMessage } from "./libs/message-state-snapshot.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -113,6 +114,15 @@ const runnerHandles = new Map<string, RunnerHandle>();
 /** While a node-solving run is in progress, maps sessionId -> nodeId so we can emit nodeCompleted on result. */
 const sessionCurrentNodeId = new Map<string, string>();
 
+/**
+ * After session.continue, maps sessionId -> workflow node to re-run verifier labeling on success
+ * (follow-up user messages that are not session.solveNode).
+ */
+const sessionContinueVerificationNodeId = new Map<string, string>();
+
+/** Last workflow node the session was driving (solve or explicit selection); used to verify on continue when UI omits verificationNodeId. */
+const sessionLastVerificationNodeId = new Map<string, string>();
+
 function initializeSessions() {
   if (!sessions) {
     const DB_PATH = join(app.getPath("userData"), "sessions.db");
@@ -157,9 +167,13 @@ function isSuccessfulAgentResult(message: unknown): boolean {
   return false;
 }
 
-async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: string) {
+function isAgentResultMessage(message: unknown): boolean {
+  return Boolean(message && typeof message === "object" && (message as { type?: string }).type === "result");
+}
+
+/** Re-read output files and refresh verifier marks for one node (Messages API). */
+async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Promise<void> {
   const store = initializeSessions();
-  let session = store.getSession(sessionId);
 
   broadcast({
     type: "session.verifierCheck",
@@ -167,7 +181,7 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
   });
 
   try {
-    session = store.getSession(sessionId);
+    let session = store.getSession(sessionId);
     if (session?.workflowTree) {
       const node = findNodeById(session.workflowTree, nodeId);
       if (node && node.verifiers.length > 0) {
@@ -180,6 +194,16 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
         } catch (e) {
           console.error("[ipc] verifier labeling failed:", e);
         }
+        const verifyPayload = { type: "verifier_label" as const, nodeId };
+        const verifyRowId = store.recordMessage(sessionId, verifyPayload);
+        const sessAfter = store.getSession(sessionId);
+        if (sessAfter) {
+          store.writeMessageSnapshot(verifyRowId, buildExportEnvironmentSnapshot(sessAfter));
+        }
+        broadcast({
+          type: "stream.message",
+          payload: { sessionId, message: verifyPayload },
+        });
       }
     }
   } finally {
@@ -188,11 +212,12 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
       payload: { sessionId, nodeId, phase: "finished" },
     });
   }
+}
 
-  session = store.getSession(sessionId);
+function runPostSolverExport(sessionId: string, nodeId: string): void {
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
   if (!session) return;
-
-  broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
 
   const treeAfter = session.workflowTree;
   const planFullyDone = Boolean(treeAfter?.length && treeAfter.every(isNodeFullyComplete));
@@ -201,6 +226,18 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
   } else {
     runExportAndExtractContext(sessionId, nodeId);
   }
+}
+
+async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: string) {
+  await runVerifierLabelingForNode(sessionId, nodeId);
+
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (!session) return;
+
+  broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
+
+  runPostSolverExport(sessionId, nodeId);
 
   emit({
     type: "session.status",
@@ -211,6 +248,12 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
       cwd: session.cwd,
     },
   });
+}
+
+/** After a free-form session.continue finishes: re-check verifiers + export; no nodeCompleted (runner already set status). */
+async function finalizeContinueWithVerification(sessionId: string, nodeId: string) {
+  await runVerifierLabelingForNode(sessionId, nodeId);
+  runPostSolverExport(sessionId, nodeId);
 }
 
 function emit(event: ServerEvent) {
@@ -250,7 +293,7 @@ function emit(event: ServerEvent) {
   }
   if (event.type === "stream.message") {
     const { sessionId, message } = event.payload;
-    sessions!.recordMessage(sessionId, message);
+    const messageRowId = sessions!.recordMessage(sessionId, message);
 
     // When a node-solving run completes, mark that node as completed and handle auto-cascade.
     if (isSuccessfulAgentResult(message)) {
@@ -307,14 +350,36 @@ function emit(event: ServerEvent) {
             },
           });
         });
+      } else {
+        const continueNodeId = sessionContinueVerificationNodeId.get(sessionId);
+        if (continueNodeId !== undefined) {
+          sessionContinueVerificationNodeId.delete(sessionId);
+          void finalizeContinueWithVerification(sessionId, continueNodeId).catch((e) => {
+            console.error("[ipc] finalizeContinueWithVerification:", e);
+          });
+        }
+      }
+    } else if (isAgentResultMessage(message)) {
+      sessionCurrentNodeId.delete(sessionId);
+      sessionContinueVerificationNodeId.delete(sessionId);
+    }
+    if (shouldWriteSnapshotForSdkMessage(message)) {
+      const sess = sessions!.getSession(sessionId);
+      if (sess) {
+        sessions!.writeMessageSnapshot(messageRowId, buildExportEnvironmentSnapshot(sess));
       }
     }
   }
   if (event.type === "stream.user_prompt") {
-    sessions!.recordMessage(event.payload.sessionId, {
+    const { sessionId, prompt } = event.payload;
+    const promptRowId = sessions!.recordMessage(sessionId, {
       type: "user_prompt",
-      prompt: event.payload.prompt
+      prompt
     });
+    const sess = sessions!.getSession(sessionId);
+    if (sess) {
+      sessions!.writeMessageSnapshot(promptRowId, buildExportEnvironmentSnapshot(sess));
+    }
   }
   broadcast(event);
 }
@@ -460,6 +525,8 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: session.workflowTree } });
 
   sessionCurrentNodeId.set(sessionId, nodeId);
+  sessionLastVerificationNodeId.set(sessionId, nodeId);
+  sessionContinueVerificationNodeId.delete(sessionId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
   const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
@@ -662,6 +729,16 @@ export function handleClientEvent(event: ClientEvent) {
       payload: { sessionId: session.id, prompt: event.payload.prompt }
     });
 
+    const explicit = event.payload.verificationNodeId?.trim();
+    const fallback = sessionLastVerificationNodeId.get(session.id);
+    const vNode = explicit || fallback;
+    if (vNode) {
+      sessionLastVerificationNodeId.set(session.id, vNode);
+      sessionContinueVerificationNodeId.set(session.id, vNode);
+    } else {
+      sessionContinueVerificationNodeId.delete(session.id);
+    }
+
     runClaude({
       prompt: event.payload.prompt,
       session,
@@ -700,6 +777,8 @@ export function handleClientEvent(event: ClientEvent) {
   if (event.type === "session.stop") {
     const session = sessions.getSession(event.payload.sessionId);
     if (!session) return;
+
+    sessionContinueVerificationNodeId.delete(session.id);
 
     const handle = runnerHandles.get(session.id);
     if (handle) {
@@ -795,6 +874,10 @@ export function handleClientEvent(event: ClientEvent) {
       handle.abort();
       runnerHandles.delete(sessionId);
     }
+
+    sessionCurrentNodeId.delete(sessionId);
+    sessionContinueVerificationNodeId.delete(sessionId);
+    sessionLastVerificationNodeId.delete(sessionId);
 
     sessions.deleteSession(sessionId);
     emit({

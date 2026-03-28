@@ -21,6 +21,20 @@ function getMaxDepth(tree: WorkflowNode[]): number {
   return max;
 }
 
+function findFirstAtDepth(tree: WorkflowNode[], target: number): WorkflowNode | undefined {
+  for (const node of tree) {
+    if (node.depth === target) return node;
+    const found = findFirstAtDepth(node.children, target);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Prefer a node at `target` depth; if the tree has no such nodes (e.g. detail mode on a flat plan), use the first root. */
+function findFirstAtDepthOrFallback(tree: WorkflowNode[], target: number): WorkflowNode | undefined {
+  return findFirstAtDepth(tree, target) ?? findFirstAtDepth(tree, 0);
+}
+
 function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
   for (const node of tree) {
     if (node.id === id) return node;
@@ -379,7 +393,9 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const verificationDepth = activeSession?.verificationDepth ?? 0;
   const maxDepth = useMemo(() => getMaxDepth(workflowTree), [workflowTree]);
   const selectedNode = useMemo(() => selectedNodeId ? findNode(workflowTree, selectedNodeId) : undefined, [workflowTree, selectedNodeId]);
-  const effectiveDepth = verificationDepth;
+  /** When the plan is flat, treat highlight depth as coarse so the step list stays consistent in both modes. */
+  const effectiveDepth = maxDepth === 0 ? 0 : verificationDepth;
+  const detailTargetDepth = maxDepth > 0 ? maxDepth : 1;
   const isVerifierChecking = Boolean(
     activeSessionId &&
       verifierCheckSessionId === activeSessionId &&
@@ -423,15 +439,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   // Auto-select first node at effective depth if nothing selected
   useEffect(() => {
     if (selectedNodeId || workflowTree.length === 0) return;
-    function findFirstAtDepth(nodes: WorkflowNode[], target: number): WorkflowNode | undefined {
-      for (const node of nodes) {
-        if (node.depth === target) return node;
-        const found = findFirstAtDepth(node.children, target);
-        if (found) return found;
-      }
-      return undefined;
-    }
-    const first = findFirstAtDepth(workflowTree, verificationDepth);
+    const first = findFirstAtDepthOrFallback(workflowTree, verificationDepth);
     if (first) setSelectedNodeId(first.id);
   }, [workflowTree, selectedNodeId, verificationDepth]);
 
@@ -540,16 +548,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     if (!activeSessionId) return;
     updateVerificationDepth(activeSessionId, depth);
     sendEvent({ type: "session.updateVerificationDepth", payload: { sessionId: activeSessionId, verificationDepth: depth } });
-    // Auto-select first node at the new depth
-    function findFirstAtDepth(nodes: WorkflowNode[], target: number): WorkflowNode | undefined {
-      for (const node of nodes) {
-        if (node.depth === target) return node;
-        const found = findFirstAtDepth(node.children, target);
-        if (found) return found;
-      }
-      return undefined;
-    }
-    const first = findFirstAtDepth(workflowTree, depth);
+    const first = findFirstAtDepthOrFallback(workflowTree, depth);
     if (first) setSelectedNodeId(first.id);
   }, [activeSessionId, workflowTree]);
 
@@ -689,30 +688,32 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
             {workflowTree.length > 0 && (
               <div className="flex items-center gap-1.5 shrink-0 text-xs">
                 <TooltipProvider delayDuration={300}>
-                  {maxDepth > 0 && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          disabled={!activeSessionId}
-                          onClick={() => handleDepthCommit(verificationDepth === 0 ? maxDepth : 0)}
-                          className="inline-flex h-5 w-14 shrink-0 items-center justify-center rounded-md border border-[#f3d5b5] bg-transparent px-0 py-0 text-ink-700 text-[11px] font-medium leading-none transition-colors hover:border-primary/30 hover:bg-primary/5 disabled:opacity-40 disabled:pointer-events-none"
-                          aria-label={
-                            verificationDepth === 0
-                              ? "Verification: coarse (high level). Click to switch to detail."
-                              : "Verification: detail. Click to switch to coarse."
-                          }
-                        >
-                          {verificationDepth === 0 ? "Coarse" : "Detail"}
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">
-                        {verificationDepth === 0
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        disabled={!activeSessionId}
+                        onClick={() => handleDepthCommit(verificationDepth === 0 ? detailTargetDepth : 0)}
+                        className="inline-flex h-5 w-14 shrink-0 items-center justify-center rounded-md border border-[#f3d5b5] bg-transparent px-0 py-0 text-ink-700 text-[11px] font-medium leading-none transition-colors hover:border-primary/30 hover:bg-primary/5 disabled:opacity-40 disabled:pointer-events-none"
+                        aria-label={
+                          verificationDepth === 0
+                            ? "Verification: coarse (high level). Click to switch to detail."
+                            : "Verification: detail. Click to switch to coarse."
+                        }
+                      >
+                        {verificationDepth === 0 ? "Coarse" : "Detail"}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">
+                      {maxDepth === 0
+                        ? verificationDepth === 0
+                          ? "Coarse level (no sub-steps in this plan yet). Click to show Detail mode; step list stays the same until you add sub-steps."
+                          : "Detail mode; add sub-steps under a step to verify at finer granularity. Click for coarse."
+                        : verificationDepth === 0
                           ? "Verifying at coarse (high) level. Click for detailed sub-steps."
                           : "Verifying with detailed sub-steps. Click for coarse level only."}
-                      </TooltipContent>
-                    </Tooltip>
-                  )}
+                    </TooltipContent>
+                  </Tooltip>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button

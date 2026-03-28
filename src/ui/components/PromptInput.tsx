@@ -18,6 +18,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   const prompt = useAppStore((state) => state.prompt);
   const cwd = useAppStore((state) => state.cwd);
   const activeSessionId = useAppStore((state) => state.activeSessionId);
+  const selectedNodeId = useAppStore((state) => state.selectedNodeId);
   const sessions = useAppStore((state) => state.sessions);
   const setPrompt = useAppStore((state) => state.setPrompt);
   const setPendingStart = useAppStore((state) => state.setPendingStart);
@@ -49,10 +50,17 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
         setGlobalError("Session is still running. Please wait for it to finish.");
         return;
       }
-      sendEvent({ type: "session.continue", payload: { sessionId: activeSessionId, prompt } });
+      sendEvent({
+        type: "session.continue",
+        payload: {
+          sessionId: activeSessionId,
+          prompt,
+          ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
+        },
+      });
     }
     setPrompt("");
-  }, [activeSession, activeSessionId, cwd, prompt, sendEvent, setGlobalError, setPendingStart, setPrompt]);
+  }, [activeSession, activeSessionId, cwd, prompt, selectedNodeId, sendEvent, setGlobalError, setPendingStart, setPrompt]);
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return;

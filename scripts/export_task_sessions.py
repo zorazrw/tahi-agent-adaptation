@@ -11,16 +11,24 @@ Each exported session is:
         "actor": "user" | "agent",
         "action": str,
         "tool_result": optional str; present when the SDK tool outcome was merged into the prior tool-call step,
-        "environment": { ... }  # omitted only for agent steps that are a single ``message("…")`` (no `` | ``)
+        "environment": { ... }  # omitted for user/agent steps that are only ``message("…")`` (no `` | ``)
       },
       ...
     ],
   }
 
-The first trajectory step is always the user ``message({initial query})`` with empty ``environment``.
+The first trajectory step is always the user ``message({initial query})``; like later user
+``message("…")`` steps, it omits ``environment``.
 ``user_prompt`` rows that are backend-built node instructions (``Proceed with: …`` + ``Task:``)
 are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
+
+Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, and output files)
+comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
+results; turn ``result``; and a synthetic ``verifier_label`` row after the verifier LM updates marks
+(exported as agent ``verify({"nodeId":...})``). Pure ``message("…")`` steps (user or agent) omit ``environment``.
+Older DBs without ``state_snapshot`` fall back to one end-of-session snapshot.
+
 The second is always the agent ``plan({initial query})``; its ``environment`` has the workflow tree
 (with every step ``status`` ``pending``, not DB completion state); each verifier is
 ``{"criterion", "status": "failure"}``; ``file`` maps paths to ``null``.
@@ -540,9 +548,21 @@ def agent_export_action(msgs: List[dict], idx: int) -> Tuple[str, int]:
     return (describe_agent_action(m), 0)
 
 
-def _agent_step_omits_environment(action: str) -> bool:
-    """Omit env only for a prose-only step (single ``message("…")``, no tool segment)."""
+def _step_omits_environment(actor: str, action: str, tool_result: Optional[str]) -> bool:
+    """Omit env for user/agent prose-only steps (single ``message("…")``, no tool segment)."""
+    if tool_result is not None:
+        return False
+    if actor not in ("user", "agent"):
+        return False
     return action.startswith("message(") and " | " not in action
+
+
+def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
+    """Return (environment dict, True if taken from persisted ``state_snapshot`` on this message)."""
+    snap = norm.get("state_snapshot")
+    if isinstance(snap, dict) and "workflow" in snap and "file" in snap:
+        return snap, True
+    return default_env, False
 
 
 def trajectory_row(
@@ -553,13 +573,13 @@ def trajectory_row(
     tool_result: Optional[str] = None,
 ) -> dict:
     """
-    Build one trajectory object. Agent steps that are only ``message("…")`` omit ``environment``;
-    tool calls, ``message | Tool``, and any step with ``tool_result`` keep ``environment``.
+    Build one trajectory object. User or agent steps that are only ``message("…")`` (no `` | ``)
+    omit ``environment`` (keeps JSON small; state is on neighboring tool / verify / result rows).
     """
     row: Dict[str, Any] = {"actor": actor, "action": action}
     if tool_result is not None:
         row["tool_result"] = tool_result
-    if not (actor == "agent" and _agent_step_omits_environment(action)):
+    if not _step_omits_environment(actor, action, tool_result):
         row["environment"] = environment
     return row
 
@@ -646,8 +666,18 @@ def build_full_session_trajectory(
             continue
         pending_skip_tool_result = False
 
+        if m.get("type") == "verifier_label":
+            step_env, _snap = environment_for_norm(m, final_env)
+            nid_raw = m.get("nodeId", "")
+            nid = str(nid_raw) if nid_raw is not None else ""
+            act = f"verify({json.dumps({'nodeId': nid}, ensure_ascii=False)})"
+            traj.append(trajectory_row("agent", act, step_env))
+            idx += 1
+            continue
+
         if m.get("role") == "user":
-            traj.append(trajectory_row("user", describe_human_action(m), final_env))
+            u_env, _u_snap = environment_for_norm(m, final_env)
+            traj.append(trajectory_row("user", describe_human_action(m), u_env))
         elif m.get("role") == "agent":
             action, extra = agent_export_action(msgs, idx)
             consume = 1 + extra
@@ -659,7 +689,16 @@ def build_full_session_trajectory(
                     if isinstance(tr_raw, dict):
                         merged_tool = _tool_result_blob(tr_raw)
                     consume += 1
-            traj.append(trajectory_row("agent", action, final_env, tool_result=merged_tool))
+            env_idx = idx + 1 if (extra == 1 or merged_tool is not None) else idx
+            step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
+            traj.append(
+                trajectory_row(
+                    "agent",
+                    action,
+                    step_env,
+                    tool_result=merged_tool,
+                )
+            )
             idx += consume
             continue
         else:
@@ -694,11 +733,21 @@ def build_slice_trajectory(
     idx = 0
     while idx < len(msgs):
         m = msgs[idx]
+        if m.get("type") == "verifier_label":
+            step_env, _snap = environment_for_norm(m, final_env)
+            nid_raw = m.get("nodeId", "")
+            nid = str(nid_raw) if nid_raw is not None else ""
+            act = f"verify({json.dumps({'nodeId': nid}, ensure_ascii=False)})"
+            traj.append(trajectory_row("agent", act, step_env))
+            idx += 1
+            continue
+
         if m.get("role") == "user":
             if m.get("type") == "user_prompt" and is_backend_node_user_prompt(m.get("prompt")):
                 idx += 1
                 continue
-            traj.append(trajectory_row("user", describe_human_action(m), final_env))
+            u_env, _u_snap = environment_for_norm(m, final_env)
+            traj.append(trajectory_row("user", describe_human_action(m), u_env))
         elif m.get("role") == "agent":
             action, extra = agent_export_action(msgs, idx)
             consume = 1 + extra
@@ -710,7 +759,16 @@ def build_slice_trajectory(
                     if isinstance(tr_raw, dict):
                         merged_tool = _tool_result_blob(tr_raw)
                     consume += 1
-            traj.append(trajectory_row("agent", action, final_env, tool_result=merged_tool))
+            env_idx = idx + 1 if (extra == 1 or merged_tool is not None) else idx
+            step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
+            traj.append(
+                trajectory_row(
+                    "agent",
+                    action,
+                    step_env,
+                    tool_result=merged_tool,
+                )
+            )
             idx += consume
             continue
         else:
@@ -884,6 +942,13 @@ def normalize_message(msg: dict) -> dict:
     """Normalize a stored StreamMessage for JSON output (agent turn vs user message)."""
     if msg.get("type") == "user_prompt":
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
+    if msg.get("type") == "verifier_label":
+        return {
+            "role": "agent",
+            "type": "verifier_label",
+            "nodeId": msg.get("nodeId", ""),
+            "raw": msg,
+        }
     # SDK message: could be assistant content, tool_use, tool_result, etc.
     return {"role": "agent", "raw": msg}
 
@@ -931,15 +996,30 @@ def extract_session(
     verification_criteria = parse_json_column(verification_criteria_raw, [])
     verifier_marks = parse_json_column(verifier_marks_raw, [])
 
-    messages_rows = cursor.execute(
-        "SELECT data, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
-        (session_id,),
-    ).fetchall()
+    try:
+        messages_rows = cursor.execute(
+            """SELECT data, state_snapshot, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC""",
+            (session_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        messages_rows = [
+            (r[0], None, r[1])
+            for r in cursor.execute(
+                "SELECT data, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+                (session_id,),
+            ).fetchall()
+        ]
     action_trajectory = []
-    for data_str, _ in messages_rows:
+    for data_str, snapshot_raw, _ in messages_rows:
         try:
             msg = json.loads(data_str)
-            action_trajectory.append(normalize_message(msg))
+            norm = normalize_message(msg)
+            if snapshot_raw:
+                try:
+                    norm["state_snapshot"] = json.loads(snapshot_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            action_trajectory.append(norm)
         except json.JSONDecodeError:
             action_trajectory.append({"role": "unknown", "raw": data_str[:200]})
     action_trajectory = filter_out_stream_events(action_trajectory)

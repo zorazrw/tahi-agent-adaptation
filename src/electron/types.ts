@@ -21,7 +21,13 @@ export type UserPromptMessage = {
   prompt: string;
 };
 
-export type StreamMessage = SDKMessage | UserPromptMessage;
+/** Persisted when the verifier-labeling LM finishes for a node; also broadcast to the UI as stream.message for parity with exports. */
+export type VerifierLabelMessage = {
+  type: "verifier_label";
+  nodeId: string;
+};
+
+export type StreamMessage = SDKMessage | UserPromptMessage | VerifierLabelMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 
@@ -80,7 +86,10 @@ export type ServerEvent =
 // Client -> Server events
 export type ClientEvent =
   | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string } }
-  | { type: "session.continue"; payload: { sessionId: string; prompt: string } }
+  | {
+      type: "session.continue";
+      payload: { sessionId: string; prompt: string; verificationNodeId?: string };
+    }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }
   | { type: "session.updateWorkflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }

@@ -611,6 +611,10 @@ export function MessageCard({
     return <UserMessageCard message={message} />;
   }
 
+  if (message.type === "verifier_label") {
+    return null;
+  }
+
   if (message.type === "node_completed") {
     return <NodeOutputSnippet message={message as NodeCompletedMessage} />;
   }

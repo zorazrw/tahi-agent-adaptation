@@ -272,13 +272,22 @@ export class SessionStore {
     session.abortController = controller;
   }
 
-  recordMessage(sessionId: string, message: StreamMessage): void {
-    const id = ('uuid' in message && message.uuid) ? String(message.uuid) : crypto.randomUUID();
+  /** Inserts message row; returns message id. Optional JSON snapshot is written via ``writeMessageSnapshot`` after side effects (e.g. workflow updates). */
+  recordMessage(sessionId: string, message: StreamMessage): string {
+    const id = "uuid" in message && message.uuid ? String(message.uuid) : crypto.randomUUID();
     this.db
       .prepare(
-        `insert or ignore into messages (id, session_id, data, created_at) values (?, ?, ?, ?)`
+        `insert or ignore into messages (id, session_id, data, created_at, state_snapshot) values (?, ?, ?, ?, ?)`
       )
-      .run(id, sessionId, JSON.stringify(message), Date.now());
+      .run(id, sessionId, JSON.stringify(message), Date.now(), null);
+    return id;
+  }
+
+  /** Attach per-step environment (workflow + files) for export; overwrites when set again. */
+  writeMessageSnapshot(messageId: string, snapshot: { workflow: unknown; file: unknown }): void {
+    this.db
+      .prepare(`update messages set state_snapshot = ? where id = ?`)
+      .run(JSON.stringify(snapshot), messageId);
   }
 
   deleteSession(id: string): boolean {
@@ -390,6 +399,11 @@ export class SessionStore {
         foreign key (session_id) references sessions(id)
       )`
     );
+    try {
+      this.db.exec(`alter table messages add column state_snapshot text`);
+    } catch {
+      /* column exists */
+    }
     this.db.exec(`create index if not exists messages_session_id on messages(session_id)`);
   }
 

@@ -26,7 +26,13 @@ export type NodeCompletedMessage = {
   nodeLabel: string;
 };
 
-export type StreamMessage = SDKMessage | UserPromptMessage | NodeCompletedMessage;
+/** Stored in session DB after automated verifier pass; hidden in chat UI. */
+export type VerifierLabelMessage = {
+  type: "verifier_label";
+  nodeId: string;
+};
+
+export type StreamMessage = SDKMessage | UserPromptMessage | NodeCompletedMessage | VerifierLabelMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 
@@ -84,7 +90,10 @@ export type ServerEvent =
 // Client -> Server events
 export type ClientEvent =
   | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string } }
-  | { type: "session.continue"; payload: { sessionId: string; prompt: string } }
+  | {
+      type: "session.continue";
+      payload: { sessionId: string; prompt: string; verificationNodeId?: string };
+    }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }
   | { type: "session.updateWorkflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }

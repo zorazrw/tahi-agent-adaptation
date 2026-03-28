@@ -89,8 +89,8 @@ function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<v
  * Export one workflow node to userData/tasks/{taskUnitId}.json, then run extract_context.py.
  * Includes all workflow levels so --task-unit-id matches nodes solved in detail mode.
  * Export JSON shape: `{ uuid, name, trajectory }` where each step has
- * `actor` ("user" | "agent"), `action`, optional `tool_result` (merged SDK tool outcome), and
- * `environment` { workflow, file } when present (verifiers live on workflow nodes).
+ * `actor` ("user" | "agent"), `action` (e.g. tools, `message`, `verify`), optional `tool_result`,
+ * and `environment` { workflow, file } when present (verifier outcomes under each workflow node).
  */
 export function runExportAndExtractContext(sessionId: string, taskUnitId: string): void {
   const root = scriptsRootDir();
