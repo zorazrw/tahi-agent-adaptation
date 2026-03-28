@@ -29,6 +29,11 @@ export type RunnerOptions = {
   resumeSessionId?: string;
   /** When rerunning a node, resume the SDK conversation up to this message UUID. */
   resumeSessionAt?: string;
+  /**
+   * When true, do not emit session.status "completed" on a successful result message.
+   * Used for node solves so ipc-handlers can run verifier labeling first, then emit completed.
+   */
+  suppressSessionStatusOnSuccess?: boolean;
   onEvent: (event: ServerEvent) => void;
   onSessionUpdate?: (updates: Partial<Session>) => void;
 };
@@ -105,7 +110,16 @@ export function buildPromptForNode(
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
-  const { prompt, session, regenerateWorkflow, resumeSessionId, resumeSessionAt, onEvent, onSessionUpdate } = options;
+  const {
+    prompt,
+    session,
+    regenerateWorkflow,
+    resumeSessionId,
+    resumeSessionAt,
+    suppressSessionStatusOnSuccess,
+    onEvent,
+    onSessionUpdate,
+  } = options;
   const abortController = new AbortController();
   const isFirstMessage = resumeSessionId == null;
   const basePrompt = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
@@ -249,10 +263,13 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           if (message.subtype === "success") gotSuccessResult = true;
           if (!planRegistered) {
             const status = message.subtype === "success" ? "completed" : "error";
-            onEvent({
-              type: "session.status",
-              payload: { sessionId: session.id, status, title: session.title }
-            });
+            const skipOkStatus = suppressSessionStatusOnSuccess && message.subtype === "success";
+            if (!skipOkStatus) {
+              onEvent({
+                type: "session.status",
+                payload: { sessionId: session.id, status, title: session.title }
+              });
+            }
           }
         }
       }

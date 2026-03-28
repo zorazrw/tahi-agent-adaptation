@@ -67,6 +67,9 @@ interface AppState {
   contextInductionDepth: number;
   /** After each step completes, wait for next Run (manual) or chain steps until the workflow is done (auto). */
   workflowRunMode: WorkflowRunMode;
+  /** LM is labeling verifiers for this session/step before the next run can proceed. */
+  verifierCheckSessionId: string | null;
+  verifierCheckNodeId: string | null;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -134,6 +137,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   previewPanelOpen: false,
   contextInductionDepth: 0,
   workflowRunMode: readStoredWorkflowRunMode(),
+  verifierCheckSessionId: null,
+  verifierCheckNodeId: null,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
@@ -143,7 +148,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   setGlobalError: (globalError) => set({ globalError }),
   setShowStartModal: (showStartModal) => set({ showStartModal }),
   setShowSettingsModal: (showSettingsModal) => set({ showSettingsModal }),
-  setActiveSessionId: (id) => set({ activeSessionId: id, selectedNodeId: null, previewPanelOpen: false }),
+  setActiveSessionId: (id) =>
+    set({
+      activeSessionId: id,
+      selectedNodeId: null,
+      previewPanelOpen: false,
+      verifierCheckSessionId: null,
+      verifierCheckNodeId: null,
+    }),
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
   setRunningNodeId: (runningNodeId) => set({ runningNodeId }),
   toggleNodeCollapsed: (nodeId) => set((state) => {
@@ -393,6 +405,20 @@ export const useAppStore = create<AppState>((set, get) => ({
               ? state.contextInductionDepth + 1
               : Math.max(0, state.contextInductionDepth - 1),
         }));
+        break;
+      }
+
+      case "session.verifierCheck": {
+        const { sessionId, nodeId, phase } = event.payload;
+        if (phase === "started") {
+          set({ verifierCheckSessionId: sessionId, verifierCheckNodeId: nodeId });
+        } else {
+          set((s) =>
+            s.verifierCheckSessionId === sessionId && s.verifierCheckNodeId === nodeId
+              ? { verifierCheckSessionId: null, verifierCheckNodeId: null }
+              : {}
+          );
+        }
         break;
       }
 

@@ -361,6 +361,8 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const updateSessionTitle = useAppStore((s) => s.updateSessionTitle);
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
   const setWorkflowRunMode = useAppStore((s) => s.setWorkflowRunMode);
+  const verifierCheckSessionId = useAppStore((s) => s.verifierCheckSessionId);
+  const verifierCheckNodeId = useAppStore((s) => s.verifierCheckNodeId);
 
   const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -378,6 +380,12 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const maxDepth = useMemo(() => getMaxDepth(workflowTree), [workflowTree]);
   const selectedNode = useMemo(() => selectedNodeId ? findNode(workflowTree, selectedNodeId) : undefined, [workflowTree, selectedNodeId]);
   const effectiveDepth = verificationDepth;
+  const isVerifierChecking = Boolean(
+    activeSessionId &&
+      verifierCheckSessionId === activeSessionId &&
+      verifierCheckNodeId &&
+      (verifierCheckNodeId === selectedNodeId || verifierCheckNodeId === runningNodeId)
+  );
 
   /** Stale when session or plan shape changes; same string when only in-place edits keep the same root ids. */
   const workflowTreeIdentity = useMemo(() => {
@@ -844,11 +852,23 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
       {selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
         <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5 pb-3">
           <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
-            <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Verifiers</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Verifiers</span>
+              {isVerifierChecking && (
+                <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
+                    <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
+                  </svg>
+                  Checking…
+                </span>
+              )}
+            </div>
             <button
               type="button"
+              disabled={isVerifierChecking}
               onClick={() => { setAddingVerifier(true); setNewVerifierDraft(""); }}
-              className="shrink-0 p-0.5 rounded text-ink-300 hover:text-primary hover:bg-ink-900/5 transition-colors"
+              className="shrink-0 p-0.5 rounded text-ink-300 hover:text-primary hover:bg-ink-900/5 transition-colors disabled:opacity-40"
               aria-label="Add verifier"
             >
               <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -876,16 +896,19 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
             )}
             {currentVerifiers.map((text, index) => {
               const mark = currentVerifierMarks[index];
+              const pass = mark === "check";
+              const fail = mark === "cross";
               return (
                 <div key={index} className="flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => toggleVerifierMark(index)}
-                    className="shrink-0 flex items-center justify-center w-4 h-4 rounded-full border border-ink-900/25 bg-white text-ink-400 hover:bg-ink-900/5 transition-colors"
+                    disabled={isVerifierChecking}
+                    onClick={() => { if (!isVerifierChecking) toggleVerifierMark(index); }}
+                    className="shrink-0 flex items-center justify-center w-4 h-4 rounded-full border border-ink-900/25 bg-white text-ink-400 hover:bg-ink-900/5 transition-colors disabled:opacity-50 disabled:pointer-events-none"
                   >
-                    {mark === "check" ? (
+                    {pass ? (
                       <svg viewBox="0 0 16 16" className="h-3 w-3 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 4L6 11 3 8" /></svg>
-                    ) : mark === "cross" ? (
+                    ) : fail ? (
                       <svg viewBox="0 0 16 16" className="h-3 w-3 text-red-500" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 4L4 12M4 4l8 8" /></svg>
                     ) : (
                       null

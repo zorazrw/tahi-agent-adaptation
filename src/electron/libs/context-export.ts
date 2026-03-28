@@ -1,5 +1,5 @@
-import { spawn } from "child_process";
-import { appendFileSync, existsSync } from "fs";
+import { spawn, type ChildProcess } from "child_process";
+import { appendFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
 
@@ -42,10 +42,52 @@ function pythonExecutable(): string {
   return process.platform === "win32" ? "python" : "python3";
 }
 
+function spawnClosed(proc: ChildProcess, label: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let errBuf = "";
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      errBuf += chunk.toString();
+    });
+    proc.on("error", (err) => {
+      reject(err);
+    });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`${label} exit ${code}: ${errBuf.slice(-900)}`));
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+/** Serialize export+extract per session so auto-chained steps don't overlap SQLite / Python runs. */
+const sessionExportChains = new Map<string, Promise<void>>();
+
+function enqueueSessionExport(sessionId: string, run: () => Promise<void>): void {
+  const prev = sessionExportChains.get(sessionId) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(() => run());
+  sessionExportChains.set(sessionId, next);
+}
+
+function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<void> {
+  inductionNotifier?.({ kind: "start", sessionId });
+  let ok = false;
+  return inner()
+    .then(() => {
+      ok = true;
+    })
+    .catch((e) => {
+      logLine(`Induction failed (session ${sessionId}): ${e instanceof Error ? e.message : String(e)}`);
+    })
+    .finally(() => {
+      inductionNotifier?.({ kind: "end", sessionId, ok });
+    });
+}
+
 /**
- * Export the completed workflow node to userData/tasks/{taskUnitId}.json, then run
- * extract_context.py on that file. Memories/skills go under userData.
- * Runs asynchronously; failures are logged only.
+ * Export one workflow node to userData/tasks/{taskUnitId}.json, then run extract_context.py.
+ * Includes all workflow levels so --task-unit-id matches nodes solved in detail mode.
  */
 export function runExportAndExtractContext(sessionId: string, taskUnitId: string): void {
   const root = scriptsRootDir();
@@ -68,78 +110,99 @@ export function runExportAndExtractContext(sessionId: string, taskUnitId: string
     logLine("Skip: sessions.db missing.");
     return;
   }
-
-  let finished = false;
-  const finish = (ok: boolean) => {
-    if (finished) return;
-    finished = true;
-    inductionNotifier?.({ kind: "end", sessionId, ok });
-  };
-
-  inductionNotifier?.({ kind: "start", sessionId });
+  mkdirSync(tasksDir, { recursive: true });
 
   const py = pythonExecutable();
-  const exportArgs = [
-    exportScript,
-    "--db",
-    dbPath,
-    "--session-id",
-    sessionId,
-    "--tasks-dir",
-    tasksDir,
-    "--task-unit-id",
-    taskUnitId,
-    "--pretty",
-  ];
+  enqueueSessionExport(sessionId, () =>
+    inductionWrap(sessionId, async () => {
+      logLine(`export_task_sessions session=${sessionId} taskUnit=${taskUnitId}`);
+      const exportProc = spawn(
+        py,
+        [
+          exportScript,
+          "--db",
+          dbPath,
+          "--session-id",
+          sessionId,
+          "--tasks-dir",
+          tasksDir,
+          "--task-unit-id",
+          taskUnitId,
+          "--granularity",
+          "all",
+          "--pretty",
+        ],
+        { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
+      );
+      await spawnClosed(exportProc, "export_task_sessions");
+      logLine("extract_context starting (per-unit)");
+      const extractProc = spawn(
+        py,
+        [extractScript, "--data_path", taskJsonPath, "--output_dir", userData],
+        { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
+      );
+      await spawnClosed(extractProc, "extract_context");
+      logLine("extract_context finished OK (per-unit)");
+    })
+  );
+}
 
-  logLine(`export_task_sessions session=${sessionId} taskUnit=${taskUnitId}`);
+/**
+ * When every workflow step is done, export the full session once (all task units) and run extract.
+ * Queued after any prior per-step jobs so the DB holds the complete trajectory.
+ */
+export function runFullSessionExportAndExtract(sessionId: string): void {
+  const root = scriptsRootDir();
+  if (!root) {
+    logLine("Skip (full session): scripts/ not found.");
+    return;
+  }
+  const exportScript = join(root, "export_task_sessions.py");
+  const extractScript = join(root, "extract_context.py");
+  if (!existsSync(exportScript) || !existsSync(extractScript)) {
+    logLine(`Skip (full session): missing export or extract script under ${root}`);
+    return;
+  }
 
-  const exportProc = spawn(py, exportArgs, {
-    cwd: root,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
-  });
+  const userData = app.getPath("userData");
+  const dbPath = join(userData, "sessions.db");
+  const tasksDir = join(userData, "tasks");
+  const fullJsonPath = join(tasksDir, `${sessionId}-workflow-full.json`);
+  if (!existsSync(dbPath)) {
+    logLine("Skip (full session): sessions.db missing.");
+    return;
+  }
+  mkdirSync(tasksDir, { recursive: true });
 
-  let exportErr = "";
-  exportProc.stderr?.on("data", (chunk: Buffer) => {
-    exportErr += chunk.toString();
-  });
-
-  exportProc.on("error", (err) => {
-    logLine(`export spawn failed: ${err.message}`);
-    finish(false);
-  });
-
-  exportProc.on("close", (code) => {
-    if (code !== 0) {
-      logLine(`export_task_sessions exit ${code}: ${exportErr.slice(-600)}`);
-      finish(false);
-      return;
-    }
-    logLine("extract_context starting");
-
-    const extractProc = spawn(
-      py,
-      [extractScript, "--data_path", taskJsonPath, "--output_dir", userData],
-      { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
-    );
-
-    let extractErr = "";
-    extractProc.stderr?.on("data", (chunk: Buffer) => {
-      extractErr += chunk.toString();
-    });
-    extractProc.on("error", (err) => {
-      logLine(`extract spawn failed: ${err.message}`);
-      finish(false);
-    });
-    extractProc.on("close", (c2) => {
-      if (c2 !== 0) {
-        logLine(`extract_context exit ${c2}: ${extractErr.slice(-900)}`);
-        finish(false);
-        return;
-      }
-      logLine("extract_context finished OK");
-      finish(true);
-    });
-  });
+  const py = pythonExecutable();
+  enqueueSessionExport(sessionId, () =>
+    inductionWrap(sessionId, async () => {
+      logLine(`export_task_sessions full session=${sessionId}`);
+      const exportProc = spawn(
+        py,
+        [
+          exportScript,
+          "--db",
+          dbPath,
+          "--session-id",
+          sessionId,
+          "--granularity",
+          "all",
+          "--pretty",
+          "--output",
+          fullJsonPath,
+        ],
+        { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
+      );
+      await spawnClosed(exportProc, "export_task_sessions (full)");
+      logLine("extract_context starting (full session)");
+      const extractProc = spawn(
+        py,
+        [extractScript, "--data_path", fullJsonPath, "--output_dir", userData],
+        { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
+      );
+      await spawnClosed(extractProc, "extract_context");
+      logLine("extract_context finished OK (full session)");
+    })
+  );
 }

@@ -23,7 +23,12 @@ import {
   syncAppSkills,
   isValidFlatSkillMdFileName,
 } from "./libs/skill-store.js";
-import { runExportAndExtractContext, setContextInductionNotifier } from "./libs/context-export.js";
+import {
+  runExportAndExtractContext,
+  runFullSessionExportAndExtract,
+  setContextInductionNotifier,
+} from "./libs/context-export.js";
+import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -139,12 +144,78 @@ setContextInductionNotifier((ev) => {
 });
 
 function hasLiveSession(sessionId: string): boolean {
-  if (!sessions) return false;
-  return Boolean(sessions.getSession(sessionId));
+  return Boolean(initializeSessions().getSession(sessionId));
 }
 
+/** SDK result message: treat as success for post-step finalization (verifiers, nodeCompleted, status). */
+function isSuccessfulAgentResult(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const m = message as { type?: string; subtype?: string; is_error?: boolean };
+  if (m.type !== "result") return false;
+  if (m.subtype === "success") return true;
+  if (m.is_error === false) return true;
+  return false;
+}
+
+async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: string) {
+  const store = initializeSessions();
+  let session = store.getSession(sessionId);
+
+  broadcast({
+    type: "session.verifierCheck",
+    payload: { sessionId, nodeId, phase: "started" },
+  });
+
+  try {
+    session = store.getSession(sessionId);
+    if (session?.workflowTree) {
+      const node = findNodeById(session.workflowTree, nodeId);
+      if (node && node.verifiers.length > 0) {
+        try {
+          const marks = await labelVerifiersForNode(session, session.workflowTree, node);
+          node.verifierMarks = node.verifiers.map((_, i) => marks[i] ?? undefined);
+          store.updateSession(sessionId, { workflowTree: session.workflowTree });
+          const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
+          broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
+        } catch (e) {
+          console.error("[ipc] verifier labeling failed:", e);
+        }
+      }
+    }
+  } finally {
+    broadcast({
+      type: "session.verifierCheck",
+      payload: { sessionId, nodeId, phase: "finished" },
+    });
+  }
+
+  session = store.getSession(sessionId);
+  if (!session) return;
+
+  broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
+
+  const treeAfter = session.workflowTree;
+  const planFullyDone = Boolean(treeAfter?.length && treeAfter.every(isNodeFullyComplete));
+  if (planFullyDone) {
+    runFullSessionExportAndExtract(sessionId);
+  } else {
+    runExportAndExtractContext(sessionId, nodeId);
+  }
+
+  emit({
+    type: "session.status",
+    payload: {
+      sessionId,
+      status: "completed",
+      title: session.title,
+      cwd: session.cwd,
+    },
+  });
+}
 
 function emit(event: ServerEvent) {
+  initializeSessions();
+
   if (
     (event.type === "session.status" ||
       event.type === "stream.message" ||
@@ -156,14 +227,14 @@ function emit(event: ServerEvent) {
   }
 
   if (event.type === "session.status") {
-    sessions.updateSession(event.payload.sessionId, { status: event.payload.status });
+    sessions!.updateSession(event.payload.sessionId, { status: event.payload.status });
   }
   if (event.type === "workflow.plan") {
     const { sessionId, workflowTree } = event.payload;
-    const session = sessions.getSession(sessionId);
+    const session = sessions!.getSession(sessionId);
     if (session) {
       const defaultDepth = 0;
-      sessions.updateSession(sessionId, {
+      sessions!.updateSession(sessionId, {
         workflowTree,
         verificationDepth: defaultDepth,
         status: "idle"
@@ -179,59 +250,68 @@ function emit(event: ServerEvent) {
   }
   if (event.type === "stream.message") {
     const { sessionId, message } = event.payload;
-    sessions.recordMessage(sessionId, message);
+    sessions!.recordMessage(sessionId, message);
 
     // When a node-solving run completes, mark that node as completed and handle auto-cascade.
-    const m = message as { type?: string; subtype?: string };
-    if (m.type === "result") {
+    if (isSuccessfulAgentResult(message)) {
       const nodeId = sessionCurrentNodeId.get(sessionId);
       if (nodeId !== undefined) {
         sessionCurrentNodeId.delete(sessionId);
-        if (m.subtype === "success") {
-          const session = sessions.getSession(sessionId);
-          if (session && session.workflowTree) {
-            const completedNode = findNodeById(session.workflowTree, nodeId);
-            if (completedNode) {
-              // If we don't yet have an originalOutputs snapshot, capture the initial model-written content now
-              if (!completedNode.originalOutputs && completedNode.outputFiles.length > 0) {
-                const cwd = session.cwd ?? process.cwd();
-                const originals: { path: string; content: string }[] = [];
-                for (const relPath of completedNode.outputFiles) {
-                  try {
-                    const absPath = join(cwd, relPath);
-                    const content = readFileSync(absPath, "utf8");
-                    originals.push({ path: relPath, content });
-                  } catch {
-                    // ignore missing/unreadable files
-                  }
-                }
-                if (originals.length > 0) {
-                  completedNode.originalOutputs = originals;
+        const session = sessions!.getSession(sessionId);
+        if (session && session.workflowTree) {
+          const completedNode = findNodeById(session.workflowTree, nodeId);
+          if (completedNode) {
+            // If we don't yet have an originalOutputs snapshot, capture the initial model-written content now
+            if (!completedNode.originalOutputs && completedNode.outputFiles.length > 0) {
+              const cwd = session.cwd ?? process.cwd();
+              const originals: { path: string; content: string }[] = [];
+              for (const relPath of completedNode.outputFiles) {
+                try {
+                  const absPath = join(cwd, relPath);
+                  const content = readFileSync(absPath, "utf8");
+                  originals.push({ path: relPath, content });
+                } catch {
+                  // ignore missing/unreadable files
                 }
               }
-
-              // Mark this node and all its descendants as completed
-              completeNodeAndDescendants(completedNode);
+              if (originals.length > 0) {
+                completedNode.originalOutputs = originals;
+              }
             }
 
-            // Bubble up: mark parents complete if all children are done
-            let parentNode = findParentNode(session.workflowTree, nodeId);
-            while (parentNode && isNodeFullyComplete(parentNode)) {
-              parentNode.status = "completed";
-              parentNode = findParentNode(session.workflowTree, parentNode.id);
-            }
-
-            sessions.updateSession(sessionId, { workflowTree: session.workflowTree });
-            broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: session.workflowTree } });
+            // Mark this node and all its descendants as completed
+            completeNodeAndDescendants(completedNode);
           }
-          broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
-          runExportAndExtractContext(sessionId, nodeId);
+
+          // Bubble up: mark parents complete if all children are done
+          let parentNode = findParentNode(session.workflowTree, nodeId);
+          while (parentNode && isNodeFullyComplete(parentNode)) {
+            parentNode.status = "completed";
+            parentNode = findParentNode(session.workflowTree, parentNode.id);
+          }
+
+          sessions!.updateSession(sessionId, { workflowTree: session.workflowTree });
+          const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
+          broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
         }
+        void finalizeNodeSolveAfterVerifierPass(sessionId, nodeId).catch((e) => {
+          console.error("[ipc] finalizeNodeSolveAfterVerifierPass:", e);
+          emit({
+            type: "session.status",
+            payload: {
+              sessionId,
+              status: "error",
+              title: sessions!.getSession(sessionId)?.title,
+              cwd: sessions!.getSession(sessionId)?.cwd,
+              error: String(e),
+            },
+          });
+        });
       }
     }
   }
   if (event.type === "stream.user_prompt") {
-    sessions.recordMessage(event.payload.sessionId, {
+    sessions!.recordMessage(event.payload.sessionId, {
       type: "user_prompt",
       prompt: event.payload.prompt
     });
@@ -399,6 +479,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
     session,
     resumeSessionId: claudeSessionIdForResume,
     resumeSessionAt,
+    suppressSessionStatusOnSuccess: true,
     onEvent: emit,
     onSessionUpdate: (updates) => {
       store.updateSession(session.id, updates);

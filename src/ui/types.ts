@@ -57,6 +57,10 @@ export type ServerEvent =
   | { type: "session.deleted"; payload: { sessionId: string } }
   | { type: "session.nodeCompleted"; payload: { sessionId: string; nodeId: string } }
   | {
+      type: "session.verifierCheck";
+      payload: { sessionId: string; nodeId: string; phase: "started" | "finished" };
+    }
+  | {
       type: "session.contextInduction";
       payload: { phase: "started" | "finished"; sessionId: string; ok?: boolean };
     }
