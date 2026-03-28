@@ -284,7 +284,10 @@ export class SessionStore {
   }
 
   /** Attach per-step environment (workflow + files) for export; overwrites when set again. */
-  writeMessageSnapshot(messageId: string, snapshot: { workflow: unknown; file: unknown }): void {
+  writeMessageSnapshot(
+    messageId: string,
+    snapshot: { workflow?: unknown; file?: unknown; verifier?: unknown }
+  ): void {
     this.db
       .prepare(`update messages set state_snapshot = ? where id = ?`)
       .run(JSON.stringify(snapshot), messageId);

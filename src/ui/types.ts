@@ -32,7 +32,17 @@ export type VerifierLabelMessage = {
   nodeId: string;
 };
 
-export type StreamMessage = SDKMessage | UserPromptMessage | NodeCompletedMessage | VerifierLabelMessage;
+export type EditWorkflowMessage = { type: "edit_workflow" };
+
+export type EditVerifierMessage = { type: "edit_verifier" };
+
+export type StreamMessage =
+  | SDKMessage
+  | UserPromptMessage
+  | NodeCompletedMessage
+  | VerifierLabelMessage
+  | EditWorkflowMessage
+  | EditVerifierMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 

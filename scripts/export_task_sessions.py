@@ -23,10 +23,14 @@ The first trajectory step is always the user ``message({initial query})``; like 
 are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
+Sidebar edits: step tree / descriptions / outputs → user ``edit_workflow()`` with full ``environment.workflow``
++ ``file``; verifier criterion text or human check/cross status only → ``edit_verifier()`` with
+``environment.verifier`` + ``file`` (same IPC path, different snapshot shape).
+
 Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, and output files)
 comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
 results; turn ``result``; and a synthetic ``verifier_label`` row after the verifier LM updates marks
-(exported as agent ``verify({"nodeId":...})``). Pure ``message("…")`` steps (user or agent) omit ``environment``.
+(exported as agent ``verify("…")`` with the workflow node id). Pure ``message("…")`` steps (user or agent) omit ``environment``.
 Older DBs without ``state_snapshot`` fall back to one end-of-session snapshot.
 
 The second is always the agent ``plan({initial query})``; its ``environment`` has the workflow tree
@@ -560,8 +564,9 @@ def _step_omits_environment(actor: str, action: str, tool_result: Optional[str])
 def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
     """Return (environment dict, True if taken from persisted ``state_snapshot`` on this message)."""
     snap = norm.get("state_snapshot")
-    if isinstance(snap, dict) and "workflow" in snap and "file" in snap:
-        return snap, True
+    if isinstance(snap, dict) and "file" in snap:
+        if "workflow" in snap or "verifier" in snap:
+            return snap, True
     return default_env, False
 
 
@@ -670,8 +675,19 @@ def build_full_session_trajectory(
             step_env, _snap = environment_for_norm(m, final_env)
             nid_raw = m.get("nodeId", "")
             nid = str(nid_raw) if nid_raw is not None else ""
-            act = f"verify({json.dumps({'nodeId': nid}, ensure_ascii=False)})"
+            act = f"verify({json.dumps(nid, ensure_ascii=False)})"
             traj.append(trajectory_row("agent", act, step_env))
+            idx += 1
+            continue
+
+        if m.get("type") == "edit_workflow":
+            step_env, _snap = environment_for_norm(m, final_env)
+            traj.append(trajectory_row("user", "edit_workflow()", step_env))
+            idx += 1
+            continue
+        if m.get("type") == "edit_verifier":
+            step_env, _snap = environment_for_norm(m, final_env)
+            traj.append(trajectory_row("user", "edit_verifier()", step_env))
             idx += 1
             continue
 
@@ -737,13 +753,23 @@ def build_slice_trajectory(
             step_env, _snap = environment_for_norm(m, final_env)
             nid_raw = m.get("nodeId", "")
             nid = str(nid_raw) if nid_raw is not None else ""
-            act = f"verify({json.dumps({'nodeId': nid}, ensure_ascii=False)})"
+            act = f"verify({json.dumps(nid, ensure_ascii=False)})"
             traj.append(trajectory_row("agent", act, step_env))
             idx += 1
             continue
 
         if m.get("role") == "user":
             if m.get("type") == "user_prompt" and is_backend_node_user_prompt(m.get("prompt")):
+                idx += 1
+                continue
+            if m.get("type") == "edit_workflow":
+                step_env, _snap = environment_for_norm(m, final_env)
+                traj.append(trajectory_row("user", "edit_workflow()", step_env))
+                idx += 1
+                continue
+            if m.get("type") == "edit_verifier":
+                step_env, _snap = environment_for_norm(m, final_env)
+                traj.append(trajectory_row("user", "edit_verifier()", step_env))
                 idx += 1
                 continue
             u_env, _u_snap = environment_for_norm(m, final_env)
@@ -942,6 +968,10 @@ def normalize_message(msg: dict) -> dict:
     """Normalize a stored StreamMessage for JSON output (agent turn vs user message)."""
     if msg.get("type") == "user_prompt":
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
+    if msg.get("type") == "edit_workflow":
+        return {"role": "user", "type": "edit_workflow"}
+    if msg.get("type") == "edit_verifier":
+        return {"role": "user", "type": "edit_verifier"}
     if msg.get("type") == "verifier_label":
         return {
             "role": "agent",

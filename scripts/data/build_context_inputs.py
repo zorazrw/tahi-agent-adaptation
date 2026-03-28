@@ -155,6 +155,8 @@ def _verifiers_from_trajectory_env(trajectory: list[dict]) -> str:
     for step in reversed(trajectory):
         env = step.get("environment") or {}
         flat = _flatten_verifiers_from_workflow(env.get("workflow"))
+        if not flat:
+            flat = _flatten_verifiers_from_workflow(env.get("verifier"))
         if flat:
             return _format_verifiers_export(flat)
     return "(none)"

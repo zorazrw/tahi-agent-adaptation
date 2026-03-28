@@ -27,7 +27,18 @@ export type VerifierLabelMessage = {
   nodeId: string;
 };
 
-export type StreamMessage = SDKMessage | UserPromptMessage | VerifierLabelMessage;
+/** User edited step descriptions, output files, or tree shape via the sidebar. */
+export type EditWorkflowMessage = { type: "edit_workflow" };
+
+/** User edited verifier lines or marks only (same tree skeleton). */
+export type EditVerifierMessage = { type: "edit_verifier" };
+
+export type StreamMessage =
+  | SDKMessage
+  | UserPromptMessage
+  | VerifierLabelMessage
+  | EditWorkflowMessage
+  | EditVerifierMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 

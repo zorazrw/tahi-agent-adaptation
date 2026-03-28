@@ -29,7 +29,12 @@ import {
   setContextInductionNotifier,
 } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
-import { buildExportEnvironmentSnapshot, shouldWriteSnapshotForSdkMessage } from "./libs/message-state-snapshot.js";
+import {
+  buildEditVerifierSnapshot,
+  buildExportEnvironmentSnapshot,
+  shouldWriteSnapshotForSdkMessage,
+} from "./libs/message-state-snapshot.js";
+import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -796,10 +801,31 @@ export function handleClientEvent(event: ClientEvent) {
 
   if (event.type === "session.updateWorkflowTree") {
     const { sessionId, workflowTree } = event.payload;
+    const sessBefore = sessions.getSession(sessionId);
+    const oldTree = sessBefore?.workflowTree
+      ? (JSON.parse(JSON.stringify(sessBefore.workflowTree)) as WorkflowNode[])
+      : [];
     sessions.persistWorkflowTree(sessionId, workflowTree);
     if (hasLiveSession(sessionId)) {
       sessions.updateSession(sessionId, { workflowTree });
       broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree } });
+    }
+    const { workflow: wfEdit, verifier: verEdit } = classifyUserWorkflowTreeEdit(oldTree, workflowTree);
+    const sessAfter = sessions.getSession(sessionId);
+    if (sessAfter && wfEdit) {
+      const rowId = sessions.recordMessage(sessionId, { type: "edit_workflow" });
+      sessions.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sessAfter));
+      broadcast({
+        type: "stream.message",
+        payload: { sessionId, message: { type: "edit_workflow" } },
+      });
+    } else if (sessAfter && verEdit) {
+      const rowId = sessions.recordMessage(sessionId, { type: "edit_verifier" });
+      sessions.writeMessageSnapshot(rowId, buildEditVerifierSnapshot(sessAfter));
+      broadcast({
+        type: "stream.message",
+        payload: { sessionId, message: { type: "edit_verifier" } },
+      });
     }
     return;
   }

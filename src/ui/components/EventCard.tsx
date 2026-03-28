@@ -615,6 +615,10 @@ export function MessageCard({
     return null;
   }
 
+  if (message.type === "edit_workflow" || message.type === "edit_verifier") {
+    return null;
+  }
+
   if (message.type === "node_completed") {
     return <NodeOutputSnippet message={message as NodeCompletedMessage} />;
   }
