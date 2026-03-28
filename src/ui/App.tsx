@@ -15,9 +15,39 @@ import { useGroupedMessages } from "./hooks/useGroupedMessages";
 import { FilePreview, getPreviewFileForNode } from "./components/FilePreview";
 import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { PanelRightOpenIcon, PanelRightCloseIcon, Brain } from "lucide-react";
+import { MessagesSquare, MessageSquareX } from "lucide-react";
 
 const SCROLL_THRESHOLD = 50;
+
+/**
+ * Idea bulb like reference: thick upper semicircle (open below), sides curve inward to a short neck,
+ * clear gap, then a full-width base bar — artwork fills the viewBox vertically (no empty band below).
+ */
+function IdeaBulbWithRays({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={`block shrink-0 ${className ?? ""}`}
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden
+      preserveAspectRatio="xMidYMid meet"
+    >
+      <g stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        {/* Five rays — shorter dashes; inner ends sit back from the glass for a clear band of space */}
+        <line x1="12" y1="2.35" x2="12" y2="3.45" />
+        <line x1="4.05" y1="6.05" x2="5.35" y2="6.95" />
+        <line x1="19.95" y1="6.05" x2="18.65" y2="6.95" />
+        <line x1="1.95" y1="10.75" x2="5.35" y2="10.75" />
+        <line x1="22.05" y1="10.75" x2="18.65" y2="10.75" />
+        {/* Two 90° arcs = upper semicircle (center 12,10.75, r=5); Q curves inward to neck */}
+        <path d="M7 10.75A5 5 0 0112 5.75A5 5 0 0117 10.75Q15.45 13.35 14.35 16.35H9.65Q8.55 13.35 7 10.75z" />
+        {/* Base — clear gap under neck, bar low so the glyph fills the viewBox */}
+        <line x1="8.25" y1="21.35" x2="15.75" y2="21.35" />
+      </g>
+    </svg>
+  );
+}
 
 function AnimatedDots() {
   const [count, setCount] = useState(1);
@@ -318,16 +348,20 @@ function App() {
 
       <main className="flex flex-1 flex-col ml-[var(--sidebar-width)] min-h-0 overflow-hidden bg-surface-cream">
         <div
-          className="relative flex shrink-0 items-center justify-end h-12 px-4 border-b border-ink-900/10 bg-surface-cream select-none"
+          className="relative flex shrink-0 items-center justify-end px-4 pt-3 pb-2 border-b border-ink-900/10 bg-surface-cream select-none"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
-          <span className="absolute left-0 right-0 flex justify-center pointer-events-none text-sm font-medium text-ink-700">{activeSession?.title || "Agent Cowork"}</span>
+          <div className="absolute inset-x-0 flex justify-center pointer-events-none px-28 min-w-0 -translate-x-10">
+            <span className="min-w-0 max-w-full text-center text-base font-semibold text-ink-900 tracking-tight truncate">
+              {activeSession?.title || "Agent Cowork"}
+            </span>
+          </div>
           {activeSession && (
-            <div className="relative z-10 flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <div className="relative z-10 flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <button
                 type="button"
                 onClick={() => setShowMemoryModal(true)}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
+                className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-ink-800 px-2.5 py-1 rounded-md hover:bg-ink-900/5 transition-colors"
                 title={
                   contextInductionDepth > 0
                     ? "Updating memories and skills from the last completed step…"
@@ -337,24 +371,26 @@ function App() {
                 aria-busy={contextInductionDepth > 0}
               >
                 <span
-                  className={contextInductionDepth > 0 ? "brain-inducing" : "inline-flex text-inherit"}
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-inherit ${contextInductionDepth > 0 ? "brain-inducing" : ""}`}
                   aria-hidden
                 >
-                  <Brain className="size-3.5 stroke-[1.75]" />
+                  <IdeaBulbWithRays className="h-full w-full" />
                 </span>
                 Brain
               </button>
               <button
                 type="button"
                 onClick={() => setPreviewPanelOpen(!previewPanelOpen)}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
+                className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-ink-800 px-2.5 py-1 rounded-md hover:bg-ink-900/5 transition-colors"
                 title={previewPanelOpen ? "Close chat" : "Open chat"}
               >
-                {previewPanelOpen ? (
-                  <PanelRightCloseIcon className="size-3.5" />
-                ) : (
-                  <PanelRightOpenIcon className="size-3.5" />
-                )}
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center" aria-hidden>
+                  {previewPanelOpen ? (
+                    <MessageSquareX className="size-full stroke-[1.5]" />
+                  ) : (
+                    <MessagesSquare className="size-full stroke-[1.5]" />
+                  )}
+                </span>
                 Chat
               </button>
             </div>
