@@ -359,7 +359,7 @@ export function MemoryModal({ onClose }: MemoryModalProps) {
           <div className="w-full max-w-2xl rounded-2xl border border-ink-900/5 bg-surface shadow-elevated animate-scale-in flex flex-col max-h-[88vh]">
             <div className="flex items-center justify-between px-6 pt-6 pb-0 shrink-0 gap-3">
               <div>
-                <Dialog.Title className="text-base font-semibold text-ink-800">Memory &amp; skills</Dialog.Title>
+                <Dialog.Title className="text-base font-semibold text-ink-800">Brain</Dialog.Title>
                 <p className="text-xs text-muted-foreground mt-1 pr-4">
                   <strong className="text-ink-700">Memory</strong> files are merged into every model prompt.{" "}
                   <strong className="text-ink-700">Skills</strong> are top-level <code className="text-[11px] bg-ink-900/5 px-1 rounded">*.md</code> in

@@ -330,10 +330,10 @@ function App() {
                 className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
                 title={
                   contextInductionDepth > 0
-                    ? "Updating memory & skills from the last completed step…"
-                    : "Memory & skills — edit context and skill .md files"
+                    ? "Updating memories and skills from the last completed step…"
+                    : "Brain — edit memory and skill .md files injected into the agent"
                 }
-                aria-label="Open memory and skills"
+                aria-label="Brain: memories and skills"
                 aria-busy={contextInductionDepth > 0}
               >
                 <span
@@ -342,7 +342,7 @@ function App() {
                 >
                   <Brain className="size-3.5 stroke-[1.75]" />
                 </span>
-                Memory
+                Brain
               </button>
               <button
                 type="button"
