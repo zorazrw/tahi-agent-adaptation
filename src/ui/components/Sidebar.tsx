@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/ui/components/ui/combobox";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/ui/components/ui/tooltip";
-import type { ClientEvent, WorkflowNode, VerifierMark } from "../types";
+import type { ClientEvent, WorkflowNode } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
 interface SidebarProps {
@@ -359,6 +359,8 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const updateWorkflowTree = useAppStore((s) => s.updateWorkflowTree);
   const updateVerificationDepth = useAppStore((s) => s.updateVerificationDepth);
   const updateSessionTitle = useAppStore((s) => s.updateSessionTitle);
+  const workflowRunMode = useAppStore((s) => s.workflowRunMode);
+  const setWorkflowRunMode = useAppStore((s) => s.setWorkflowRunMode);
 
   const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -377,31 +379,26 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const selectedNode = useMemo(() => selectedNodeId ? findNode(workflowTree, selectedNodeId) : undefined, [workflowTree, selectedNodeId]);
   const effectiveDepth = verificationDepth;
 
-  // Auto-collapse nodes below verification depth when depth changes
-  const prevDepthRef = useRef(verificationDepth);
-  useEffect(() => {
-    if (workflowTree.length === 0) return;
-    // Only reset collapsed state when verificationDepth actually changes
-    if (prevDepthRef.current === verificationDepth) return;
-    prevDepthRef.current = verificationDepth;
-    const toCollapse = new Set<string>();
-    function walk(nodes: WorkflowNode[]) {
-      for (const node of nodes) {
-        if (node.children.length > 0 && node.depth >= verificationDepth) {
-          toCollapse.add(node.id);
-        }
-        walk(node.children);
-      }
-    }
-    walk(workflowTree);
-    setCollapsedNodeIds(toCollapse);
-  }, [verificationDepth, workflowTree]);
+  /** Stale when session or plan shape changes; same string when only in-place edits keep the same root ids. */
+  const workflowTreeIdentity = useMemo(() => {
+    if (!activeSessionId || workflowTree.length === 0) return "";
+    return `${activeSessionId}:${workflowTree.map((r) => r.id).join("/")}`;
+  }, [activeSessionId, workflowTree]);
 
-  // Auto-collapse on initial tree load
-  const initialCollapseRef = useRef(false);
+  const lastAppliedCollapseRef = useRef<{ identity: string; depth: number } | null>(null);
+
+  // Collapse branches that should be hidden at the current verification depth (coarse = collapse all nested parents).
   useEffect(() => {
-    if (workflowTree.length === 0 || initialCollapseRef.current) return;
-    initialCollapseRef.current = true;
+    if (!workflowTreeIdentity || workflowTree.length === 0) return;
+
+    const prev = lastAppliedCollapseRef.current;
+    const identityChanged = !prev || prev.identity !== workflowTreeIdentity;
+    const depthChanged = !prev || prev.depth !== verificationDepth;
+
+    if (!identityChanged && !depthChanged) return;
+
+    lastAppliedCollapseRef.current = { identity: workflowTreeIdentity, depth: verificationDepth };
+
     const toCollapse = new Set<string>();
     function walk(nodes: WorkflowNode[]) {
       for (const node of nodes) {
@@ -413,7 +410,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     }
     walk(workflowTree);
     setCollapsedNodeIds(toCollapse);
-  }, [workflowTree]);
+  }, [workflowTreeIdentity, verificationDepth, workflowTree]);
 
   // Auto-select first node at effective depth if nothing selected
   useEffect(() => {
@@ -679,47 +676,60 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
       {/* Progress: tree + slider + run button — takes all remaining space */}
       {sessionList.length > 0 && (
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5">
-          <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
-            <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Progress</span>
-            {workflowTree.length > 0 && maxDepth > 0 && (
-              <div className="flex items-center gap-0.5 shrink-0 text-xs ml-3">
+          <div className="flex items-center gap-2 mb-2.5 shrink-0 min-w-0">
+            <span className="text-base font-semibold text-ink-900 truncate tracking-tight shrink-0">Progress</span>
+            {workflowTree.length > 0 && (
+              <div className="flex items-center gap-1.5 shrink-0 text-xs">
                 <TooltipProvider delayDuration={300}>
+                  {maxDepth > 0 && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          disabled={!activeSessionId}
+                          onClick={() => handleDepthCommit(verificationDepth === 0 ? maxDepth : 0)}
+                          className="inline-flex h-5 w-14 shrink-0 items-center justify-center rounded-md border border-[#f3d5b5] bg-transparent px-0 py-0 text-ink-700 text-[11px] font-medium leading-none transition-colors hover:border-primary/30 hover:bg-primary/5 disabled:opacity-40 disabled:pointer-events-none"
+                          aria-label={
+                            verificationDepth === 0
+                              ? "Verification: coarse (high level). Click to switch to detail."
+                              : "Verification: detail. Click to switch to coarse."
+                          }
+                        >
+                          {verificationDepth === 0 ? "Coarse" : "Detail"}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">
+                        {verificationDepth === 0
+                          ? "Verifying at coarse (high) level. Click for detailed sub-steps."
+                          : "Verifying with detailed sub-steps. Click for coarse level only."}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
                         type="button"
-                        onClick={() => handleDepthCommit(0)}
-                        className={`px-1.5 py-0.5 rounded-md border text-xs transition-colors ${
-                          verificationDepth === 0
-                            ? "border-[#f3d5b5] bg-transparent text-ink-700 font-medium"
-                            : "border-transparent text-muted-foreground hover:border-primary/12 hover:bg-primary/5 hover:text-ink-600"
-                        }`}
+                        onClick={() => setWorkflowRunMode(workflowRunMode === "manual" ? "auto" : "manual")}
+                        className="inline-flex h-5 w-14 shrink-0 items-center justify-center rounded-md border border-[#f3d5b5] bg-transparent px-0 py-0 text-ink-700 text-[11px] font-medium leading-none transition-colors hover:border-primary/30 hover:bg-primary/5"
+                        aria-label={
+                          workflowRunMode === "manual"
+                            ? "Steps: wait (pause after each). Click to run all steps automatically."
+                            : "Steps: auto. Click to wait after each step."
+                        }
                       >
-                        Auto
+                        {workflowRunMode === "manual" ? "Wait" : "Auto"}
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent side="bottom">Verify at high level</TooltipContent>
-                  </Tooltip>
-                  <span className="text-ink-900/20 select-none" aria-hidden>·</span>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() => handleDepthCommit(maxDepth)}
-                        className={`px-1.5 py-0.5 rounded-md border text-xs transition-colors ${
-                          verificationDepth === maxDepth
-                            ? "border-[#f3d5b5] bg-transparent text-ink-700 font-medium"
-                            : "border-transparent text-muted-foreground hover:border-primary/12 hover:bg-primary/5 hover:text-ink-600"
-                        }`}
-                      >
-                        Detail
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">Verify at detailed level</TooltipContent>
+                    <TooltipContent side="bottom">
+                      {workflowRunMode === "manual"
+                        ? "Wait after each step. Click to run remaining steps automatically."
+                        : "Run steps in sequence until finished. Click to wait after each step."}
+                    </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
               </div>
             )}
+            <div className="flex-1 min-w-0" aria-hidden />
             <TooltipProvider delayDuration={300}>
               <Tooltip>
                 <TooltipTrigger asChild>

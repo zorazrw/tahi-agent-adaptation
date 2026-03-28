@@ -1,5 +1,26 @@
 import { create } from 'zustand';
-import type { ServerEvent, SessionStatus, StreamMessage, NodeCompletedMessage, VerifierMark, WorkflowNode } from "../types";
+import type { ServerEvent, SessionStatus, StreamMessage, NodeCompletedMessage, WorkflowNode } from "../types";
+import {
+  clearAllPendingWorkflowAutoAdvance,
+  clearPendingWorkflowAutoAdvance,
+  consumePendingWorkflowAutoAdvance,
+  findNextRunnableWorkflowNodeId,
+  markPendingWorkflowAutoAdvance,
+} from "../lib/workflow-run";
+
+const WORKFLOW_RUN_MODE_KEY = "agent-cowork-workflow-run-mode";
+
+export type WorkflowRunMode = "manual" | "auto";
+
+function readStoredWorkflowRunMode(): WorkflowRunMode {
+  try {
+    const v = localStorage.getItem(WORKFLOW_RUN_MODE_KEY);
+    if (v === "auto" || v === "manual") return v;
+  } catch {
+    /* ignore */
+  }
+  return "auto";
+}
 
 export type PermissionRequest = {
   toolUseId: string;
@@ -44,6 +65,8 @@ interface AppState {
   previewPanelOpen: boolean;
   /** Active context export + extract_context runs (memory/skill induction). */
   contextInductionDepth: number;
+  /** After each step completes, wait for next Run (manual) or chain steps until the workflow is done (auto). */
+  workflowRunMode: WorkflowRunMode;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -61,6 +84,7 @@ interface AppState {
   setHighlightDepth: (depth: number | null) => void;
   setPreviewPanelOpen: (open: boolean) => void;
   setApiConfigChecked: (checked: boolean) => void;
+  setWorkflowRunMode: (mode: WorkflowRunMode) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
   updateWorkflowTree: (sessionId: string, workflowTree: WorkflowNode[]) => void;
@@ -109,6 +133,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   tempCwd: null,
   previewPanelOpen: false,
   contextInductionDepth: 0,
+  workflowRunMode: readStoredWorkflowRunMode(),
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
@@ -130,6 +155,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   setHighlightDepth: (highlightDepth) => set({ highlightDepth }),
   setPreviewPanelOpen: (previewPanelOpen) => set({ previewPanelOpen }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
+
+  setWorkflowRunMode: (workflowRunMode) => {
+    try {
+      localStorage.setItem(WORKFLOW_RUN_MODE_KEY, workflowRunMode);
+    } catch {
+      /* ignore */
+    }
+    if (workflowRunMode === "manual") {
+      clearAllPendingWorkflowAutoAdvance();
+    }
+    set({ workflowRunMode });
+  },
 
   toolStatuses: {},
   setToolStatus: (toolUseId, status) => set((state) => ({
@@ -361,6 +398,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       case "session.nodeCompleted": {
         const { sessionId, nodeId } = event.payload;
+        if (get().workflowRunMode === "auto") {
+          markPendingWorkflowAutoAdvance(sessionId);
+        }
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           const isActive = sessionId === state.activeSessionId;
@@ -385,6 +425,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       case "session.status": {
         const { sessionId, status, title, cwd } = event.payload;
+        const shouldChainStep =
+          get().workflowRunMode === "auto" &&
+          consumePendingWorkflowAutoAdvance(sessionId, status);
+
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           const isActive = sessionId === state.activeSessionId;
@@ -407,12 +451,32 @@ export const useAppStore = create<AppState>((set, get) => ({
           get().setActiveSessionId(sessionId);
           set({ pendingStart: false, showStartModal: false });
         }
+
+        if (shouldChainStep) {
+          const after = get();
+          const session = after.sessions[sessionId];
+          const tree = session?.workflowTree;
+          const vd = session?.verificationDepth ?? 0;
+          if (tree?.length) {
+            const nextId = findNextRunnableWorkflowNodeId(tree, vd);
+            if (nextId && typeof window !== "undefined" && window.electron?.sendClientEvent) {
+              if (sessionId === after.activeSessionId) {
+                set({ selectedNodeId: nextId, runningNodeId: nextId });
+              }
+              window.electron.sendClientEvent({
+                type: "session.solveNode",
+                payload: { sessionId, nodeId: nextId },
+              });
+            }
+          }
+        }
         break;
       }
 
       case "session.deleted": {
         const { sessionId } = event.payload;
         const state = get();
+        clearPendingWorkflowAutoAdvance(sessionId);
 
         const nextSessions = { ...state.sessions };
         delete nextSessions[sessionId];

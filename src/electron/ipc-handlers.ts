@@ -7,7 +7,6 @@ import {
   findParentNode,
   getNextIncompleteChild,
   isNodeFullyComplete,
-  getMaxDepth,
   getNodePath,
   updateNodeStatus,
   resetNode,
@@ -163,8 +162,7 @@ function emit(event: ServerEvent) {
     const { sessionId, workflowTree } = event.payload;
     const session = sessions.getSession(sessionId);
     if (session) {
-      const maxD = getMaxDepth(workflowTree);
-      const defaultDepth = Math.max(0, Math.floor(maxD / 2));
+      const defaultDepth = 0;
       sessions.updateSession(sessionId, {
         workflowTree,
         verificationDepth: defaultDepth,

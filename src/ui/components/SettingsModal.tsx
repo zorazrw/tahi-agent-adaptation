@@ -1,12 +1,58 @@
 import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import { useAppStore } from "../store/useAppStore";
+import type { WorkflowRunMode } from "../store/useAppStore";
 import { Spinner } from "./Spinner";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "api" | "skills";
+type Tab = "api" | "workflow" | "skills";
+
+function WorkflowPanel() {
+  const workflowRunMode = useAppStore((s) => s.workflowRunMode);
+  const setWorkflowRunMode = useAppStore((s) => s.setWorkflowRunMode);
+
+  const row = (mode: WorkflowRunMode, title: string, description: string) => (
+    <label
+      key={mode}
+      className="flex cursor-pointer gap-3 rounded-xl border border-ink-900/10 bg-surface p-4 hover:border-ink-900/20 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary/30"
+    >
+      <input
+        type="radio"
+        name="workflowRunMode"
+        className="mt-1 border-ink-900/20 text-primary focus:ring-primary/30"
+        checked={workflowRunMode === mode}
+        onChange={() => setWorkflowRunMode(mode)}
+      />
+      <div>
+        <div className="text-sm font-medium text-ink-800">{title}</div>
+        <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{description}</p>
+      </div>
+    </label>
+  );
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground leading-relaxed">
+        Controls how the app advances through the workflow tree after a step completes successfully.
+      </p>
+      <div className="space-y-2">
+        {row(
+          "manual",
+          "Wait",
+          "Pause after each step. Start the next step yourself with Run in the sidebar."
+        )}
+        {row(
+          "auto",
+          "Auto",
+          "Automatically start the next incomplete step until every step in the plan is finished (default for new installs)."
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<Tab>("api");
@@ -33,7 +79,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </div>
 
             {/* Tabs */}
-            <div className="flex gap-1 px-6 pt-4 pb-0 shrink-0">
+            <div className="flex gap-1 px-6 pt-4 pb-0 shrink-0 flex-wrap">
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                   tab === "api"
@@ -43,6 +89,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 onClick={() => setTab("api")}
               >
                 API
+              </button>
+              <button
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  tab === "workflow"
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+                onClick={() => setTab("workflow")}
+              >
+                Workflow
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
@@ -58,7 +114,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
             {/* Tab content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6 pt-4">
-              {tab === "api" ? <ApiPanel onClose={onClose} /> : <SkillsPanel />}
+              {tab === "api" ? (
+                <ApiPanel onClose={onClose} />
+              ) : tab === "workflow" ? (
+                <WorkflowPanel />
+              ) : (
+                <SkillsPanel />
+              )}
             </div>
           </div>
         </Dialog.Content>
