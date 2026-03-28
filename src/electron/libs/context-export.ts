@@ -43,11 +43,11 @@ function pythonExecutable(): string {
 }
 
 /**
- * Export the session to userData/out.json (export_task_sessions.py), then run
- * extract_context.py to append-derived memories/skills into memories/memory.md
- * and skills/skill.md under userData. Runs asynchronously; failures are logged only.
+ * Export the completed workflow node to userData/tasks/{taskUnitId}.json, then run
+ * extract_context.py on that file. Memories/skills go under userData.
+ * Runs asynchronously; failures are logged only.
  */
-export function runExportAndExtractContext(sessionId: string): void {
+export function runExportAndExtractContext(sessionId: string, taskUnitId: string): void {
   const root = scriptsRootDir();
   if (!root) {
     logLine("Skip: scripts/ not found (dev: open repo root; packaged: extraResources).");
@@ -62,7 +62,8 @@ export function runExportAndExtractContext(sessionId: string): void {
 
   const userData = app.getPath("userData");
   const dbPath = join(userData, "sessions.db");
-  const outJson = join(userData, "out.json");
+  const tasksDir = join(userData, "tasks");
+  const taskJsonPath = join(tasksDir, `${taskUnitId}.json`);
   if (!existsSync(dbPath)) {
     logLine("Skip: sessions.db missing.");
     return;
@@ -84,12 +85,14 @@ export function runExportAndExtractContext(sessionId: string): void {
     dbPath,
     "--session-id",
     sessionId,
-    "--output",
-    outJson,
+    "--tasks-dir",
+    tasksDir,
+    "--task-unit-id",
+    taskUnitId,
     "--pretty",
   ];
 
-  logLine(`export_task_sessions session=${sessionId}`);
+  logLine(`export_task_sessions session=${sessionId} taskUnit=${taskUnitId}`);
 
   const exportProc = spawn(py, exportArgs, {
     cwd: root,
@@ -117,7 +120,7 @@ export function runExportAndExtractContext(sessionId: string): void {
 
     const extractProc = spawn(
       py,
-      [extractScript, "--data_path", outJson, "--output_dir", userData],
+      [extractScript, "--data_path", taskJsonPath, "--output_dir", userData],
       { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
     );
 

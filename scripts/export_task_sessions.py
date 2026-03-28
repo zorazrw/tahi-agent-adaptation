@@ -20,7 +20,10 @@ Database location (Electron userData):
 
 Usage:
   conda activate code   # optional: use "code" env
-  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] [--granularity {all,automation,control}]
+  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
+    [--tasks-dir DIR [--task-unit-id NODE_UUID]] [--granularity {all,automation,control}]
+  # Per-task files: --tasks-dir requires --session-id. Each task unit is written as tasks/{unit-id}.json
+  # (unit id is the workflow node id, a UUID). With --task-unit-id, only that file is updated.
   # Use AGENT_COWORK_DB to override DB path:
   AGENT_COWORK_DB=/path/to/sessions.db python export_task_sessions.py
 """
@@ -333,7 +336,9 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str, granularity: Granul
     if tree_nodes:
         for node in tree_nodes:
             node_id = node.get("id") if isinstance(node.get("id"), str) else None
-            segment = node_id_to_segment.get(node_id, []) if node_id else []
+            if not node_id:
+                continue
+            segment = node_id_to_segment.get(node_id, [])
             human_trajectory, agent_trajectory = split_trajectory(segment)
 
             intent = str(node.get("description") or "")
@@ -355,6 +360,7 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str, granularity: Granul
 
             task_units.append(
                 {
+                    "id": node_id,
                     "intent": intent,
                     "agent_trajectory": agent_trajectory,
                     "verifiers": verifiers_bool,
@@ -367,12 +373,15 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str, granularity: Granul
         # Legacy sessions effectively only have a single "automation" level (flat steps).
         if granularity in ("all", "automation"):
             workflow_steps = build_workflow_steps(steps, output_files, verification_criteria, verifier_marks)
-            for step in workflow_steps:
+            for i, step in enumerate(workflow_steps):
                 # Legacy: we don't have per-step boundaries in messages, so keep empty per-step trajectories.
+                step_idx = step.get("step_index", i)
+                unit_id = f"{sid}-step-{step_idx}"
                 human_trajectory, agent_trajectory = [], []
                 verifiers_bool = [{"criterion": v.get("criterion", ""), "status": v.get("status") == "success"} for v in step.get("verifiers", [])]
                 task_units.append(
                     {
+                        "id": unit_id,
                         "intent": step.get("step_description", ""),
                         "agent_trajectory": agent_trajectory,
                         "verifiers": verifiers_bool,
@@ -389,6 +398,42 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str, granularity: Granul
     }
 
 
+def build_single_task_payload(session: dict, unit: dict) -> dict:
+    """Minimal session-shaped JSON for one task unit (for tasks/{id}.json)."""
+    return {
+        "session_id": session["session_id"],
+        "title": session.get("title") or "",
+        "initial_task_instruction": session.get("initial_task_instruction") or "",
+        "task_units": [unit],
+    }
+
+
+def write_session_to_tasks_dir(
+    session: dict,
+    tasks_dir: Path,
+    *,
+    only_unit_id: Optional[str] = None,
+    pretty: bool = False,
+) -> int:
+    """Write each task unit to ``tasks_dir / f\"{unit['id']}.json\"``. If only_unit_id is set, write only that unit."""
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for unit in session.get("task_units", []):
+        uid = unit.get("id")
+        if not isinstance(uid, str) or not uid:
+            continue
+        if only_unit_id is not None and uid != only_unit_id:
+            continue
+        path = tasks_dir / f"{uid}.json"
+        payload = build_single_task_payload(session, unit)
+        body = json.dumps(payload, indent=2 if pretty else None, ensure_ascii=False)
+        if not body.endswith("\n"):
+            body += "\n"
+        path.write_text(body, encoding="utf-8")
+        written += 1
+    return written
+
+
 def extract_all_sessions(cursor: sqlite3.Cursor, granularity: Granularity) -> List[dict]:
     rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
     out = []
@@ -402,7 +447,17 @@ def extract_all_sessions(cursor: sqlite3.Cursor, granularity: Granularity) -> Li
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export Agent Cowork task sessions to JSON")
     parser.add_argument("--db", type=Path, help="Path to sessions.db (default: Electron userData location)")
-    parser.add_argument("--output", "-o", type=Path, help="Output JSON file (default: stdout)")
+    parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout). Ignored if --tasks-dir is set.")
+    parser.add_argument(
+        "--tasks-dir",
+        type=Path,
+        help="Write one file per task unit: {unit-id}.json (requires --session-id). Use --task-unit-id to update only one file.",
+    )
+    parser.add_argument(
+        "--task-unit-id",
+        type=str,
+        help="With --tasks-dir, only write/update this task unit's JSON (workflow node id / unit id).",
+    )
     parser.add_argument("--session-id", type=str, help="Export only this session ID")
     parser.add_argument(
         "--granularity",
@@ -428,20 +483,47 @@ def main() -> int:
     cursor = conn.cursor()
 
     try:
-        if args.session_id:
+        if args.tasks_dir:
+            if not args.session_id:
+                print("Error: --tasks-dir requires --session-id", file=sys.stderr)
+                return 1
+            data = extract_session(cursor, args.session_id, args.granularity)
+            if not data:
+                print(f"Error: session not found: {args.session_id}", file=sys.stderr)
+                return 1
+            n = write_session_to_tasks_dir(
+                data,
+                args.tasks_dir,
+                only_unit_id=args.task_unit_id,
+                pretty=args.pretty,
+            )
+            if args.task_unit_id and n == 0:
+                print(
+                    f"Error: no task unit with id {args.task_unit_id!r} in this session export",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"Wrote {n} task file(s) under {args.tasks_dir}", file=sys.stderr)
+        elif args.session_id:
             data = extract_session(cursor, args.session_id, args.granularity)
             if not data:
                 print(f"Error: session not found: {args.session_id}", file=sys.stderr)
                 return 1
             payload = data
+            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
+            if args.output:
+                args.output.write_text(json_str, encoding="utf-8")
+                print(f"Wrote {args.output}", file=sys.stderr)
+            else:
+                print(json_str)
         else:
             payload = {"sessions": extract_all_sessions(cursor, args.granularity)}
-        json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
-        if args.output:
-            args.output.write_text(json_str, encoding="utf-8")
-            print(f"Wrote {args.output}", file=sys.stderr)
-        else:
-            print(json_str)
+            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
+            if args.output:
+                args.output.write_text(json_str, encoding="utf-8")
+                print(f"Wrote {args.output}", file=sys.stderr)
+            else:
+                print(json_str)
     finally:
         conn.close()
 

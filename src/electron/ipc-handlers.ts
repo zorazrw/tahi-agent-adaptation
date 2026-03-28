@@ -227,7 +227,7 @@ function emit(event: ServerEvent) {
             broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: session.workflowTree } });
           }
           broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
-          runExportAndExtractContext(sessionId);
+          runExportAndExtractContext(sessionId, nodeId);
         }
       }
     }
