@@ -23,9 +23,8 @@ The first trajectory step is always the user ``message({initial query})``; like 
 are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
-Sidebar edits: step tree / descriptions / outputs → ``edit_workflow()`` (``workflow`` + ``file``);
-verifier-only → ``edit_verifier()`` (``verifier`` + ``file``). Preview panel save → ``file_edit("path")``
-with ``environment.file`` only (all tracked output files after the write).
+``edit_workflow()``, ``edit_verifier()``, and preview ``file_edit("…")`` rows all persist the same
+``environment`` shape: ``workflow`` (nested steps + verifier criteria/status) and ``file`` (output paths + content).
 
 Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, and output files)
 comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
@@ -562,10 +561,23 @@ def _step_omits_environment(actor: str, action: str, tool_result: Optional[str])
 
 
 def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
-    """Return (environment dict, True if taken from persisted ``state_snapshot`` on this message)."""
+    """Return (environment dict, True if taken from persisted ``state_snapshot`` on this message).
+
+    Canonical shape is always ``{"workflow": [...], "file": [...]}``. Legacy rows may store only
+    ``file`` or ``verifier`` + ``file``; those are merged with ``default_env["workflow"]``.
+    """
     snap = norm.get("state_snapshot")
-    if isinstance(snap, dict) and "file" in snap:
-        return snap, True
+    if not isinstance(snap, dict):
+        return default_env, False
+    files = snap.get("file")
+    if not isinstance(files, list):
+        return default_env, False
+    wf = snap.get("workflow")
+    if isinstance(wf, list):
+        return {"workflow": wf, "file": files}, True
+    wf_fb = default_env.get("workflow")
+    if isinstance(wf_fb, list):
+        return {"workflow": wf_fb, "file": files}, True
     return default_env, False
 
 

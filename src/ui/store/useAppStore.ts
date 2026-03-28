@@ -63,7 +63,7 @@ interface AppState {
   attachedFiles: string[];
   tempCwd: string | null;
   previewPanelOpen: boolean;
-  /** Active context export + extract_context runs (memory/skill induction). */
+  /** Active context export + induce.py runs (memory/skill induction). */
   contextInductionDepth: number;
   /** After each step completes, wait for next Run (manual) or chain steps until the workflow is done (auto). */
   workflowRunMode: WorkflowRunMode;

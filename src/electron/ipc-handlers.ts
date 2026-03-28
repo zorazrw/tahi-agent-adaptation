@@ -29,12 +29,7 @@ import {
   setContextInductionNotifier,
 } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
-import {
-  buildEditVerifierSnapshot,
-  buildExportEnvironmentSnapshot,
-  buildFileEditEnvironmentSnapshot,
-  shouldWriteSnapshotForSdkMessage,
-} from "./libs/message-state-snapshot.js";
+import { buildExportEnvironmentSnapshot, shouldWriteSnapshotForSdkMessage } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
@@ -822,7 +817,7 @@ export function handleClientEvent(event: ClientEvent) {
       });
     } else if (sessAfter && verEdit) {
       const rowId = sessions.recordMessage(sessionId, { type: "edit_verifier" });
-      sessions.writeMessageSnapshot(rowId, buildEditVerifierSnapshot(sessAfter));
+      sessions.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sessAfter));
       broadcast({
         type: "stream.message",
         payload: { sessionId, message: { type: "edit_verifier" } },
@@ -926,14 +921,14 @@ export function handleClientEvent(event: ClientEvent) {
   }
 }
 
-/** Called from main after a successful preview-panel ``write-file`` (user edited an output file on disk). */
+/** Called from main after a successful preview-panel ``write-file`` (full workflow+file snapshot, same as other env rows). */
 export function recordFileEditAfterPreviewSave(sessionId: string, editedRelPath: string): void {
   const store = initializeSessions();
   const sess = store.getSession(sessionId);
   if (!sess) return;
   const pathNorm = editedRelPath.replace(/\\/g, "/");
   const rowId = store.recordMessage(sessionId, { type: "file_edit", path: pathNorm });
-  store.writeMessageSnapshot(rowId, buildFileEditEnvironmentSnapshot(sess));
+  store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sess));
   broadcast({
     type: "stream.message",
     payload: { sessionId, message: { type: "file_edit", path: pathNorm } },

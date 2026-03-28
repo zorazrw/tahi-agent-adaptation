@@ -46,33 +46,6 @@ function workflowNestedForExport(nodes: WorkflowNode[]): Array<{
   });
 }
 
-/** Verifier panel shape: id, criteria + status (human toggles / edits), nested by workflow tree. */
-function verifierTreeForExport(nodes: WorkflowNode[]): Array<{
-  id: string;
-  verifiers: Array<{ criterion: string; status: "success" | "failure" }>;
-  children: ReturnType<typeof verifierTreeForExport>;
-}> {
-  return nodes.map((n) => {
-    const crits = Array.isArray(n.verifiers) ? n.verifiers : [];
-    const marksRaw = Array.isArray(n.verifierMarks) ? n.verifierMarks : [];
-    const verifiers = crits.map((c, j) => ({
-      criterion: typeof c === "string" ? c : String(c),
-      status: verifierStatusForExport(marksRaw[j] as VerifierMark | undefined),
-    }));
-    return {
-      id: n.id,
-      verifiers,
-      children: verifierTreeForExport(Array.isArray(n.children) ? n.children : []),
-    };
-  });
-}
-
-/** Snapshot for user ``edit_verifier`` rows: nested node ids with criteria + pass/fail, plus output files. */
-export type EditVerifierEnvironmentSnapshot = {
-  verifier: ReturnType<typeof verifierTreeForExport>;
-  file: ReturnType<typeof buildOutputFileEntries>;
-};
-
 function orderedOutputRelPathsFromTree(tree: WorkflowNode[]): string[] {
   const seen = new Set<string>();
   const ordered: string[] = [];
@@ -195,28 +168,6 @@ export function buildExportEnvironmentSnapshot(session: Session): ExportEnvironm
   const originals = collectOriginalOutputsMap(tree);
   const files = buildOutputFileEntries(session.cwd, relPaths, originals);
   return { workflow: wf, file: files };
-}
-
-/** For ``edit_verifier`` only: ``environment.verifier`` (+ ``file``); criteria reflect criterion text and check/cross status. */
-export function buildEditVerifierSnapshot(session: Session): EditVerifierEnvironmentSnapshot {
-  const tree = session.workflowTree ?? [];
-  const relPaths = orderedOutputRelPathsFromTree(tree);
-  const originals = collectOriginalOutputsMap(tree);
-  const files = buildOutputFileEntries(session.cwd, relPaths, originals);
-  return { verifier: verifierTreeForExport(tree), file: files };
-}
-
-/** After a preview-panel save: same ``file`` array as full export (workflow output paths + disk/original content). */
-export type FileEditEnvironmentSnapshot = {
-  file: ReturnType<typeof buildOutputFileEntries>;
-};
-
-export function buildFileEditEnvironmentSnapshot(session: Session): FileEditEnvironmentSnapshot {
-  const tree = session.workflowTree ?? [];
-  const relPaths = orderedOutputRelPathsFromTree(tree);
-  const originals = collectOriginalOutputsMap(tree);
-  const files = buildOutputFileEntries(session.cwd, relPaths, originals);
-  return { file: files };
 }
 
 /** Whether to persist a snapshot for this SDK message (per meaningful agent turn / tool outcome). */
