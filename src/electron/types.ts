@@ -51,6 +51,10 @@ export type ServerEvent =
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }
   | { type: "session.nodeCompleted"; payload: { sessionId: string; nodeId: string } }
+  | {
+      type: "session.contextInduction";
+      payload: { phase: "started" | "finished"; sessionId: string; ok?: boolean };
+    }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } }
   | { type: "workflow.plan"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }

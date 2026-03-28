@@ -24,6 +24,7 @@ import {
   syncAppSkills,
   isValidFlatSkillMdFileName,
 } from "./libs/skill-store.js";
+import { runExportAndExtractContext, setContextInductionNotifier } from "./libs/context-export.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -124,6 +125,20 @@ function broadcast(event: ServerEvent) {
   }
 }
 
+setContextInductionNotifier((ev) => {
+  if (ev.kind === "start") {
+    broadcast({
+      type: "session.contextInduction",
+      payload: { phase: "started", sessionId: ev.sessionId },
+    });
+  } else {
+    broadcast({
+      type: "session.contextInduction",
+      payload: { phase: "finished", sessionId: ev.sessionId, ok: ev.ok },
+    });
+  }
+});
+
 function hasLiveSession(sessionId: string): boolean {
   if (!sessions) return false;
   return Boolean(sessions.getSession(sessionId));
@@ -212,6 +227,7 @@ function emit(event: ServerEvent) {
             broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: session.workflowTree } });
           }
           broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
+          runExportAndExtractContext(sessionId);
         }
       }
     }

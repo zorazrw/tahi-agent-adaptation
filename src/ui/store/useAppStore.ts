@@ -42,6 +42,8 @@ interface AppState {
   attachedFiles: string[];
   tempCwd: string | null;
   previewPanelOpen: boolean;
+  /** Active context export + extract_context runs (memory/skill induction). */
+  contextInductionDepth: number;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -106,6 +108,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   attachedFiles: [],
   tempCwd: null,
   previewPanelOpen: false,
+  contextInductionDepth: 0,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
@@ -342,6 +345,17 @@ export const useAppStore = create<AppState>((set, get) => ({
             ...(isActive ? { previewPanelOpen: false } : {})
           };
         });
+        break;
+      }
+
+      case "session.contextInduction": {
+        const { phase } = event.payload;
+        set((state) => ({
+          contextInductionDepth:
+            phase === "started"
+              ? state.contextInductionDepth + 1
+              : Math.max(0, state.contextInductionDepth - 1),
+        }));
         break;
       }
 

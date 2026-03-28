@@ -63,6 +63,7 @@ function App() {
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const previewPanelOpen = useAppStore((s) => s.previewPanelOpen);
   const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
+  const contextInductionDepth = useAppStore((s) => s.contextInductionDepth);
 
   // Helper function to extract partial message content
   const getPartialMessageContent = (eventMessage: any) => {
@@ -327,10 +328,20 @@ function App() {
                 type="button"
                 onClick={() => setShowMemoryModal(true)}
                 className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
-                title="Memory & skills — edit context and skill .md files"
+                title={
+                  contextInductionDepth > 0
+                    ? "Updating memory & skills from the last completed step…"
+                    : "Memory & skills — edit context and skill .md files"
+                }
                 aria-label="Open memory and skills"
+                aria-busy={contextInductionDepth > 0}
               >
-                <Brain className="size-3.5 stroke-[1.75]" />
+                <span
+                  className={contextInductionDepth > 0 ? "brain-inducing" : "inline-flex text-inherit"}
+                  aria-hidden
+                >
+                  <Brain className="size-3.5 stroke-[1.75]" />
+                </span>
                 Memory
               </button>
               <button

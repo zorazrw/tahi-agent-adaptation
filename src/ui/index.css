@@ -480,3 +480,30 @@ code, pre, textarea.mono, input.mono {
   word-break: break-word;
   color: var(--color-ink-700);
 }
+
+/* Brain icon: shimmer while session is exported and memories/skills are induced */
+@keyframes brain-shine {
+  0% {
+    filter: brightness(1);
+    transform: rotate(0deg) scale(1);
+  }
+  40% {
+    filter: brightness(1.35) drop-shadow(0 0 6px color-mix(in srgb, var(--color-primary) 65%, transparent));
+    transform: rotate(0deg) scale(1.06);
+  }
+  60% {
+    filter: brightness(1.2) drop-shadow(0 0 4px color-mix(in srgb, var(--color-primary) 45%, transparent));
+    transform: rotate(0deg) scale(1.03);
+  }
+  100% {
+    filter: brightness(1);
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+.brain-inducing {
+  display: inline-flex;
+  animation: brain-shine 1.35s ease-in-out infinite;
+  color: var(--color-primary);
+  border-radius: 9999px;
+}

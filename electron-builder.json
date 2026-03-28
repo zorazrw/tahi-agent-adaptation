@@ -6,7 +6,12 @@
         "dist-react"
     ],
     "extraResources": [
-        "dist-electron/preload.cjs"
+        "dist-electron/preload.cjs",
+        {
+            "from": "scripts",
+            "to": "scripts",
+            "filter": ["**/*"]
+        }
     ],
     "asarUnpack": [
         "node_modules/@anthropic-ai/claude-agent-sdk/**/*"
