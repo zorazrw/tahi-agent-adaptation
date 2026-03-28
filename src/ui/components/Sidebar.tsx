@@ -122,6 +122,7 @@ function TreeNode({
   runningNodeId,
   collapsedNodeIds,
   effectiveDepth,
+  verificationDepth,
   editingNodeId,
   editingNodeDraft,
   editingNodeInputRef,
@@ -146,6 +147,8 @@ function TreeNode({
   runningNodeId: string | null;
   collapsedNodeIds: Set<string>;
   effectiveDepth: number;
+  /** Session verification depth; roots always use Auto-style row chrome. */
+  verificationDepth: number;
   editingNodeId: string | null;
   editingNodeDraft: string;
   editingNodeInputRef: React.RefObject<HTMLInputElement | null>;
@@ -174,13 +177,22 @@ function TreeNode({
   const isHighlighted = node.depth === effectiveDepth;
   const isDragging = draggedNodeId === node.id;
   const isDropTarget = dropTargetNodeId === node.id;
+  /** Root steps match Auto chrome; nested steps in Detail use expand chevron + inset padding. */
+  const autoLikeRow = verificationDepth === 0 || node.depth === 0;
+  const showChevronColumn = verificationDepth > 0 && node.depth > 0;
+  const depthIndent = node.depth > 0 ? (verificationDepth > 0 ? 20 : 12) : 0;
+  const autoRowPad =
+    autoLikeRow && isHighlighted && !isSelected
+      ? "gap-2 pl-2 pr-0.5"
+      : autoLikeRow
+        ? "gap-2 pl-1.5 pr-0.5"
+        : "";
 
   return (
-    <div style={{ paddingLeft: node.depth > 0 ? 20 : 0 }}>
+    <div style={{ paddingLeft: depthIndent }}>
       {/* Node row */}
       <div
-        className={`group flex items-start gap-1 py-[3px] px-1 rounded-md cursor-pointer select-none transition-colors ${isSelected ? "bg-primary/8" : "hover:bg-ink-900/4"} ${isDragging ? "opacity-50" : ""} ${isDropTarget ? "ring-1 ring-primary/50 ring-inset" : ""}`}
-        style={isHighlighted ? { borderLeft: '2px solid rgba(217, 119, 87, 0.6)', paddingLeft: 2, backgroundColor: isSelected ? undefined : 'rgba(217, 119, 87, 0.04)' } : undefined}
+        className={`group flex items-center py-1 rounded-md cursor-pointer select-none transition-colors ${autoLikeRow ? autoRowPad : "gap-2 px-1"} ${isSelected ? "bg-ink-900/6" : "hover:bg-ink-900/4"} ${isDragging ? "opacity-50" : ""} ${isDropTarget ? "ring-1 ring-ink-900/15 ring-inset" : ""} ${isHighlighted && !isSelected ? (autoLikeRow ? "border-l-2 border-ink-900/20" : "border-l-2 border-ink-900/20 -ml-px pl-[calc(0.25rem-1px)]") : ""}`}
         onClick={() => onSelectNode(node.id)}
         draggable={!isEditing}
         onDragStart={(e) => {
@@ -203,45 +215,45 @@ function TreeNode({
         }}
         onDragEnd={() => onDragEnd?.()}
       >
-        {/* Chevron for collapsible */}
-        {hasChildren ? (
+        {/* Chevron only for nested steps in Detail; roots stay Auto-style */}
+        {showChevronColumn && hasChildren ? (
           <button
             type="button"
-            className="shrink-0 mt-[2px] p-0 text-ink-400 hover:text-ink-600"
+            className="shrink-0 self-center p-0 text-ink-400 hover:text-ink-600"
             onClick={(e) => { e.stopPropagation(); onToggleCollapse(node.id); }}
           >
-            <svg viewBox="0 0 16 16" className={`h-3.5 w-3.5 transition-transform ${isCollapsed ? "" : "rotate-90"}`} fill="none" stroke="currentColor" strokeWidth="1.5">
+            <svg viewBox="0 0 16 16" className={`h-4 w-4 transition-transform ${isCollapsed ? "" : "rotate-90"}`} fill="none" stroke="currentColor" strokeWidth="1.5">
               <path d="M6 3l5 5-5 5" />
             </svg>
           </button>
-        ) : (
-          <span className="shrink-0 w-3.5 mt-[2px]" />
-        )}
+        ) : showChevronColumn ? (
+          <span className="shrink-0 w-4 self-center" />
+        ) : null}
 
         {/* Status circle */}
-        <span className="shrink-0 mt-[5px]">
+        <span className="shrink-0 self-center">
           {isRunning ? (
-            <span className="block h-2.5 w-2.5 rounded-full border-[1.5px] border-primary border-t-transparent animate-spin" />
+            <span className="block h-3 w-3 rounded-full border-[1.5px] border-primary border-t-transparent animate-spin" />
           ) : (
-            <span className={`block h-2.5 w-2.5 rounded-full border-[1.5px] ${
+            <span className={`block h-3 w-3 rounded-full border-[1.5px] ${
               isCompleted
-                ? "border-emerald-500 bg-emerald-500"
+                ? "border-[#adc178] bg-[#adc178]"
                 : node.status === "error"
-                  ? "border-error bg-error/30"
+                  ? "border-error bg-error/25"
                   : isSelected
-                    ? "border-primary bg-primary/25"
+                    ? "border-ink-500 bg-ink-900/10"
                     : "border-ink-900/25 bg-transparent"
             }`} />
           )}
         </span>
 
         {/* Label + hover actions overlayed to give label more width */}
-        <div className="flex-1 min-w-0 relative">
+        <div className="flex-1 min-w-0 relative pl-1.5">
           {isEditing ? (
             <input
               ref={editingNodeInputRef}
               type="text"
-              className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-[12px] text-ink-800 focus:border-primary focus:outline-none"
+              className="w-full rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-sm text-ink-800 focus:border-primary focus:outline-none"
               value={editingNodeDraft}
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => onEditDraftChange(e.target.value)}
@@ -252,7 +264,7 @@ function TreeNode({
               }}
             />
           ) : (
-            <span className={`block pr-6 text-[12px] leading-[18px] break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-600"}`}>
+            <span className={`block pr-6 text-sm leading-snug break-words ${isSelected ? "font-medium text-ink-800" : "text-ink-600"}`}>
               {node.description || <span className="italic text-ink-400">Untitled</span>}
             </span>
           )}
@@ -265,7 +277,7 @@ function TreeNode({
                 onClick={(e) => { e.stopPropagation(); onEditNode(node.id); }}
                 aria-label="Edit"
               >
-                <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 1.5l3 3L5 14l-3.5.5L2 11l9.5-9.5z" /></svg>
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11.5 1.5l3 3L5 14l-3.5.5L2 11l9.5-9.5z" /></svg>
               </button>
               {onAddChild && (
                 <TooltipProvider delayDuration={300}>
@@ -277,7 +289,7 @@ function TreeNode({
                         onClick={(e) => { e.stopPropagation(); onAddChild(node.id); }}
                         aria-label="Add sub-step"
                       >
-                        <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
+                        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
                       </button>
                     </TooltipTrigger>
                     <TooltipContent side="right">Add sub-step</TooltipContent>
@@ -290,7 +302,7 @@ function TreeNode({
                 onClick={(e) => { e.stopPropagation(); onDeleteNode(node.id); }}
                 aria-label="Remove"
               >
-                <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 4L4 12M4 4l8 8" /></svg>
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 4L4 12M4 4l8 8" /></svg>
               </button>
             </span>
           )}
@@ -306,6 +318,7 @@ function TreeNode({
           runningNodeId={runningNodeId}
           collapsedNodeIds={collapsedNodeIds}
           effectiveDepth={effectiveDepth}
+          verificationDepth={verificationDepth}
           editingNodeId={editingNodeId}
           editingNodeDraft={editingNodeDraft}
           editingNodeInputRef={editingNodeInputRef}
@@ -665,38 +678,44 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
       {/* Progress: tree + slider + run button — takes all remaining space */}
       {sessionList.length > 0 && (
-        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-          <div className="flex items-center justify-between gap-2 mb-1.5 shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <div className="h-3 w-0.5 shrink-0 rounded-full bg-primary" />
-              <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Progress</span>
-            </div>
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5">
+          <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
+            <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Progress</span>
             {workflowTree.length > 0 && maxDepth > 0 && (
-              <div className="flex items-center gap-1 rounded-lg border border-ink-900/10 bg-surface p-0.5 shrink-0">
+              <div className="flex items-center gap-0.5 shrink-0 text-xs ml-3">
                 <TooltipProvider delayDuration={300}>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
                         type="button"
                         onClick={() => handleDepthCommit(0)}
-                        className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${verificationDepth === 0 ? "bg-primary text-white shadow-sm" : "text-ink-500 hover:text-ink-700 hover:bg-ink-900/5"}`}
+                        className={`px-1.5 py-0.5 rounded-md border text-xs transition-colors ${
+                          verificationDepth === 0
+                            ? "border-[#f3d5b5] bg-transparent text-ink-700 font-medium"
+                            : "border-transparent text-muted-foreground hover:border-primary/12 hover:bg-primary/5 hover:text-ink-600"
+                        }`}
                       >
-                        Automation
+                        Auto
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent side="bottom">verify at high level</TooltipContent>
+                    <TooltipContent side="bottom">Verify at high level</TooltipContent>
                   </Tooltip>
+                  <span className="text-ink-900/20 select-none" aria-hidden>·</span>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
                         type="button"
                         onClick={() => handleDepthCommit(maxDepth)}
-                        className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${verificationDepth === maxDepth ? "bg-primary text-white shadow-sm" : "text-ink-500 hover:text-ink-700 hover:bg-ink-900/5"}`}
+                        className={`px-1.5 py-0.5 rounded-md border text-xs transition-colors ${
+                          verificationDepth === maxDepth
+                            ? "border-[#f3d5b5] bg-transparent text-ink-700 font-medium"
+                            : "border-transparent text-muted-foreground hover:border-primary/12 hover:bg-primary/5 hover:text-ink-600"
+                        }`}
                       >
-                        Control
+                        Detail
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent side="bottom">verify at detailed level</TooltipContent>
+                    <TooltipContent side="bottom">Verify at detailed level</TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
               </div>
@@ -715,7 +734,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                     className="shrink-0 rounded p-1 text-ink-400 hover:text-primary hover:bg-ink-900/5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
                     aria-label="Re-generate workflow steps"
                   >
-                    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21h5v-5" /></svg>
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21h5v-5" /></svg>
                   </button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">Re-generate workflow steps</TooltipContent>
@@ -724,7 +743,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
           </div>
 
           {workflowTree.length === 0 ? (
-            <p className="text-xs text-muted-foreground py-1">No workflow yet. Send a message to generate the plan.</p>
+            <p className="text-sm text-muted-foreground py-0.5 leading-snug">No steps yet — send a message to plan.</p>
           ) : (
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5">
               {workflowTree.map((root) => (
@@ -735,6 +754,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                   runningNodeId={runningNodeId}
                   collapsedNodeIds={collapsedNodeIds}
                   effectiveDepth={effectiveDepth}
+                  verificationDepth={verificationDepth}
                   editingNodeId={editingNodeId}
                   editingNodeDraft={editingNodeDraft}
                   editingNodeInputRef={editingNodeInputRef}
@@ -757,10 +777,10 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
               ))}
               <button
                 type="button"
-                className="shrink-0 flex items-center gap-1.5 py-1.5 px-1 rounded-md text-[11px] text-muted-foreground hover:text-ink-600 hover:bg-ink-900/5 transition-colors"
+                className="shrink-0 flex items-center gap-1 py-1 px-0.5 text-sm text-muted-foreground hover:text-ink-600 transition-colors"
                 onClick={handleAddStepAtRoot}
               >
-                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
+                <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 3v10M3 8h10" /></svg>
                 <span>Add step</span>
               </button>
             </div>
@@ -772,22 +792,22 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
             const isNodeCompleted = selectedNode.status === "completed";
             if (isNodeRunning) {
               return (
-                <div className="shrink-0 mt-1.5 flex items-center justify-center gap-1.5 rounded-lg bg-ink-900/8 px-3 py-2 text-xs font-medium text-muted-foreground">
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" strokeOpacity="0.25" /><path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" /></svg>
-                  Running...
+                <div className="shrink-0 mt-1 flex items-center justify-center gap-1.5 py-1 text-sm text-muted-foreground">
+                  <svg viewBox="0 0 24 24" className="h-4 w-4 animate-spin shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" strokeOpacity="0.25" /><path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" /></svg>
+                  Running…
                 </div>
               );
             }
             return (
               <button
                 type="button"
-                className="shrink-0 mt-1.5 flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-white hover:bg-primary-hover transition-colors shadow-soft w-full"
+                className="shrink-0 mt-1 flex w-full items-center justify-center gap-1.5 rounded-md border border-ink-900/15 bg-ink-900/[0.04] px-2.5 py-2 text-sm font-medium text-ink-800 hover:bg-ink-900/[0.07] transition-colors"
                 onClick={() => { setRunningNodeId(selectedNodeId); sendEvent({ type: "session.solveNode", payload: { sessionId: activeSessionId, nodeId: selectedNodeId! } }); }}
               >
                 {isNodeCompleted ? (
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
+                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>
                 ) : (
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
                 )}
                 {isNodeCompleted ? "Rerun" : "Run"}
               </button>
@@ -798,14 +818,13 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
       {/* Files (compact) */}
       {selectedNode && (selectedNode.outputFiles.length > 0) && (
-        <div className="shrink-0 border-t border-ink-900/10 pt-1.5 pb-1">
-          <div className="flex items-center gap-1.5 mb-1">
-            <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
-            <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Files</span>
+        <div className="shrink-0 border-t border-ink-900/10 pt-2.5 pb-3">
+          <div className="mb-2.5">
+            <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Files</span>
           </div>
-          <div className="flex flex-col gap-0.5 max-h-[60px] overflow-y-auto">
+          <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
             {selectedNode.outputFiles.map((f, i) => (
-              <span key={i} className="font-mono text-[11px] text-ink-600 rounded bg-ink-900/5 px-1.5 py-0.5 break-all">{f}</span>
+              <span key={i} className="block text-sm leading-snug text-ink-600 break-words">{f}</span>
             ))}
           </div>
         </div>
@@ -813,12 +832,9 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
       {/* Verifiers (compact) */}
       {selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
-        <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-1.5">
-          <div className="flex items-center justify-between gap-1.5 mb-1 shrink-0">
-            <div className="flex items-center gap-1.5">
-              <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
-              <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Verifiers</span>
-            </div>
+        <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5 pb-3">
+          <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
+            <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Verifiers</span>
             <button
               type="button"
               onClick={() => { setAddingVerifier(true); setNewVerifierDraft(""); }}
@@ -830,7 +846,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
               </svg>
             </button>
           </div>
-          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
             {addingVerifier && (
               <div className="flex items-center gap-1.5">
                 <span className="block h-1.5 w-1.5 rounded-full bg-ink-900/15" />
@@ -844,7 +860,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                   }}
                   onBlur={handleAddVerifier}
                   placeholder="Describe what to verify…"
-                  className="flex-1 text-[11px] text-ink-700 leading-tight min-w-0 px-1.5 py-0.5 rounded border border-ink-900/15 bg-white/80 focus:outline-none focus:ring-1 focus:ring-primary/30"
+                  className="flex-1 min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-sm text-ink-800 placeholder:text-ink-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
                 />
               </div>
             )}
@@ -865,7 +881,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                       null
                     )}
                   </button>
-                  <span className="text-[11px] text-ink-600 leading-tight break-words min-w-0 flex-1">
+                  <span className="min-w-0 flex-1 text-sm leading-snug text-ink-600 break-words">
                     {text}
                   </span>
                   <button

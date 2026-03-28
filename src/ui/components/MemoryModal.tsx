@@ -1,6 +1,13 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { Spinner } from "./Spinner";
+import { ViewToggle, useViewToggle } from "./file-renderers/ViewToggle";
 import type { ClientEvent, ServerEvent } from "../types";
 
 interface MemoryModalProps {
@@ -26,6 +33,44 @@ function titleFromMemoryFileName(fileName: string): string {
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
     .join(" ");
+}
+
+function BrainMdField({
+  content,
+  onChange,
+  ariaLabel,
+}: {
+  content: string;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+}) {
+  const [mode, setMode] = useViewToggle("preview");
+  return (
+    <div className="flex flex-col gap-2 min-h-0">
+      <div className="flex items-center justify-end gap-2 shrink-0">
+        <span className="text-[11px] text-muted-foreground mr-auto">Markdown</span>
+        <ViewToggle mode={mode} onChange={setMode} />
+      </div>
+      {mode === "preview" ? (
+        <div className="md-prose min-h-[120px] max-h-[min(360px,50vh)] overflow-auto rounded-lg border border-ink-900/10 bg-surface px-3 py-2">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeRaw]}
+          >
+            {content}
+          </ReactMarkdown>
+        </div>
+      ) : (
+        <textarea
+          className="min-h-[120px] w-full rounded-lg border border-ink-900/10 bg-surface px-3 py-2 text-sm text-ink-800 font-mono leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-primary/25 focus:border-primary/30"
+          value={content}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck={false}
+          aria-label={ariaLabel}
+        />
+      )}
+    </div>
+  );
 }
 
 type BrainLoadResult = {
@@ -418,12 +463,10 @@ export function MemoryModal({ onClose }: MemoryModalProps) {
                             Remove
                           </button>
                         </div>
-                        <textarea
-                          className="min-h-[120px] w-full rounded-lg border border-ink-900/10 bg-surface px-3 py-2 text-sm text-ink-800 font-mono leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-primary/25 focus:border-primary/30"
-                          value={sec.content}
-                          onChange={(e) => updateSectionContent(sec.fileName, e.target.value)}
-                          spellCheck={false}
-                          aria-label={`Content of ${sec.fileName}`}
+                        <BrainMdField
+                          content={sec.content}
+                          onChange={(value) => updateSectionContent(sec.fileName, value)}
+                          ariaLabel={`Content of ${sec.fileName}`}
                         />
                       </section>
                     ))}
@@ -485,12 +528,10 @@ export function MemoryModal({ onClose }: MemoryModalProps) {
                               Remove
                             </button>
                           </div>
-                          <textarea
-                            className="min-h-[120px] w-full rounded-lg border border-ink-900/10 bg-surface px-3 py-2 text-sm text-ink-800 font-mono leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-primary/25 focus:border-primary/30"
-                            value={sec.content}
-                            onChange={(e) => updateSkillSectionContent(sec.fileName, e.target.value)}
-                            spellCheck={false}
-                            aria-label={`Skill ${sec.fileName}`}
+                          <BrainMdField
+                            content={sec.content}
+                            onChange={(value) => updateSkillSectionContent(sec.fileName, value)}
+                            ariaLabel={`Skill ${sec.fileName}`}
                           />
                         </section>
                       ))}
