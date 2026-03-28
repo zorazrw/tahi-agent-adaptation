@@ -88,6 +88,8 @@ function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<v
 /**
  * Export one workflow node to userData/tasks/{taskUnitId}.json, then run extract_context.py.
  * Includes all workflow levels so --task-unit-id matches nodes solved in detail mode.
+ * Export JSON shape: `{ uuid, name, trajectory }` where each step has
+ * `actor` ("user" | "agent"), `action`, and `environment` { workflow, file } (verifiers live on workflow nodes).
  */
 export function runExportAndExtractContext(sessionId: string, taskUnitId: string): void {
   const root = scriptsRootDir();
@@ -150,6 +152,7 @@ export function runExportAndExtractContext(sessionId: string, taskUnitId: string
 /**
  * When every workflow step is done, export the full session once (all task units) and run extract.
  * Queued after any prior per-step jobs so the DB holds the complete trajectory.
+ * Full-session file uses the same `{ uuid, name, trajectory }` schema (all units in one trajectory).
  */
 export function runFullSessionExportAndExtract(sessionId: string): void {
   const root = scriptsRootDir();

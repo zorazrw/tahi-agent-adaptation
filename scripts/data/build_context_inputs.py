@@ -2,9 +2,9 @@
 Build structured text summaries from raw human-agent session logs (out.json)
 for context-based adaptation (memory + skill extraction).
 
-Each task_unit with a non-empty agent_trajectory is converted into a dict
-containing the task description, intent, verifier status, and a human-readable
-trajectory text with agent actions, observations, and human messages interleaved.
+Supports:
+- New export shape: ``{"uuid", "name", "trajectory"}`` (see export_task_sessions.py)
+- Legacy shape: ``task_units`` with ``agent_trajectory`` / ``human_trajectory``
 """
 
 from __future__ import annotations
@@ -84,6 +84,75 @@ def _format_verifiers(verifiers: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _format_verifiers_export(verifiers: list[dict]) -> str:
+    """Statuses are strings: success | failure | unchecked."""
+    if not verifiers:
+        return "(none)"
+    parts = []
+    for v in verifiers:
+        st = v.get("status")
+        if st == "success":
+            mark = "✓"
+        elif st == "failure":
+            mark = "✗"
+        else:
+            mark = "?"
+        parts.append(f"{mark} {v.get('criterion', '')}")
+    return "\n".join(parts)
+
+
+def build_export_trajectory_text(trajectory: list[dict]) -> str:
+    lines: list[str] = []
+    for step in trajectory:
+        actor = step.get("actor", "?")
+        action = step.get("action", "")
+        lines.append(f"[{actor}] {action}")
+    return "\n".join(lines)
+
+
+def _task_from_first_message_action(trajectory: list[dict]) -> str:
+    for step in trajectory:
+        if step.get("actor") not in ("human", "user"):
+            continue
+        act = step.get("action", "")
+        if act.startswith("message(") and act.endswith(")"):
+            inner = act[len("message("): -1]
+            try:
+                return str(json.loads(inner))
+            except json.JSONDecodeError:
+                return inner
+    return ""
+
+
+def _flatten_verifiers_from_workflow(workflow: Any) -> list[dict]:
+    out: list[dict] = []
+    if not isinstance(workflow, list):
+        return out
+
+    def walk(nodes: Any) -> None:
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            for v in n.get("verifiers") or []:
+                if isinstance(v, dict) and "criterion" in v:
+                    out.append(v)
+                elif isinstance(v, str):
+                    out.append({"criterion": v, "status": "failure"})
+            walk(n.get("children") or [])
+
+    walk(workflow)
+    return out
+
+
+def _verifiers_from_trajectory_env(trajectory: list[dict]) -> str:
+    for step in reversed(trajectory):
+        env = step.get("environment") or {}
+        flat = _flatten_verifiers_from_workflow(env.get("workflow"))
+        if flat:
+            return _format_verifiers_export(flat)
+    return "(none)"
+
+
 def build_unit_trajectory_text(unit: dict) -> str:
     """Convert a task_unit's agent_trajectory + human_trajectory into readable text.
 
@@ -143,6 +212,8 @@ def normalize_sessions_list(data: Any) -> list[dict[str, Any]]:
         return []
     if isinstance(data.get("sessions"), list):
         return [x for x in data["sessions"] if isinstance(x, dict)]
+    if "trajectory" in data and isinstance(data["trajectory"], list):
+        return [data]
     if "task_units" in data or "session_id" in data:
         return [data]
     return []
@@ -151,7 +222,7 @@ def normalize_sessions_list(data: Any) -> list[dict[str, Any]]:
 def build_context_inputs(sessions_payload: Any) -> list[dict[str, Any]]:
     """Return a list of structured dicts, one per task_unit with execution data.
 
-    Only units whose ``agent_trajectory`` is non-empty are included.
+    Skips sessions with no agent steps in the trajectory (or empty legacy ``agent_trajectory``).
 
     Each dict contains:
       task              – initial_task_instruction
@@ -164,6 +235,23 @@ def build_context_inputs(sessions_payload: Any) -> list[dict[str, Any]]:
     session_list = normalize_sessions_list(sessions_payload)
 
     for si, session in enumerate(session_list):
+        if isinstance(session.get("trajectory"), list):
+            traj = session["trajectory"]
+            if not any(s.get("actor") == "agent" for s in traj if isinstance(s, dict)):
+                continue
+            task = _task_from_first_message_action(traj) or session.get("name", "")
+            name = session.get("name", "") or ""
+            trajectory_text = build_export_trajectory_text(traj)
+            verifiers_text = _verifiers_from_trajectory_env(traj)
+            inputs.append({
+                "task": task,
+                "intent": name,
+                "verifiers": verifiers_text,
+                "trajectory_text": trajectory_text,
+                "source": f"session_{si}",
+            })
+            continue
+
         task = session.get("initial_task_instruction", "")
         for ui, unit in enumerate(session.get("task_units", [])):
             agent_traj = unit.get("agent_trajectory", [])
