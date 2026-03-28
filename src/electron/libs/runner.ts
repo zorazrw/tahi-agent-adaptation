@@ -10,6 +10,7 @@ import type { WorkflowNode } from "./workflow-tree-utils.js";
 import { appendFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
+import { readMemoryForPrompt } from "./memory-store.js";
 
 const LOG_PATH = join(app.getPath("userData"), "runner.log");
 
@@ -107,7 +108,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
   const { prompt, session, regenerateWorkflow, resumeSessionId, resumeSessionAt, onEvent, onSessionUpdate } = options;
   const abortController = new AbortController();
   const isFirstMessage = resumeSessionId == null;
-  const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
+  const basePrompt = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
+  const memoryPrefix = readMemoryForPrompt();
+  const promptToSend = memoryPrefix ? memoryPrefix + basePrompt : basePrompt;
 
   // Emit the fully constructed prompt being sent to the LM for debugging/inspection in the UI.
   onEvent({

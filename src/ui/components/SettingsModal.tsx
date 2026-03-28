@@ -282,8 +282,9 @@ function SkillsPanel() {
             <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
           </svg>
           <p className="text-sm text-muted-foreground">
-            No skills installed. Add skills by placing directories with{" "}
-            <code className="text-xs bg-ink-900/5 px-1 py-0.5 rounded">SKILL.md</code> files in the skills directory.
+            No skills found. Add a <code className="text-xs bg-ink-900/5 px-1 py-0.5 rounded">*.md</code> file in the skills
+            folder, or a subfolder containing{" "}
+            <code className="text-xs bg-ink-900/5 px-1 py-0.5 rounded">SKILL.md</code>.
           </p>
         </div>
       ) : (

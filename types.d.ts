@@ -33,6 +33,19 @@ type SkillInfo = {
     dirName: string;
     source: "app" | "user";
     path: string;
+    /** True when path is a top-level *.md file in the app skills folder (not a SKILL.md directory). */
+    isFlatMd?: boolean;
+}
+
+type MemorySectionDto = {
+    fileName: string;
+    title: string;
+    content: string;
+}
+
+type MemorySavePayload = {
+    sections: { fileName: string; content: string }[];
+    deletedFileNames?: string[];
 }
 
 type EventPayloadMapping = {
@@ -54,6 +67,9 @@ type EventPayloadMapping = {
     "create-temp-session-dir": string;
     "copy-files-to-dir": string[];
     "select-files": string[];
+    "get-memory-md": { dir: string; sections: MemorySectionDto[]; skillsDir: string; skillSections: MemorySectionDto[] };
+    "save-memory-md": { success: boolean; error?: string };
+    "save-skill-md": { success: boolean; error?: string };
 }
 
 interface Window {
@@ -80,5 +96,8 @@ interface Window {
         copyFilesToDir: (filePaths: string[], targetDir: string) => Promise<string[]>;
         selectFiles: () => Promise<string[]>;
         getPathForFile: (file: File) => string;
+        getMemoryMd: () => Promise<{ dir: string; sections: MemorySectionDto[]; skillsDir: string; skillSections: MemorySectionDto[] }>;
+        saveMemoryMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
+        saveSkillMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
     }
 }

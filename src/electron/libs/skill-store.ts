@@ -8,10 +8,20 @@ import {
   lstatSync,
   readlinkSync,
   readFileSync,
+  writeFileSync,
   rmSync,
 } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+
+/** Top-level skill markdown files in the app skills dir (same rules as memory *.md). */
+const FLAT_SKILL_MD_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.md$/;
+
+/** Sync mirror: each flat foo.md → _flat/foo/SKILL.md for Claude SDK directory layout. */
+const FLAT_SYNC_ROOT = "_flat";
+
+/** Prefix on app skill ids for flat files: flat_<stem> where stem is basename without .md */
+const FLAT_SKILL_ID_PREFIX = "flat_";
 
 /** Prefix for symlinks created in ~/.claude/skills/ to identify app-managed skills. */
 const APP_SKILL_PREFIX = "agent-cowork--";
@@ -45,6 +55,106 @@ function parseFrontmatter(content: string): Record<string, string> {
   return result;
 }
 
+function flatSkillStemToId(stem: string): string {
+  return `${FLAT_SKILL_ID_PREFIX}${stem}`;
+}
+
+function flatSkillIdToStem(id: string): string | null {
+  if (!id.startsWith(FLAT_SKILL_ID_PREFIX)) return null;
+  const stem = id.slice(FLAT_SKILL_ID_PREFIX.length);
+  return stem || null;
+}
+
+export function isValidFlatSkillMdFileName(name: string): boolean {
+  return FLAT_SKILL_MD_RE.test(name) && !name.includes("/") && !name.includes("\\");
+}
+
+function titleFromFlatSkillFileName(fileName: string): string {
+  const base = fileName.replace(/\.md$/i, "");
+  if (!base) return fileName;
+  return base
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function listFlatSkillMdNames(appSkillsDir: string): string[] {
+  if (!existsSync(appSkillsDir)) return [];
+  try {
+    return readdirSync(appSkillsDir, { withFileTypes: true })
+      .filter((e) => e.isFile() && isValidFlatSkillMdFileName(e.name))
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+export type FlatSkillSection = {
+  fileName: string;
+  title: string;
+  content: string;
+};
+
+/** Top-level *.md files in the app skills folder (brain UI + SDK sync via _flat/). */
+export function readAllFlatSkillSections(): FlatSkillSection[] {
+  ensureAppSkillsDir();
+  const appSkillsDir = getAppSkillsDir();
+  const names = listFlatSkillMdNames(appSkillsDir);
+  return names.map((fileName) => {
+    const fp = join(appSkillsDir, fileName);
+    let content = "";
+    try {
+      content = readFileSync(fp, "utf8");
+    } catch {
+      /* empty */
+    }
+    const fm = parseFrontmatter(content);
+    const title = fm.name || titleFromFlatSkillFileName(fileName);
+    return { fileName, title, content };
+  });
+}
+
+export type FlatSkillWriteSection = { fileName: string; content: string };
+
+export function writeFlatSkillSections(sections: FlatSkillWriteSection[], deletedFileNames?: string[]): void {
+  const appSkillsDir = getAppSkillsDir();
+  if (!existsSync(appSkillsDir)) mkdirSync(appSkillsDir, { recursive: true });
+
+  const userSkillsDir = join(homedir(), ".claude", "skills");
+
+  for (const name of deletedFileNames ?? []) {
+    if (!isValidFlatSkillMdFileName(name)) continue;
+    const fp = join(appSkillsDir, name);
+    const stem = name.replace(/\.md$/i, "");
+    if (existsSync(fp)) {
+      try {
+        unlinkSync(fp);
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      rmSync(join(appSkillsDir, FLAT_SYNC_ROOT, stem), { recursive: true });
+    } catch {
+      /* ignore */
+    }
+    const linkPath = join(userSkillsDir, `${APP_SKILL_PREFIX}${flatSkillStemToId(stem)}`);
+    try {
+      if (existsSync(linkPath) && lstatSync(linkPath).isSymbolicLink()) unlinkSync(linkPath);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  for (const { fileName, content } of sections) {
+    if (!isValidFlatSkillMdFileName(fileName)) continue;
+    const body = content == null ? "" : String(content);
+    writeFileSync(join(appSkillsDir, fileName), body, "utf8");
+  }
+}
+
 /**
  * List all skills from both the app skills dir and user skills dir.
  * Parses YAML frontmatter from SKILL.md for name and description.
@@ -54,10 +164,11 @@ export function listSkills(): SkillInfo[] {
   const userSkillsDir = join(homedir(), ".claude", "skills");
   const skills: SkillInfo[] = [];
 
-  // Scan app skills directory
+  // Scan app skills directory (folder skills + top-level *.md)
   if (existsSync(appSkillsDir)) {
     try {
       for (const entry of readdirSync(appSkillsDir, { withFileTypes: true })) {
+        if (entry.name === FLAT_SYNC_ROOT) continue;
         if (!entry.isDirectory()) continue;
         const skillMdPath = join(appSkillsDir, entry.name, "SKILL.md");
         if (!existsSync(skillMdPath)) continue;
@@ -72,6 +183,21 @@ export function listSkills(): SkillInfo[] {
             path: join(appSkillsDir, entry.name),
           });
         } catch { /* skip unreadable */ }
+      }
+      for (const fileName of listFlatSkillMdNames(appSkillsDir)) {
+        try {
+          const fp = join(appSkillsDir, fileName);
+          const content = readFileSync(fp, "utf8");
+          const fm = parseFrontmatter(content);
+          skills.push({
+            name: fm.name || titleFromFlatSkillFileName(fileName),
+            description: fm.description || "",
+            dirName: fileName,
+            source: "app",
+            path: fp,
+            isFlatMd: true,
+          });
+        } catch { /* skip */ }
       }
     } catch { /* directory unreadable */ }
   }
@@ -110,9 +236,26 @@ export function removeAppSkill(dirName: string): { success: boolean; error?: str
     if (!existsSync(skillPath)) {
       return { success: false, error: "Skill not found" };
     }
+    const stat = lstatSync(skillPath);
+    if (stat.isFile() && isValidFlatSkillMdFileName(dirName)) {
+      unlinkSync(skillPath);
+      const stem = dirName.replace(/\.md$/i, "");
+      try {
+        rmSync(join(appSkillsDir, FLAT_SYNC_ROOT, stem), { recursive: true });
+      } catch {
+        /* ignore */
+      }
+      const linkPath = join(homedir(), ".claude", "skills", `${APP_SKILL_PREFIX}${flatSkillStemToId(stem)}`);
+      try {
+        if (existsSync(linkPath) && lstatSync(linkPath).isSymbolicLink()) unlinkSync(linkPath);
+      } catch {
+        /* ignore */
+      }
+      return { success: true };
+    }
+
     rmSync(skillPath, { recursive: true });
 
-    // Remove symlink from user skills dir
     const linkPath = join(homedir(), ".claude", "skills", `${APP_SKILL_PREFIX}${dirName}`);
     try {
       if (lstatSync(linkPath).isSymbolicLink()) {
@@ -126,9 +269,15 @@ export function removeAppSkill(dirName: string): { success: boolean; error?: str
   }
 }
 
-/** Read the full SKILL.md content from a skill directory. */
+/** Read SKILL.md from a skill directory, or a flat *.md file path. */
 export function getSkillContent(skillPath: string): { content: string } | { error: string } {
   try {
+    if (existsSync(skillPath)) {
+      const st = lstatSync(skillPath);
+      if (st.isFile() && skillPath.toLowerCase().endsWith(".md")) {
+        return { content: readFileSync(skillPath, "utf8") };
+      }
+    }
     const mdPath = join(skillPath, "SKILL.md");
     if (!existsSync(mdPath)) {
       return { error: "SKILL.md not found" };
@@ -142,8 +291,8 @@ export function getSkillContent(skillPath: string): { content: string } | { erro
 /**
  * Sync app-specific skills into ~/.claude/skills/ so the Agent SDK can discover them.
  *
- * Each app skill directory (containing a SKILL.md) gets symlinked with an
- * "agent-cowork--" prefix. Stale symlinks from removed app skills are cleaned up.
+ * - Each app folder with SKILL.md → symlink agent-cowork--&lt;dirName&gt;
+ * - Each top-level *.md → mirror to _flat/&lt;stem&gt;/SKILL.md, symlink agent-cowork--flat_&lt;stem&gt;
  */
 export function syncAppSkills(): void {
   const appSkillsDir = getAppSkillsDir();
@@ -156,10 +305,11 @@ export function syncAppSkills(): void {
     mkdirSync(userSkillsDir, { recursive: true });
   }
 
-  // Discover valid app skills (directories containing SKILL.md)
   const appSkills = new Set<string>();
+
   try {
     for (const entry of readdirSync(appSkillsDir, { withFileTypes: true })) {
+      if (entry.name === FLAT_SYNC_ROOT) continue;
       if (
         entry.isDirectory() &&
         existsSync(join(appSkillsDir, entry.name, "SKILL.md"))
@@ -168,10 +318,23 @@ export function syncAppSkills(): void {
       }
     }
   } catch {
-    // Directory might be empty or unreadable
+    /* ignore */
   }
 
-  // Clean up stale symlinks (app skills that were removed)
+  for (const fileName of listFlatSkillMdNames(appSkillsDir)) {
+    const stem = fileName.replace(/\.md$/i, "");
+    const flatDir = join(appSkillsDir, FLAT_SYNC_ROOT, stem);
+    const flatSkillPath = join(flatDir, "SKILL.md");
+    try {
+      mkdirSync(flatDir, { recursive: true });
+      const body = readFileSync(join(appSkillsDir, fileName), "utf8");
+      writeFileSync(flatSkillPath, body, "utf8");
+      appSkills.add(flatSkillStemToId(stem));
+    } catch (err) {
+      console.warn(`[skill-store] Failed to mirror flat skill "${fileName}":`, err);
+    }
+  }
+
   try {
     for (const entry of readdirSync(userSkillsDir, { withFileTypes: true })) {
       if (!entry.name.startsWith(APP_SKILL_PREFIX)) continue;
@@ -193,30 +356,28 @@ export function syncAppSkills(): void {
     /* ignore */
   }
 
-  // Create/update symlinks for current app skills
   for (const skillName of appSkills) {
     const linkPath = join(userSkillsDir, `${APP_SKILL_PREFIX}${skillName}`);
-    const targetPath = join(appSkillsDir, skillName);
+    const stem = flatSkillIdToStem(skillName);
+    const targetPath =
+      stem != null
+        ? join(appSkillsDir, FLAT_SYNC_ROOT, stem)
+        : join(appSkillsDir, skillName);
 
-    // Skip if symlink already exists and points to the right place
     try {
       const stat = lstatSync(linkPath);
       if (stat.isSymbolicLink() && readlinkSync(linkPath) === targetPath) {
         continue;
       }
-      // Wrong target or not a symlink — remove and recreate
       unlinkSync(linkPath);
     } catch {
-      // Doesn't exist yet
+      /* doesn't exist */
     }
 
     try {
       symlinkSync(targetPath, linkPath, "dir");
     } catch (err) {
-      console.warn(
-        `[skill-store] Failed to symlink skill "${skillName}":`,
-        err
-      );
+      console.warn(`[skill-store] Failed to symlink skill "${skillName}":`, err);
     }
   }
 }

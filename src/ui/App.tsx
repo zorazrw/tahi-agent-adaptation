@@ -7,6 +7,7 @@ import type { ServerEvent } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
+import { MemoryModal } from "./components/MemoryModal";
 import { PromptInput } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
@@ -14,7 +15,7 @@ import { useGroupedMessages } from "./hooks/useGroupedMessages";
 import { FilePreview, getPreviewFileForNode } from "./components/FilePreview";
 import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { PanelRightOpenIcon, PanelRightCloseIcon } from "lucide-react";
+import { PanelRightOpenIcon, PanelRightCloseIcon, Brain } from "lucide-react";
 
 const SCROLL_THRESHOLD = 50;
 
@@ -44,6 +45,7 @@ function App() {
   const scrollHeightBeforeLoadRef = useRef(0);
   const shouldRestoreScrollRef = useRef(false);
   const [showPromptInspector, setShowPromptInspector] = useState(false);
+  const [showMemoryModal, setShowMemoryModal] = useState(false);
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -322,6 +324,17 @@ function App() {
           {activeSession && (
             <div className="relative z-10 flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <button
+                type="button"
+                onClick={() => setShowMemoryModal(true)}
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
+                title="Memory & skills — edit context and skill .md files"
+                aria-label="Open memory and skills"
+              >
+                <Brain className="size-3.5 stroke-[1.75]" />
+                Memory
+              </button>
+              <button
+                type="button"
                 onClick={() => setPreviewPanelOpen(!previewPanelOpen)}
                 className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-ink-700 px-2 py-0.5 rounded hover:bg-ink-900/5 transition-colors"
                 title={previewPanelOpen ? "Close chat" : "Open chat"}
@@ -544,6 +557,10 @@ function App() {
 
       {showSettingsModal && (
         <SettingsModal onClose={() => setShowSettingsModal(false)} />
+      )}
+
+      {showMemoryModal && (
+        <MemoryModal onClose={() => setShowMemoryModal(false)} />
       )}
 
       {globalError && (

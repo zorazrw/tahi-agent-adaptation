@@ -59,7 +59,19 @@ export type ServerEvent =
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } }
   | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[] } }
-  | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } };
+  | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } }
+  | {
+      type: "memory.readResult";
+      payload: {
+        requestId: string;
+        dir: string;
+        sections: { fileName: string; title: string; content: string }[];
+        skillsDir: string;
+        skillSections: { fileName: string; title: string; content: string }[];
+      };
+    }
+  | { type: "memory.writeResult"; payload: { requestId: string; success: boolean; error?: string } }
+  | { type: "skills.writeResult"; payload: { requestId: string; success: boolean; error?: string } };
 
 // Client -> Server events
 export type ClientEvent =
@@ -74,4 +86,21 @@ export type ClientEvent =
   | { type: "session.history"; payload: { sessionId: string } }
   | { type: "session.solveNode"; payload: { sessionId: string; nodeId: string } }
   | { type: "session.regenerateWorkflow"; payload: { sessionId: string } }
-  | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: PermissionResult } };
+  | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: PermissionResult } }
+  | { type: "memory.read"; payload: { requestId: string } }
+  | {
+      type: "memory.write";
+      payload: {
+        requestId: string;
+        sections: { fileName: string; content: string }[];
+        deletedFileNames?: string[];
+      };
+    }
+  | {
+      type: "skills.write";
+      payload: {
+        requestId: string;
+        sections: { fileName: string; content: string }[];
+        deletedFileNames?: string[];
+      };
+    };

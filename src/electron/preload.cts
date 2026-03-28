@@ -57,6 +57,12 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("select-files"),
     getPathForFile: (file: File) =>
         electron.webUtils.getPathForFile(file),
+    getMemoryMd: () =>
+        ipcInvoke("get-memory-md"),
+    saveMemoryMd: (payload: { sections: { fileName: string; content: string }[]; deletedFileNames?: string[] }) =>
+        ipcInvoke("save-memory-md", payload),
+    saveSkillMd: (payload: { sections: { fileName: string; content: string }[]; deletedFileNames?: string[] }) =>
+        ipcInvoke("save-skill-md", payload),
 } satisfies Window['electron'])
 
 // Intercept drop events in the preload context where webUtils has direct

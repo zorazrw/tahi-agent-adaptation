@@ -15,7 +15,135 @@ import { saveApiConfig } from "./libs/config-store.js";
 import { getCurrentApiConfig } from "./libs/claude-settings.js";
 import type { ClientEvent } from "./types.js";
 import "./libs/claude-settings.js";
-import { ensureAppSkillsDir, listSkills, removeAppSkill, getSkillContent, getAppSkillsDir } from "./libs/skill-store.js";
+import {
+    ensureAppSkillsDir,
+    listSkills,
+    removeAppSkill,
+    getSkillContent,
+    getAppSkillsDir,
+    readAllFlatSkillSections,
+    writeFlatSkillSections,
+    syncAppSkills,
+    isValidFlatSkillMdFileName,
+} from "./libs/skill-store.js";
+import { ensureMemoriesDir, readAllMemorySections, writeMemorySections, getMemoriesDir } from "./libs/memory-store.js";
+
+type SaveMemoryParseResult =
+    | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
+    | { ok: false; error: string };
+
+/**
+ * Accepts current shape { sections, deletedFileNames }, legacy string (single file),
+ * or older builds that expected a string and returned "Invalid content" when given an object.
+ */
+function parseSaveMemoryPayload(payload: unknown): SaveMemoryParseResult {
+    if (payload == null) {
+        return { ok: false, error: "Invalid payload" };
+    }
+    if (typeof payload === "string") {
+        return {
+            ok: true,
+            sections: [{ fileName: "general.md", content: payload }],
+            deletedFileNames: undefined,
+        };
+    }
+    if (typeof payload !== "object") {
+        return { ok: false, error: "Invalid payload" };
+    }
+    const p = payload as Record<string, unknown>;
+
+    let deleted: string[] | undefined;
+    if (Array.isArray(p.deletedFileNames)) {
+        deleted = p.deletedFileNames.filter((n): n is string => typeof n === "string");
+        if (deleted.length === 0) deleted = undefined;
+    }
+
+    const rawSections = p.sections;
+    if (rawSections === undefined && typeof p.content === "string") {
+        const name = typeof p.fileName === "string" && p.fileName.trim() ? p.fileName.trim() : "general.md";
+        return { ok: true, sections: [{ fileName: name, content: p.content }], deletedFileNames: deleted };
+    }
+    if (!Array.isArray(rawSections)) {
+        return { ok: false, error: "Invalid sections: expected an array" };
+    }
+
+    const sections: { fileName: string; content: string }[] = [];
+    for (const row of rawSections) {
+        if (!row || typeof row !== "object") continue;
+        const r = row as Record<string, unknown>;
+        const fileName = r.fileName;
+        if (typeof fileName !== "string" || !fileName.trim()) continue;
+        const c = r.content;
+        const content = c == null ? "" : typeof c === "string" ? c : String(c);
+        sections.push({ fileName: fileName.trim(), content });
+    }
+
+    if (rawSections.length > 0 && sections.length === 0) {
+        return {
+            ok: false,
+            error: "Could not save memory: each section needs a file name and editable body.",
+        };
+    }
+
+    return { ok: true, sections, deletedFileNames: deleted };
+}
+
+function parseSaveSkillPayload(payload: unknown): SaveMemoryParseResult {
+    if (payload == null) {
+        return { ok: false, error: "Invalid payload" };
+    }
+    if (typeof payload === "string") {
+        return {
+            ok: true,
+            sections: [{ fileName: "skill.md", content: payload }],
+            deletedFileNames: undefined,
+        };
+    }
+    if (typeof payload !== "object") {
+        return { ok: false, error: "Invalid payload" };
+    }
+    const p = payload as Record<string, unknown>;
+
+    let deleted: string[] | undefined;
+    if (Array.isArray(p.deletedFileNames)) {
+        deleted = p.deletedFileNames.filter(
+            (n): n is string => typeof n === "string" && isValidFlatSkillMdFileName(n)
+        );
+        if (deleted.length === 0) deleted = undefined;
+    }
+
+    const rawSections = p.sections;
+    if (rawSections === undefined && typeof p.content === "string") {
+        const name =
+            typeof p.fileName === "string" && p.fileName.trim() && isValidFlatSkillMdFileName(p.fileName.trim())
+                ? p.fileName.trim()
+                : "skill.md";
+        return { ok: true, sections: [{ fileName: name, content: p.content }], deletedFileNames: deleted };
+    }
+    if (!Array.isArray(rawSections)) {
+        return { ok: false, error: "Invalid sections: expected an array" };
+    }
+
+    const sections: { fileName: string; content: string }[] = [];
+    for (const row of rawSections) {
+        if (!row || typeof row !== "object") continue;
+        const r = row as Record<string, unknown>;
+        const fileName = r.fileName;
+        if (typeof fileName !== "string" || !isValidFlatSkillMdFileName(fileName.trim())) continue;
+        const c = r.content;
+        const content = c == null ? "" : typeof c === "string" ? c : String(c);
+        sections.push({ fileName: fileName.trim(), content });
+    }
+
+    if (rawSections.length > 0 && sections.length === 0) {
+        return {
+            ok: false,
+            error: "Could not save skills: each file must be a valid *.md name in the skills folder.",
+        };
+    }
+
+    return { ok: true, sections, deletedFileNames: deleted };
+}
 
 let cleanupComplete = false;
 let mainWindow: BrowserWindow | null = null;
@@ -52,6 +180,7 @@ function handleSignal(): void {
 app.on("ready", () => {
     Menu.setApplicationMenu(null);
     ensureAppSkillsDir();
+    ensureMemoriesDir();
     // Setup event handlers
     app.on("before-quit", cleanup);
     app.on("will-quit", cleanup);
@@ -194,6 +323,43 @@ app.on("ready", () => {
         const dir = getAppSkillsDir();
         shell.openPath(dir);
         return dir;
+    });
+
+    ipcMainHandle("get-memory-md", () => {
+        const dir = getMemoriesDir();
+        const sections = readAllMemorySections();
+        const skillsDir = getAppSkillsDir();
+        const skillSections = readAllFlatSkillSections();
+        return { dir, sections, skillsDir, skillSections };
+    });
+
+    ipcMainHandle("save-memory-md", (_: any, payload: unknown) => {
+        try {
+            const parsed = parseSaveMemoryPayload(payload);
+            if (!parsed.ok) {
+                return { success: false, error: parsed.error };
+            }
+            writeMemorySections(parsed.sections, parsed.deletedFileNames);
+            return { success: true };
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
+    });
+
+    ipcMainHandle("save-skill-md", (_: any, payload: unknown) => {
+        try {
+            const parsed = parseSaveSkillPayload(payload);
+            if (!parsed.ok) {
+                return { success: false, error: parsed.error };
+            }
+            writeFlatSkillSections(parsed.sections, parsed.deletedFileNames);
+            syncAppSkills();
+            return { success: true };
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
     });
 
     const IMAGE_MIME: Record<string, string> = {

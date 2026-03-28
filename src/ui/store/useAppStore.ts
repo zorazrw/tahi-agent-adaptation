@@ -477,6 +477,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ globalError: event.payload.message });
         break;
       }
+
+      case "memory.readResult":
+      case "memory.writeResult":
+      case "skills.writeResult":
+        break;
     }
   }
 }));

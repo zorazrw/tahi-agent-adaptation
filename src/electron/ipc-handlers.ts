@@ -16,6 +16,14 @@ import {
 import { app } from "electron";
 import { join } from "path";
 import { readFileSync } from "fs";
+import { ensureMemoriesDir, readAllMemorySections, writeMemorySections, getMemoriesDir } from "./libs/memory-store.js";
+import {
+  readAllFlatSkillSections,
+  writeFlatSkillSections,
+  getAppSkillsDir,
+  syncAppSkills,
+  isValidFlatSkillMdFileName,
+} from "./libs/skill-store.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -402,6 +410,52 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
 
 export function handleClientEvent(event: ClientEvent) {
   const sessions = initializeSessions();
+
+  if (event.type === "memory.read") {
+    ensureMemoriesDir();
+    const { requestId } = event.payload;
+    const dir = getMemoriesDir();
+    const sections = readAllMemorySections();
+    const skillsDir = getAppSkillsDir();
+    const skillSections = readAllFlatSkillSections();
+    broadcast({
+      type: "memory.readResult",
+      payload: { requestId, dir, sections, skillsDir, skillSections },
+    });
+    return;
+  }
+
+  if (event.type === "memory.write") {
+    const { requestId, sections, deletedFileNames } = event.payload;
+    try {
+      writeMemorySections(sections, deletedFileNames);
+      broadcast({ type: "memory.writeResult", payload: { requestId, success: true } });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      broadcast({ type: "memory.writeResult", payload: { requestId, success: false, error: message } });
+    }
+    return;
+  }
+
+  if (event.type === "skills.write") {
+    const { requestId, sections, deletedFileNames } = event.payload;
+    try {
+      const normalizedSections = sections
+        .map((s) => ({
+          fileName: String(s.fileName ?? "").trim(),
+          content: s.content == null ? "" : String(s.content),
+        }))
+        .filter((s) => isValidFlatSkillMdFileName(s.fileName));
+      const filteredDeletes = deletedFileNames?.filter((n) => isValidFlatSkillMdFileName(n));
+      writeFlatSkillSections(normalizedSections, filteredDeletes);
+      syncAppSkills();
+      broadcast({ type: "skills.writeResult", payload: { requestId, success: true } });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      broadcast({ type: "skills.writeResult", payload: { requestId, success: false, error: message } });
+    }
+    return;
+  }
 
   if (event.type === "session.list") {
     emit({
