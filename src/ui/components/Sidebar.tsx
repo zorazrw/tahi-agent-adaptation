@@ -729,13 +729,73 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
         )}
       </div>
 
-      {/* Progress: tree + slider + run button — only when a task is selected (hidden on new-task home) */}
-      {activeSessionId && (
-        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5">
-          <div className="flex items-center gap-2 mb-2.5 shrink-0 min-w-0">
-            <span className="text-base font-semibold text-ink-900 truncate tracking-tight shrink-0">Progress</span>
-            {workflowTree.length > 0 && (
-              <div className="flex items-center gap-1.5 shrink-0 text-xs">
+      {/* Mode-aware content area */}
+      {sessionList.length > 0 && activeSession && activeSession.interactionMode === "plan" && (
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
+          <div className="flex items-center gap-2 mb-1.5 shrink-0">
+            <div className="h-3 w-0.5 shrink-0 rounded-full bg-amber-500" />
+            <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Plan Mode</span>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 px-1">
+            <p className="text-xs text-muted-foreground">
+              The agent is researching and writing a markdown plan. You can review and edit the plan file, then approve it to begin implementation.
+            </p>
+            {activeSession.planFilePath && (
+              <div className="rounded-lg border border-ink-900/10 bg-surface px-3 py-2">
+                <div className="text-[11px] uppercase tracking-wide text-ink-500 font-semibold mb-1">Plan File</div>
+                <span className="font-mono text-[11px] text-ink-600 break-all">{activeSession.planFilePath}</span>
+              </div>
+            )}
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+              <div className="text-[11px] text-amber-700">
+                {activeSession.status === "running"
+                  ? "Agent is working on the plan..."
+                  : activeSession.status === "idle"
+                    ? "Waiting for your input. You can continue the conversation or edit the plan file directly."
+                    : activeSession.status === "completed"
+                      ? "Plan session completed."
+                      : "An error occurred."}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {sessionList.length > 0 && activeSession && activeSession.interactionMode === "chat" && (
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
+          <div className="flex items-center gap-2 mb-1.5 shrink-0">
+            <div className="h-3 w-0.5 shrink-0 rounded-full bg-blue-500" />
+            <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Chat Mode</span>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 px-1">
+            <p className="text-xs text-muted-foreground">
+              Free-form coding chat. The agent will respond directly without a structured workflow.
+            </p>
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
+              <div className="text-[11px] text-blue-700">
+                {activeSession.status === "running"
+                  ? "Agent is working..."
+                  : activeSession.status === "idle"
+                    ? "Ready for your next message."
+                    : activeSession.status === "completed"
+                      ? "Chat session completed."
+                      : "An error occurred."}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Progress: tree + slider + run button — workflow mode only */}
+      {sessionList.length > 0 && (!activeSession || activeSession.interactionMode === "workflow") && (
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
+          <div className="flex items-center justify-between gap-2 mb-1.5 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="h-3 w-0.5 shrink-0 rounded-full bg-primary" />
+              <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Progress</span>
+            </div>
+            {workflowTree.length > 0 && maxDepth > 0 && (
+              <div className="flex items-center gap-1 rounded-lg border border-ink-900/10 bg-surface p-0.5 shrink-0">
                 <TooltipProvider delayDuration={300}>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -882,11 +942,12 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
         </div>
       )}
 
-      {/* Files (compact) */}
-      {selectedNode && (selectedNode.outputFiles.length > 0) && (
-        <div className="shrink-0 border-t border-ink-900/10 pt-2.5 pb-3">
-          <div className="mb-2.5">
-            <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Files</span>
+      {/* Files (compact) — workflow mode only */}
+      {activeSession?.interactionMode === "workflow" && selectedNode && (selectedNode.outputFiles.length > 0) && (
+        <div className="shrink-0 border-t border-ink-900/10 pt-1.5 pb-1">
+          <div className="flex items-center gap-1.5 mb-1">
+            <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
+            <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Files</span>
           </div>
           <div
             className={
@@ -934,21 +995,13 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
         </div>
       )}
 
-      {/* Verifiers (compact) */}
-      {selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
-        <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5 pb-3">
-          <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Verifiers</span>
-              {isVerifierChecking && (
-                <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
-                    <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
-                  </svg>
-                  Checking…
-                </span>
-              )}
+      {/* Verifiers (compact) — workflow mode only */}
+      {activeSession?.interactionMode === "workflow" && selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
+        <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-1.5">
+          <div className="flex items-center justify-between gap-1.5 mb-1 shrink-0">
+            <div className="flex items-center gap-1.5">
+              <div className="h-2.5 w-0.5 rounded-full bg-ink-400" />
+              <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Verifiers</span>
             </div>
             <button
               type="button"

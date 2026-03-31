@@ -2,6 +2,8 @@ export type NodeStatus = "pending" | "running" | "completed" | "error";
 
 export type SessionEngine = "legacy-claude" | "pi";
 
+export type InteractionMode = "workflow" | "plan" | "chat";
+
 export type VerifierMark = "check" | "cross" | undefined;
 
 export type WorkflowNodeResumePoint = { entryId: string } | { uuid: string; claudeSessionId: string };
@@ -229,11 +231,13 @@ export type SessionInfo = {
   title: string;
   status: SessionStatus;
   engine: SessionEngine;
+  interactionMode: InteractionMode;
   claudeSessionId?: string;
   piSessionFile?: string;
   cwd?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
+  planFilePath?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -310,7 +314,7 @@ export type ServerEvent =
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
   | { type: "session.status"; payload: { sessionId: string; status: SessionStatus; title?: string; cwd?: string; error?: string } }
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
-  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; workflowTree?: WorkflowNode[]; verificationDepth?: number; title?: string; engine?: SessionEngine } }
+  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; workflowTree?: WorkflowNode[]; verificationDepth?: number; title?: string; engine?: SessionEngine; interactionMode?: InteractionMode; planFilePath?: string } }
   | { type: "session.workflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
   | { type: "session.verificationDepth"; payload: { sessionId: string; verificationDepth: number } }
   | { type: "session.title"; payload: { sessionId: string; title: string } }
@@ -320,10 +324,11 @@ export type ServerEvent =
   | { type: "runner.error"; payload: { sessionId?: string; message: string } }
   | { type: "workflow.plan"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
   | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[] } }
-  | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } };
+  | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } }
+  | { type: "session.modeChanged"; payload: { sessionId: string; interactionMode: InteractionMode } };
 
 export type ClientEvent =
-  | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string } }
+  | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string; interactionMode?: InteractionMode } }
   | { type: "session.continue"; payload: { sessionId: string; prompt: string } }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }

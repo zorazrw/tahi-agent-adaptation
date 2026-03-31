@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { NodeCompletedMessage, ServerEvent, SessionEngine, SessionStatus, StreamMessage, WorkflowNode } from "../types";
+import type { InteractionMode, NodeCompletedMessage, ServerEvent, SessionEngine, SessionStatus, StreamMessage, WorkflowNode } from "../types";
 import {
   clearAllPendingWorkflowAutoAdvance,
   clearPendingWorkflowAutoAdvance,
@@ -33,9 +33,11 @@ export type SessionView = {
   title: string;
   status: SessionStatus;
   engine?: SessionEngine;
+  interactionMode: InteractionMode;
   cwd?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
+  planFilePath?: string;
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
   lastPrompt?: string;
@@ -71,6 +73,7 @@ interface AppState {
   /** LM is labeling verifiers for this session/step before the next run can proceed. */
   verifierCheckSessionId: string | null;
   verifierCheckNodeId: string | null;
+  selectedMode: InteractionMode;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -87,6 +90,7 @@ interface AppState {
   setCollapsedNodeIds: (ids: Set<string>) => void;
   setHighlightDepth: (depth: number | null) => void;
   setPreviewPanelOpen: (open: boolean) => void;
+  setSelectedMode: (mode: InteractionMode) => void;
   setApiConfigChecked: (checked: boolean) => void;
   setWorkflowRunMode: (mode: WorkflowRunMode) => void;
   markHistoryRequested: (sessionId: string) => void;
@@ -104,7 +108,7 @@ interface AppState {
 }
 
 function createSession(id: string): SessionView {
-  return { id, title: "", status: "idle", messages: [], permissionRequests: [], hydrated: false };
+  return { id, title: "", status: "idle", interactionMode: "workflow", messages: [], permissionRequests: [], hydrated: false };
 }
 
 /** Find a node by id in a workflow tree. */
@@ -140,6 +144,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workflowRunMode: readStoredWorkflowRunMode(),
   verifierCheckSessionId: null,
   verifierCheckNodeId: null,
+  selectedMode: "workflow" as InteractionMode,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
@@ -167,6 +172,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCollapsedNodeIds: (collapsedNodeIds) => set({ collapsedNodeIds }),
   setHighlightDepth: (highlightDepth) => set({ highlightDepth }),
   setPreviewPanelOpen: (previewPanelOpen) => set({ previewPanelOpen }),
+  setSelectedMode: (selectedMode) => set({ selectedMode }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
 
   setWorkflowRunMode: (workflowRunMode) => {
@@ -267,9 +273,11 @@ export const useAppStore = create<AppState>((set, get) => ({
             status: session.status,
             title: session.title ?? existing.title,
             engine: session.engine,
+            interactionMode: session.interactionMode ?? existing.interactionMode,
             cwd: session.cwd,
             workflowTree: session.workflowTree ?? existing.workflowTree,
             verificationDepth: session.verificationDepth ?? existing.verificationDepth,
+            planFilePath: session.planFilePath ?? existing.planFilePath,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
           };
@@ -320,7 +328,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, workflowTree, verificationDepth, title, engine } = event.payload;
+        const { sessionId, messages, status, workflowTree, verificationDepth, title, engine, interactionMode, planFilePath } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -330,9 +338,11 @@ export const useAppStore = create<AppState>((set, get) => ({
                 ...existing,
                 status,
                 engine: engine ?? existing.engine,
+                interactionMode: interactionMode ?? existing.interactionMode,
                 messages,
                 ...(workflowTree !== undefined && { workflowTree }),
                 ...(verificationDepth !== undefined && { verificationDepth }),
+                ...(planFilePath !== undefined && { planFilePath }),
                 ...(title !== undefined && { title }),
                 hydrated: true
               }
@@ -585,6 +595,19 @@ export const useAppStore = create<AppState>((set, get) => ({
         break;
       }
 
+      case "session.modeChanged": {
+        const { sessionId, interactionMode } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, interactionMode }
+            }
+          };
+        });
+        break;
+      }
       case "memory.readResult":
       case "memory.writeResult":
       case "skills.writeResult":

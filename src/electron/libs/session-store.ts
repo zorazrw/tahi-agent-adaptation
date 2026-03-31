@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { z } from "zod";
 import type {
   AppPermissionResult,
+  InteractionMode,
   SessionEngine,
   SessionStatus,
   StreamMessage,
@@ -80,6 +81,7 @@ export type Session = {
   id: string;
   title: string;
   engine: SessionEngine;
+  interactionMode: InteractionMode;
   claudeSessionId?: string;
   piSessionFile?: string;
   status: SessionStatus;
@@ -88,6 +90,7 @@ export type Session = {
   lastPrompt?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
+  planFilePath?: string;
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -97,6 +100,7 @@ export type StoredSession = {
   title: string;
   status: SessionStatus;
   engine: SessionEngine;
+  interactionMode: InteractionMode;
   cwd?: string;
   allowedTools?: string;
   lastPrompt?: string;
@@ -104,6 +108,7 @@ export type StoredSession = {
   piSessionFile?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
+  planFilePath?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -129,13 +134,16 @@ export class SessionStore {
     prompt?: string;
     title: string;
     engine?: SessionEngine;
+    interactionMode?: InteractionMode;
   }): Session {
     const id = crypto.randomUUID();
     const now = Date.now();
+    const mode = options.interactionMode ?? "workflow";
     const session: Session = {
       id,
       title: options.title,
       engine: options.engine ?? "pi",
+      interactionMode: mode,
       status: "idle",
       cwd: options.cwd,
       allowedTools: options.allowedTools,
@@ -148,13 +156,14 @@ export class SessionStore {
     this.db
       .prepare(
         `insert into sessions
-          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, engine, interaction_mode, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
         session.title,
         session.engine,
+        session.interactionMode,
         session.claudeSessionId ?? null,
         session.piSessionFile ?? null,
         session.status,
@@ -176,8 +185,8 @@ export class SessionStore {
   listSessions(): StoredSession[] {
     const rows = this.db
       .prepare(
-        `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
-                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+        `select id, title, engine, interaction_mode, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
+                workflow_tree, verification_depth, plan_file_path, steps, verification_criteria, output_files,
                 completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
          order by updated_at desc`
@@ -205,6 +214,7 @@ export class SessionStore {
         title: String(row.title),
         status: row.status as SessionStatus,
         engine: row.engine ? (String(row.engine) as SessionEngine) : "legacy-claude",
+        interactionMode: (row.interaction_mode ? String(row.interaction_mode) : "workflow") as InteractionMode,
         cwd: row.cwd ? String(row.cwd) : undefined,
         allowedTools: row.allowed_tools ? String(row.allowed_tools) : undefined,
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
@@ -212,6 +222,7 @@ export class SessionStore {
         piSessionFile: row.pi_session_file ? String(row.pi_session_file) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
+        planFilePath: row.plan_file_path ? String(row.plan_file_path) : undefined,
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
       };
@@ -235,8 +246,8 @@ export class SessionStore {
   getSessionHistory(id: string): SessionHistory | null {
     const sessionRow = this.db
       .prepare(
-        `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
-                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+        `select id, title, engine, interaction_mode, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
+                workflow_tree, verification_depth, plan_file_path, steps, verification_criteria, output_files,
                 completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
          where id = ?`
@@ -272,6 +283,7 @@ export class SessionStore {
         title: String(sessionRow.title),
         status: sessionRow.status as SessionStatus,
         engine: sessionRow.engine ? (String(sessionRow.engine) as SessionEngine) : "legacy-claude",
+        interactionMode: (sessionRow.interaction_mode ? String(sessionRow.interaction_mode) : "workflow") as InteractionMode,
         cwd: sessionRow.cwd ? String(sessionRow.cwd) : undefined,
         allowedTools: sessionRow.allowed_tools ? String(sessionRow.allowed_tools) : undefined,
         lastPrompt: sessionRow.last_prompt ? String(sessionRow.last_prompt) : undefined,
@@ -279,6 +291,7 @@ export class SessionStore {
         piSessionFile: sessionRow.pi_session_file ? String(sessionRow.pi_session_file) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: sessionRow.verification_depth != null ? Number(sessionRow.verification_depth) : 0,
+        planFilePath: sessionRow.plan_file_path ? String(sessionRow.plan_file_path) : undefined,
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },
@@ -389,6 +402,7 @@ export class SessionStore {
     const updatable = {
       title: "title",
       engine: "engine",
+      interactionMode: "interaction_mode",
       claudeSessionId: "claude_session_id",
       piSessionFile: "pi_session_file",
       status: "status",
@@ -396,7 +410,8 @@ export class SessionStore {
       allowedTools: "allowed_tools",
       lastPrompt: "last_prompt",
       workflowTree: "workflow_tree",
-      verificationDepth: "verification_depth"
+      verificationDepth: "verification_depth",
+      planFilePath: "plan_file_path"
     } as const;
 
     const jsonKeys = new Set<string>(["workflowTree"]);
@@ -455,6 +470,8 @@ export class SessionStore {
     try { this.db.exec(`alter table sessions add column workflow_tree text`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column verification_depth integer default 0`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column pi_session_file text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column interaction_mode text default 'workflow'`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column plan_file_path text`); } catch { /* exists */ }
     try { this.db.exec(`update sessions set engine = 'legacy-claude' where engine is null or trim(engine) = ''`); } catch { /* ignore */ }
 
     this.db.exec(
@@ -477,8 +494,8 @@ export class SessionStore {
   private loadSessions(): void {
     const rows = this.db
       .prepare(
-        `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
-                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+        `select id, title, engine, interaction_mode, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
+                workflow_tree, verification_depth, plan_file_path, steps, verification_criteria, output_files,
                 verifier_marks, completed_step_indices
          from sessions`
       )
@@ -502,6 +519,7 @@ export class SessionStore {
         id: String(row.id),
         title: String(row.title),
         engine: row.engine ? (String(row.engine) as SessionEngine) : "legacy-claude",
+        interactionMode: (row.interaction_mode ? String(row.interaction_mode) : "workflow") as InteractionMode,
         claudeSessionId: row.claude_session_id ? String(row.claude_session_id) : undefined,
         piSessionFile: row.pi_session_file ? String(row.pi_session_file) : undefined,
         status: row.status as SessionStatus,
@@ -510,6 +528,7 @@ export class SessionStore {
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
+        planFilePath: row.plan_file_path ? String(row.plan_file_path) : undefined,
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);

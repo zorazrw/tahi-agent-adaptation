@@ -150,7 +150,11 @@ function App() {
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
 
-  const showChatPanel = previewPanelOpen;
+  const isWorkflowMode = !activeSession || activeSession.interactionMode === "workflow";
+  const isPlanMode = activeSession?.interactionMode === "plan";
+  const isChatMode = activeSession?.interactionMode === "chat";
+  const showChatPanel = isChatMode ? true : previewPanelOpen;
+  const showFilePreview = isWorkflowMode || isPlanMode;
 
   const {
     visibleMessages,
@@ -352,17 +356,26 @@ function App() {
       />
 
       <main className="flex flex-1 flex-col ml-[var(--sidebar-width)] min-h-0 overflow-hidden bg-surface-cream">
-        {activeSession && (
-          <div
-            className="relative flex shrink-0 items-center justify-end px-4 pt-3 pb-2 border-b border-ink-900/10 bg-surface-cream select-none"
-            style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
-          >
-            <div className="absolute inset-x-0 flex justify-center pointer-events-none px-28 min-w-0 -translate-x-10">
-              <span className="min-w-0 max-w-full text-center text-base font-semibold text-ink-900 tracking-tight truncate">
-                {activeSession.title}
+        <div
+          className="relative flex shrink-0 items-center justify-end px-4 pt-3 pb-2 border-b border-ink-900/10 bg-surface-cream select-none"
+          style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+        >
+          <span className="absolute left-0 right-0 flex items-center justify-center gap-2 pointer-events-none text-sm font-medium text-ink-700">
+            {activeSession?.title || "Agent Cowork"}
+            {activeSession && (
+              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                activeSession.interactionMode === "plan"
+                  ? "bg-amber-100 text-amber-700"
+                  : activeSession.interactionMode === "chat"
+                    ? "bg-blue-100 text-blue-700"
+                    : "bg-primary/10 text-primary"
+              }`}>
+                {activeSession.interactionMode}
               </span>
-            </div>
-            <div className="relative z-10 flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            )}
+          </span>
+          {activeSession && !isChatMode && (
+            <div className="relative z-10 flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <button
                 type="button"
                 onClick={() => setShowMemoryModal(true)}
@@ -413,48 +426,58 @@ function App() {
         <>
         <div className="flex flex-1 flex-col min-h-0" style={{ paddingBottom: "var(--prompt-bar-height)" }}>
           <div ref={splitContainerRef} className="flex flex-1 flex-row min-h-0 overflow-hidden">
-          {/* Left (center) column: preview — always visible */}
+          {/* Left (center) column: file preview */}
+          {showFilePreview && (
           <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: showChatPanel ? `${100 - previewWidthPct} 1 0px` : "1 1 0px" }}>
             <div className="flex-1 min-h-0 overflow-hidden p-4">
               <div className="flex flex-col h-full">
                 <ErrorBoundary>
-                  <FilePreview
-                    sessionId={activeSessionId}
-                    filePath={(() => {
-                      if (!selectedNodeId || !activeSession?.workflowTree) return null;
-                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
-                        for (const n of tree) {
-                          if (n.id === id) return n;
-                          const f = findNode(n.children, id);
-                          if (f) return f;
-                        }
-                        return undefined;
-                      };
-                      const node = findNode(activeSession.workflowTree, selectedNodeId);
-                      return getPreviewFileForNode(node?.outputFiles);
-                    })()}
-                    cwd={activeSession?.cwd}
-                    stepCompleted={(() => {
-                      if (!selectedNodeId || !activeSession?.workflowTree) return false;
-                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
-                        for (const n of tree) {
-                          if (n.id === id) return n;
-                          const f = findNode(n.children, id);
-                          if (f) return f;
-                        }
-                        return undefined;
-                      };
-                      const node = findNode(activeSession.workflowTree, selectedNodeId);
-                      return node?.status === "completed";
-                    })()}
-                  />
+                  {isPlanMode ? (
+                    <FilePreview
+                      filePath={activeSession?.planFilePath ?? null}
+                      cwd={activeSession?.cwd}
+                      stepCompleted={activeSession?.status !== "running"}
+                      key={`plan-${activeSession?.messages.filter((m) => m.type === "tool_result").length ?? 0}`}
+                    />
+                  ) : (
+                    <FilePreview
+                      filePath={(() => {
+                        if (!selectedNodeId || !activeSession?.workflowTree) return null;
+                        const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                          for (const n of tree) {
+                            if (n.id === id) return n;
+                            const f = findNode(n.children, id);
+                            if (f) return f;
+                          }
+                          return undefined;
+                        };
+                        const node = findNode(activeSession.workflowTree, selectedNodeId);
+                        return getPreviewFileForNode(node?.outputFiles);
+                      })()}
+                      cwd={activeSession?.cwd}
+                      stepCompleted={(() => {
+                        if (!selectedNodeId || !activeSession?.workflowTree) return false;
+                        const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                          for (const n of tree) {
+                            if (n.id === id) return n;
+                            const f = findNode(n.children, id);
+                            if (f) return f;
+                          }
+                          return undefined;
+                        };
+                        const node = findNode(activeSession.workflowTree, selectedNodeId);
+                        return node?.status === "completed";
+                      })()}
+                    />
+                  )}
                 </ErrorBoundary>
               </div>
             </div>
           </div>
+          )}
 
-          {/* Vertical drag handle (only when chat panel is open) */}
-          {showChatPanel && (
+          {/* Vertical drag handle (when both panels are visible) */}
+          {showFilePreview && showChatPanel && (
             <div
               onMouseDown={handleSplitMouseDown}
               className="shrink-0 w-3 cursor-col-resize relative group flex items-center justify-center border-l border-r border-ink-900/8 hover:border-ink-900/15 hover:bg-primary/5 transition-all duration-150"
@@ -463,9 +486,9 @@ function App() {
             </div>
           )}
 
-          {/* Right column: chat / model log (only when Chat is toggled) */}
+          {/* Right column: chat / model log */}
           {showChatPanel && (
-            <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
+            <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: showFilePreview ? `${previewWidthPct} 1 0px` : "1 1 0px" }}>
               <div className="flex items-center justify-between px-4 pt-3 pb-1 border-b border-ink-900/10">
                 <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Conversation</span>
                 <button

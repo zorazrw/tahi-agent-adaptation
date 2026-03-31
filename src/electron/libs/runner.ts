@@ -12,11 +12,12 @@ import {
   type AgentSessionEvent,
   type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import type { AppPermissionResult, PiAssistantBlock, PiLlmDebugMessage, ServerEvent, StreamMessage } from "../types.js";
+import type { AppPermissionResult, InteractionMode, PiAssistantBlock, PiLlmDebugMessage, ServerEvent, StreamMessage } from "../types.js";
 import { runWithLlmDebugContext } from "./llm-debug.js";
 import { createPiManagers, createPiResourceLoader, createPiSessionManager } from "./pi-config.js";
 import type { Session } from "./session-store.js";
 import { hydrateWorkflowTree, type RawWorkflowNode } from "./workflow-tree-utils.js";
+import { resolvePlanFilePath, planFileExists, buildPlanModeSystemPrompt, PLAN_APPROVE_TOOL_DESCRIPTION } from "./plan-config.js";
 
 export type RunnerOptions = {
   prompt: string;
@@ -247,8 +248,13 @@ function buildCanonicalHistory(
   return history;
 }
 
-function resolveRunStatus(planRegistered: boolean, regenerateWorkflow: boolean | undefined): "idle" | "completed" {
-  if (planRegistered || regenerateWorkflow) return "idle";
+function resolveRunStatus(
+  planRegistered: boolean,
+  regenerateWorkflow: boolean | undefined,
+  mode: InteractionMode = "workflow"
+): "idle" | "completed" {
+  if (mode === "workflow" && (planRegistered || regenerateWorkflow)) return "idle";
+  if (mode === "plan") return "idle";
   return "completed";
 }
 
@@ -364,6 +370,79 @@ function createAskUserQuestionTool(session: Session, onEvent: (event: ServerEven
   };
 }
 
+function createPlanApproveTool(
+  session: Session,
+  onEvent: (event: ServerEvent) => void,
+  onSessionUpdate?: (updates: Partial<Session>) => void,
+): ToolDefinition {
+  return {
+    name: "plan_approve",
+    label: "Approve Plan",
+    description: PLAN_APPROVE_TOOL_DESCRIPTION,
+    parameters: Type.Object({}),
+    execute: async (_toolCallId, _params, signal) => {
+      const toolUseId = crypto.randomUUID();
+      const planPath = session.planFilePath ?? resolvePlanFilePath(session);
+
+      onEvent({
+        type: "permission.request",
+        payload: {
+          sessionId: session.id,
+          toolUseId,
+          toolName: "plan_approve",
+          input: {
+            questions: [
+              {
+                question: `Plan at ${planPath} is complete. Would you like to approve and switch to implementation mode?`,
+                header: "Approve Plan",
+                options: [
+                  { label: "Yes", description: "Approve the plan and switch to chat mode for implementation" },
+                  { label: "No", description: "Stay in plan mode to continue refining the plan" },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      const result = await new Promise<AppPermissionResult>((resolve) => {
+        session.pendingPermissions.set(toolUseId, {
+          toolUseId,
+          toolName: "plan_approve",
+          input: {},
+          resolve: (permissionResult) => {
+            session.pendingPermissions.delete(toolUseId);
+            resolve(permissionResult);
+          },
+        });
+        signal?.addEventListener("abort", () => {
+          session.pendingPermissions.delete(toolUseId);
+          resolve({ behavior: "deny", message: "Session aborted" });
+        });
+      });
+
+      if (result.behavior === "deny") {
+        return {
+          content: [{ type: "text", text: "User chose to stay in plan mode. Continue refining the plan." }],
+          details: { approved: false },
+        };
+      }
+
+      session.interactionMode = "chat";
+      onSessionUpdate?.({ interactionMode: "chat" });
+      onEvent({
+        type: "session.modeChanged",
+        payload: { sessionId: session.id, interactionMode: "chat" },
+      });
+
+      return {
+        content: [{ type: "text", text: `Plan approved. Session switched to chat mode. The plan at ${planPath} is approved. You can now implement it.` }],
+        details: { approved: true },
+      };
+    },
+  };
+}
+
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
   const { prompt, session, regenerateWorkflow, branchEntryId, onEvent, onSessionUpdate } = options;
   let disposed = false;
@@ -378,9 +457,23 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
 
     const { agentDir, authStorage, modelRegistry, settingsManager } = createPiManagers(cwd);
     const isFirstMessage = !session.piSessionFile;
+    const mode: InteractionMode = session.interactionMode ?? "workflow";
     const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
+
+    let appendSystemPrompt: string | undefined;
+    if (mode === "workflow" && (isFirstMessage || regenerateWorkflow)) {
+      appendSystemPrompt = WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT;
+    } else if (mode === "plan") {
+      const planPath = session.planFilePath ?? resolvePlanFilePath(session);
+      if (!session.planFilePath) {
+        session.planFilePath = planPath;
+        onSessionUpdate?.({ planFilePath: planPath });
+      }
+      appendSystemPrompt = buildPlanModeSystemPrompt(planPath, planFileExists(planPath));
+    }
+
     const resourceLoader = await createPiResourceLoader(cwd, {
-      appendSystemPrompt: isFirstMessage || regenerateWorkflow ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : undefined,
+      appendSystemPrompt,
     });
     let planRegistered = false;
     let lastUsage: Record<string, unknown> | undefined;
@@ -390,6 +483,26 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       payload: { sessionId: session.id, prompt: promptToSend },
     });
 
+    const allTools = [
+      createReadTool(cwd),
+      createBashTool(cwd),
+      createEditTool(cwd),
+      createWriteTool(cwd),
+      createGrepTool(cwd),
+      createFindTool(cwd),
+      createLsTool(cwd),
+    ];
+
+    let customTools: ToolDefinition[];
+
+    if (mode === "workflow") {
+      customTools = [createWorkflowPlanTool(session, onEvent), createAskUserQuestionTool(session, onEvent)];
+    } else if (mode === "plan") {
+      customTools = [createPlanApproveTool(session, onEvent, onSessionUpdate), createAskUserQuestionTool(session, onEvent)];
+    } else {
+      customTools = [createAskUserQuestionTool(session, onEvent)];
+    }
+
     const { session: piSession, modelFallbackMessage } = await createAgentSession({
       cwd,
       agentDir,
@@ -398,16 +511,8 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       settingsManager,
       resourceLoader,
       sessionManager,
-      tools: [
-        createReadTool(cwd),
-        createBashTool(cwd),
-        createEditTool(cwd),
-        createWriteTool(cwd),
-        createGrepTool(cwd),
-        createFindTool(cwd),
-        createLsTool(cwd),
-      ],
-      customTools: [createWorkflowPlanTool(session, onEvent), createAskUserQuestionTool(session, onEvent)],
+      tools: allTools,
+      customTools,
     });
 
     piSessionAbort = () => piSession.abort();
@@ -654,7 +759,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         type: "session.status",
         payload: {
           sessionId: session.id,
-          status: resolveRunStatus(planRegistered, regenerateWorkflow),
+          status: resolveRunStatus(planRegistered, regenerateWorkflow, mode),
           title: session.title,
           cwd: session.cwd,
         },
