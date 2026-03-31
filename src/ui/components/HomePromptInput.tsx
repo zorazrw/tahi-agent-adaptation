@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClientEvent } from "../types";
+import type { ClientEvent, InteractionMode } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
@@ -17,6 +17,12 @@ interface HomePromptInputProps {
   sendEvent: (event: ClientEvent) => void;
 }
 
+const MODE_OPTIONS: { value: InteractionMode; label: string; description: string }[] = [
+  { value: "workflow", label: "Workflow", description: "Structured step-by-step plan" },
+  { value: "plan", label: "Plan", description: "Markdown plan with approval" },
+  { value: "chat", label: "Chat", description: "Free-form coding chat" },
+];
+
 export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
   const prompt = useAppStore((s) => s.prompt);
   const setPrompt = useAppStore((s) => s.setPrompt);
@@ -29,6 +35,8 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
   const setAttachedFiles = useAppStore((s) => s.setAttachedFiles);
   const tempCwd = useAppStore((s) => s.tempCwd);
   const setTempCwd = useAppStore((s) => s.setTempCwd);
+  const selectedMode = useAppStore((s) => s.selectedMode);
+  const setSelectedMode = useAppStore((s) => s.setSelectedMode);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -112,12 +120,13 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
         prompt: fileRefs + prompt,
         cwd: sessionCwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
+        interactionMode: selectedMode,
       },
     });
     setPrompt("");
     setAttachedFiles([]);
     setTempCwd(null);
-  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd]);
+  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, selectedMode, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;
@@ -274,6 +283,36 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
               </>
             )}
           </button>
+
+          {/* Attach button */}
+          <button
+            className="flex items-center justify-center rounded-lg p-1.5 text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
+            onClick={handleFilePickerClick}
+            title="Attach files"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+
+          {/* Mode selector */}
+          <div className="flex items-center rounded-lg border border-ink-900/10 bg-surface-secondary p-0.5">
+            {MODE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setSelectedMode(opt.value)}
+                title={opt.description}
+                className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  selectedMode === opt.value
+                    ? "bg-primary text-white shadow-sm"
+                    : "text-ink-500 hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
 
           <div className="flex-1" />
 

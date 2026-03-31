@@ -66,10 +66,13 @@ export function DecisionPanel({
     return selected.length > 0 || otherText.length > 0;
   });
 
-  if ((request.toolName === "AskUserQuestion" || request.toolName === "ask_user_question") && questions.length > 0) {
+  const isQuestionTool = request.toolName === "AskUserQuestion" || request.toolName === "ask_user_question" || request.toolName === "plan_approve";
+  if (isQuestionTool && questions.length > 0) {
     return (
       <div className="rounded-2xl border border-primary/20 bg-primary-subtle p-5">
-        <div className="text-xs font-semibold text-primary">Question from Claude</div>
+        <div className="text-xs font-semibold text-primary">
+          {request.toolName === "plan_approve" ? "Plan Approval" : "Question from Claude"}
+        </div>
         {questions.map((q, qIndex) => (
           <div key={qIndex} className="mt-4">
             <p className="text-sm text-ink-700">{q.question}</p>

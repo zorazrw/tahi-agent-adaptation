@@ -263,10 +263,16 @@ function emit(event: ServerEvent) {
     (event.type === "session.status" ||
       event.type === "stream.message" ||
       event.type === "stream.user_prompt" ||
-      event.type === "permission.request") &&
+      event.type === "permission.request" ||
+      event.type === "session.modeChanged") &&
     !hasLiveSession(event.payload.sessionId)
   ) {
     return;
+  }
+
+  if (event.type === "session.modeChanged") {
+    const { sessionId, interactionMode } = event.payload;
+    sessions.updateSession(sessionId, { interactionMode });
   }
 
   if (event.type === "session.status") {
@@ -662,7 +668,9 @@ export function handleClientEvent(event: ClientEvent) {
         workflowTree: history.session.workflowTree,
         verificationDepth: history.session.verificationDepth,
         title: history.session.title,
-        engine: history.session.engine
+        engine: history.session.engine,
+        interactionMode: history.session.interactionMode,
+        planFilePath: history.session.planFilePath
       }
     });
     return;
@@ -674,7 +682,8 @@ export function handleClientEvent(event: ClientEvent) {
       title: event.payload.title,
       allowedTools: event.payload.allowedTools,
       prompt: event.payload.prompt,
-      engine: "pi"
+      engine: "pi",
+      interactionMode: event.payload.interactionMode ?? "workflow"
     });
 
     sessions.updateSession(session.id, {
@@ -789,6 +798,14 @@ export function handleClientEvent(event: ClientEvent) {
     const { sessionId, nodeId } = event.payload;
     if (isLegacySession(sessionId)) {
       emitLegacyReadonlyError(sessionId, "solve a node");
+      return;
+    }
+    const solveSession = sessions.getSession(sessionId);
+    if (solveSession && solveSession.interactionMode !== "workflow") {
+      broadcast({
+        type: "runner.error",
+        payload: { sessionId, message: "Node solving is only available in workflow mode." }
+      });
       return;
     }
     triggerNodeSolve(sessionId, nodeId);

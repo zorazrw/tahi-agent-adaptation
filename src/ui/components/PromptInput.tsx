@@ -41,9 +41,10 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
         setGlobalError("Failed to get session title.");
         return;
       }
+      const selectedMode = useAppStore.getState().selectedMode;
       sendEvent({
         type: "session.start",
-        payload: { title, prompt, cwd: cwd.trim() || undefined, allowedTools: DEFAULT_ALLOWED_TOOLS }
+        payload: { title, prompt, cwd: cwd.trim() || undefined, allowedTools: DEFAULT_ALLOWED_TOOLS, interactionMode: selectedMode }
       });
     } else {
       if (activeSession?.status === "running") {
