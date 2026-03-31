@@ -119,6 +119,18 @@ export type PiRunResultMessage = {
   timestamp?: number;
 };
 
+export type PiLlmDebugMessage = {
+  type: "llm_debug";
+  engine: "pi";
+  provider?: string;
+  model?: string;
+  request?: unknown;
+  response?: unknown;
+  error?: string;
+  title?: string;
+  timestamp?: number;
+};
+
 export type LegacyTextBlock = {
   type: "text";
   text: string;
@@ -207,6 +219,7 @@ export type StreamMessage =
   | PiAssistantMessage
   | PiToolResultMessage
   | PiRunResultMessage
+  | PiLlmDebugMessage
   | LegacyMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
@@ -246,6 +259,35 @@ export type OpenAICompatibleProviderInput = {
   model: string;
   apiFormat: OpenAICompatibleApiFormat;
   apiKey?: string;
+};
+
+export type TinkerModelConfig = {
+  id: string;
+  baseModel: string;
+  modelPath?: string;
+  rendererName?: string;
+  reasoning: boolean;
+  contextWindow: number;
+  maxTokens: number;
+};
+
+export type TinkerProviderConfig = {
+  provider: "tinker";
+  baseUrl?: string;
+  hasApiKey: boolean;
+  model: TinkerModelConfig;
+};
+
+export type TinkerProviderInput = {
+  baseUrl?: string;
+  apiKey?: string;
+  model: string;
+  baseModel: string;
+  modelPath?: string;
+  rendererName?: string;
+  reasoning?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
 };
 
 export type AvailableModel = {

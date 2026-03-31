@@ -21,9 +21,9 @@
 	},
 	"dependencies": {
 		"@base-ui/react": "^1.2.0",
-		"@mariozechner/pi-agent-core": "file:/Users/jettchen/dev/human-empowerment-agent/pi-mono/packages/agent",
-		"@mariozechner/pi-ai": "file:/Users/jettchen/dev/human-empowerment-agent/pi-mono/packages/ai",
-		"@mariozechner/pi-coding-agent": "file:/Users/jettchen/dev/human-empowerment-agent/pi-mono/packages/coding-agent",
+		"@mariozechner/pi-agent-core": "^0.64.0",
+		"@mariozechner/pi-ai": "^0.64.0",
+		"@mariozechner/pi-coding-agent": "^0.64.0",
 		"@pierre/diffs": "^1.0.11",
 		"@radix-ui/react-dialog": "^1.1.15",
 		"@radix-ui/react-dropdown-menu": "^2.1.16",
