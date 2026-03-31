@@ -71,6 +71,35 @@ type OpenAICompatibleProviderInput = {
     apiKey?: string;
 }
 
+type TinkerModelConfig = {
+    id: string;
+    baseModel: string;
+    modelPath?: string;
+    rendererName?: string;
+    reasoning: boolean;
+    contextWindow: number;
+    maxTokens: number;
+}
+
+type TinkerProviderConfig = {
+    provider: "tinker";
+    baseUrl?: string;
+    hasApiKey: boolean;
+    model: TinkerModelConfig;
+}
+
+type TinkerProviderInput = {
+    baseUrl?: string;
+    apiKey?: string;
+    model: string;
+    baseModel: string;
+    modelPath?: string;
+    rendererName?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+    maxTokens?: number;
+}
+
 type AvailableModel = {
     provider: string;
     id: string;
@@ -86,6 +115,10 @@ type ProviderAuthStatus = {
     oauthName?: string;
 }
 
+type ResolveTinkerCheckpointResult =
+    | { ok: true; base_model: string }
+    | { ok: false; error: string };
+
 type EventPayloadMapping = {
     statistics: Statistics;
     getStaticData: StaticData;
@@ -96,8 +129,12 @@ type EventPayloadMapping = {
     "save-agent-settings": { success: boolean; error?: string };
     "list-available-models": AvailableModel[];
     "get-openai-compatible-provider": OpenAICompatibleProviderConfig | null;
+    "get-tinker-provider": TinkerProviderConfig | null;
     "save-openai-compatible-provider": { success: boolean; error?: string };
+    "save-tinker-provider": { success: boolean; error?: string };
     "remove-openai-compatible-provider": { success: boolean; error?: string };
+    "remove-tinker-provider": { success: boolean; error?: string };
+    "resolve-tinker-checkpoint": ResolveTinkerCheckpointResult;
     "get-provider-auth-status": ProviderAuthStatus;
     "save-provider-api-key": { success: boolean; error?: string };
     "login-provider": { success: boolean; error?: string };
@@ -131,8 +168,12 @@ interface Window {
         saveAgentSettings: (settings: AgentSettings) => Promise<{ success: boolean; error?: string }>;
         listAvailableModels: () => Promise<AvailableModel[]>;
         getOpenAICompatibleProvider: () => Promise<OpenAICompatibleProviderConfig | null>;
+        getTinkerProvider: () => Promise<TinkerProviderConfig | null>;
         saveOpenAICompatibleProvider: (config: OpenAICompatibleProviderInput) => Promise<{ success: boolean; error?: string }>;
+        saveTinkerProvider: (config: TinkerProviderInput) => Promise<{ success: boolean; error?: string }>;
         removeOpenAICompatibleProvider: () => Promise<{ success: boolean; error?: string }>;
+        removeTinkerProvider: () => Promise<{ success: boolean; error?: string }>;
+        resolveTinkerCheckpoint: (tinkerPath: string, apiKey?: string, baseUrl?: string) => Promise<ResolveTinkerCheckpointResult>;
         getProviderAuthStatus: (provider: string) => Promise<ProviderAuthStatus>;
         saveProviderApiKey: (provider: string, apiKey: string) => Promise<{ success: boolean; error?: string }>;
         loginProvider: (provider: string) => Promise<{ success: boolean; error?: string }>;
