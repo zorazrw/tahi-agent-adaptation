@@ -33,7 +33,13 @@ scripts/test_sessions.db
 
 # Local test files
 trash/*
-**/__pycache__/
+
+# Local plan artifacts
+.agent-cowork/plans/
 
 # Local Tinker bridge environment
 tinker-bridge/.venv/
+
+# Python caches
+__pycache__/
+*.pyc
