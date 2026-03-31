@@ -3,7 +3,11 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useAppStore } from "../store/useAppStore";
 import type { WorkflowRunMode } from "../store/useAppStore";
 import { Spinner } from "./Spinner";
-import type { AvailableModel, OpenAICompatibleApiFormat, ProviderAuthStatus } from "../../lib/runtime-types";
+import type {
+  AvailableModel,
+  OpenAICompatibleApiFormat,
+  ProviderAuthStatus,
+} from "../../lib/runtime-types";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -55,6 +59,12 @@ function WorkflowPanel() {
   );
 }
 
+function deriveTinkerSlug(baseModel: string): string {
+  const tail = baseModel.trim().split("/").pop() ?? baseModel.trim();
+  const normalized = tail.trim().toLowerCase().replace(/\s+/g, "-");
+  return normalized || "tinker";
+}
+
 export function SettingsModal({ onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<Tab>("api");
 
@@ -64,9 +74,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         <Dialog.Overlay className="fixed inset-0 z-50 bg-ink-900/20 backdrop-blur-sm animate-fade-in" />
         <Dialog.Content className="fixed inset-0 z-50 flex items-center justify-center px-4 py-8">
           <div
-            className={`w-full rounded-2xl border border-ink-900/5 bg-surface shadow-elevated animate-scale-in flex flex-col max-h-[84vh] ${
-              tab === "api" ? "max-w-5xl" : "max-w-3xl"
-            }`}
+            className="w-full max-w-3xl rounded-2xl border border-ink-900/5 bg-surface shadow-elevated animate-scale-in flex flex-col max-h-[84vh]"
           >
             {/* Header */}
             <div className="flex items-center justify-between px-6 pt-6 pb-0 shrink-0">
@@ -145,15 +153,27 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   const [apiKey, setApiKey] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [savingApiKey, setSavingApiKey] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [customApiFormat, setCustomApiFormat] = useState<OpenAICompatibleApiFormat>("openai-completions");
   const [customApiKey, setCustomApiKey] = useState("");
   const [customConfigured, setCustomConfigured] = useState(false);
-  const [savingCustomProvider, setSavingCustomProvider] = useState(false);
   const [removingCustomProvider, setRemovingCustomProvider] = useState(false);
+  const [tinkerBaseUrl, setTinkerBaseUrl] = useState("");
+  const [tinkerBaseModel, setTinkerBaseModel] = useState("");
+  const [tinkerModelPath, setTinkerModelPath] = useState("");
+  const [tinkerRendererName, setTinkerRendererName] = useState("");
+  const [tinkerReasoning, setTinkerReasoning] = useState(true);
+  const [tinkerContextWindow, setTinkerContextWindow] = useState("128000");
+  const [tinkerMaxTokens, setTinkerMaxTokens] = useState("16384");
+  const [tinkerApiKey, setTinkerApiKey] = useState("");
+  const [tinkerConfigured, setTinkerConfigured] = useState(false);
+  const [removingTinkerProvider, setRemovingTinkerProvider] = useState(false);
+  const [tinkerAdvancedOpen, setTinkerAdvancedOpen] = useState(false);
+  const [tinkerResolving, setTinkerResolving] = useState(false);
+  const [tinkerResolveError, setTinkerResolveError] = useState<string | null>(null);
+  const [tinkerBaseModelResolved, setTinkerBaseModelResolved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
@@ -199,12 +219,30 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
     return config;
   };
 
+  const loadTinkerProvider = async () => {
+    const config = await window.electron.getTinkerProvider();
+    setTinkerConfigured(Boolean(config));
+    setTinkerBaseUrl(config?.baseUrl ?? "");
+    setTinkerBaseModel(config?.model.baseModel ?? "");
+    setTinkerModelPath(config?.model.modelPath ?? "");
+    setTinkerRendererName(config?.model.rendererName ?? "");
+    setTinkerReasoning(config?.model.reasoning ?? true);
+    setTinkerContextWindow(String(config?.model.contextWindow ?? 128000));
+    setTinkerMaxTokens(String(config?.model.maxTokens ?? 16384));
+    setTinkerApiKey("");
+    setTinkerBaseModelResolved(Boolean(config?.model.modelPath?.startsWith("tinker://") && config?.model.baseModel));
+    setTinkerResolveError(null);
+    setTinkerResolving(false);
+    return config;
+  };
+
   useEffect(() => {
     setLoading(true);
     Promise.all([
       window.electron.getAgentSettings(),
       window.electron.listAvailableModels(),
       loadOpenAICompatibleProvider(),
+      loadTinkerProvider(),
     ])
       .then(async ([settings, availableModels]) => {
         setThinkingLevel(settings.defaultThinkingLevel ?? "medium");
@@ -219,75 +257,148 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       });
   }, []);
 
+  useEffect(() => {
+    if (provider !== "tinker") {
+      setTinkerResolving(false);
+      setTinkerResolveError(null);
+      return;
+    }
+
+    const nextPath = tinkerModelPath.trim();
+    if (!nextPath || !nextPath.startsWith("tinker://")) {
+      setTinkerResolving(false);
+      setTinkerResolveError(null);
+      setTinkerBaseModelResolved(false);
+      return;
+    }
+
+    let cancelled = false;
+    setTinkerResolving(true);
+    setTinkerResolveError(null);
+
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        const result = await window.electron.resolveTinkerCheckpoint(
+          nextPath,
+          tinkerApiKey.trim() || undefined,
+          tinkerBaseUrl.trim() || undefined,
+        );
+        if (cancelled) return;
+        if (!result.ok) {
+          setTinkerBaseModelResolved(false);
+          setTinkerResolveError(result.error);
+          return;
+        }
+        setTinkerBaseModel(result.base_model);
+        setTinkerBaseModelResolved(true);
+        setTinkerResolveError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setTinkerBaseModelResolved(false);
+        setTinkerResolveError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) {
+          setTinkerResolving(false);
+        }
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [provider, tinkerModelPath, tinkerApiKey, tinkerBaseUrl]);
+
   const handleSave = async () => {
-    if (!provider.trim()) { setError("Provider is required"); return; }
-    if (!model.trim()) { setError("Model is required"); return; }
     setError(null);
     setSaving(true);
-
     try {
-      const result = await window.electron.saveAgentSettings({
-        defaultProvider: provider,
-        defaultModel: model,
-        defaultThinkingLevel: thinkingLevel,
-      });
+      if (provider === "tinker") {
+        if (!tinkerBaseModel.trim()) { setError("Base model is required"); return; }
+        const contextWindow = Number.parseInt(tinkerContextWindow, 10);
+        const maxTokens = Number.parseInt(tinkerMaxTokens, 10);
+        if (!Number.isFinite(contextWindow) || contextWindow <= 0) { setError("Context window must be a positive number"); return; }
+        if (!Number.isFinite(maxTokens) || maxTokens <= 0) { setError("Max tokens must be a positive number"); return; }
+        const tinkerSlug = deriveTinkerSlug(tinkerBaseModel);
 
-      if (result.success) {
-        setSuccess(true);
-        setTimeout(() => {
-          setSuccess(false);
-          onClose();
-        }, 1000);
+        const tinkerResult = await window.electron.saveTinkerProvider({
+          baseUrl: tinkerBaseUrl.trim() || undefined,
+          apiKey: tinkerApiKey.trim() || undefined,
+          model: tinkerSlug,
+          baseModel: tinkerBaseModel.trim(),
+          modelPath: tinkerModelPath.trim() || undefined,
+          rendererName: tinkerRendererName.trim() || undefined,
+          reasoning: tinkerReasoning,
+          contextWindow,
+          maxTokens,
+        });
+        if (!tinkerResult.success) { setError(tinkerResult.error || "Failed to save Tinker provider"); return; }
+
+        const settingsResult = await window.electron.saveAgentSettings({
+          defaultProvider: "tinker",
+          defaultModel: tinkerSlug,
+          defaultThinkingLevel: thinkingLevel,
+        });
+        if (!settingsResult.success) { setError(settingsResult.error || "Failed to save settings"); return; }
+
+        const [availableModels] = await Promise.all([
+          window.electron.listAvailableModels(),
+          loadTinkerProvider(),
+        ]);
+        await syncModelState(availableModels, { provider: "tinker", model: tinkerSlug });
+      } else if (provider === "openai-compatible") {
+        if (!customBaseUrl.trim()) { setError("Base URL is required"); return; }
+        if (!customModel.trim()) { setError("Model slug is required"); return; }
+
+        const customResult = await window.electron.saveOpenAICompatibleProvider({
+          baseUrl: customBaseUrl.trim(),
+          model: customModel.trim(),
+          apiFormat: customApiFormat,
+          apiKey: customApiKey.trim() || undefined,
+        });
+        if (!customResult.success) { setError(customResult.error || "Failed to save endpoint"); return; }
+
+        const settingsResult = await window.electron.saveAgentSettings({
+          defaultProvider: "openai-compatible",
+          defaultModel: customModel.trim(),
+          defaultThinkingLevel: thinkingLevel,
+        });
+        if (!settingsResult.success) { setError(settingsResult.error || "Failed to save settings"); return; }
+
+        const [availableModels] = await Promise.all([
+          window.electron.listAvailableModels(),
+          loadOpenAICompatibleProvider(),
+        ]);
+        await syncModelState(availableModels, { provider: "openai-compatible", model: customModel.trim() });
       } else {
-        setError(result.error || "Failed to save configuration");
+        if (!provider.trim()) { setError("Provider is required"); return; }
+        if (!model.trim()) { setError("Model is required"); return; }
+
+        if (apiKey.trim()) {
+          const keyResult = await window.electron.saveProviderApiKey(provider, apiKey.trim());
+          if (!keyResult.success) { setError(keyResult.error || "Failed to save API key"); return; }
+          await loadStatuses([...new Set(models.map((item) => item.provider))]);
+          setApiKey("");
+        }
+
+        const settingsResult = await window.electron.saveAgentSettings({
+          defaultProvider: provider,
+          defaultModel: model,
+          defaultThinkingLevel: thinkingLevel,
+        });
+        if (!settingsResult.success) { setError(settingsResult.error || "Failed to save settings"); return; }
       }
+
+      setSuccess(true);
+      setTimeout(() => {
+        setSuccess(false);
+        onClose();
+      }, 1000);
     } catch (err) {
-      console.error("Failed to save API config:", err);
-        setError("Failed to save configuration");
+      console.error("Failed to save:", err);
+      setError("Failed to save configuration");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleSaveOpenAICompatibleProvider = async () => {
-    if (!customBaseUrl.trim()) {
-      setError("Custom base URL is required");
-      return;
-    }
-    if (!customModel.trim()) {
-      setError("Custom model slug is required");
-      return;
-    }
-
-    setError(null);
-    setSavingCustomProvider(true);
-    try {
-      const result = await window.electron.saveOpenAICompatibleProvider({
-        baseUrl: customBaseUrl.trim(),
-        model: customModel.trim(),
-        apiFormat: customApiFormat,
-        apiKey: customApiKey.trim() || undefined,
-      });
-      if (!result.success) {
-        setError(result.error || "Failed to save custom provider");
-        return;
-      }
-
-      const [availableModels] = await Promise.all([
-        window.electron.listAvailableModels(),
-        loadOpenAICompatibleProvider(),
-      ]);
-      await syncModelState(availableModels, {
-        provider: "openai-compatible",
-        model: customModel.trim(),
-      });
-      setSuccess(true);
-      setTimeout(() => setSuccess(false), 1200);
-    } catch (err) {
-      console.error("Failed to save OpenAI-compatible provider:", err);
-      setError("Failed to save custom provider");
-    } finally {
-      setSavingCustomProvider(false);
     }
   };
 
@@ -324,28 +435,43 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const handleSaveApiKey = async () => {
-    if (!provider.trim() || !apiKey.trim()) {
-      setError("Provider and API key are required");
-      return;
-    }
+  const handleRemoveTinkerProvider = async () => {
     setError(null);
-    setSavingApiKey(true);
+    setRemovingTinkerProvider(true);
     try {
-      const result = await window.electron.saveProviderApiKey(provider, apiKey.trim());
+      const result = await window.electron.removeTinkerProvider();
       if (!result.success) {
-        setError(result.error || "Failed to save API key");
+        setError(result.error || "Failed to remove Tinker provider");
         return;
       }
-      await loadStatuses([...new Set(models.map((item) => item.provider))]);
-      setApiKey("");
+
+      setTinkerConfigured(false);
+      setTinkerBaseUrl("");
+      setTinkerBaseModel("");
+      setTinkerModelPath("");
+      setTinkerRendererName("");
+      setTinkerReasoning(true);
+      setTinkerContextWindow("128000");
+      setTinkerMaxTokens("16384");
+      setTinkerApiKey("");
+      setTinkerBaseModelResolved(false);
+      setTinkerResolveError(null);
+      setTinkerResolving(false);
+
+      const settings = await window.electron.getAgentSettings();
+      const availableModels = await window.electron.listAvailableModels();
+      await syncModelState(
+        availableModels,
+        provider === "tinker" ? undefined : { provider, model },
+        settings
+      );
       setSuccess(true);
       setTimeout(() => setSuccess(false), 1200);
     } catch (err) {
-      console.error("Failed to save provider API key:", err);
-      setError("Failed to save provider API key");
+      console.error("Failed to remove Tinker provider:", err);
+      setError("Failed to remove Tinker provider");
     } finally {
-      setSavingApiKey(false);
+      setRemovingTinkerProvider(false);
     }
   };
 
@@ -373,7 +499,7 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const providerOptions = [...new Set(models.map((item) => item.provider))];
+  const providerOptions = [...new Set([...models.map((item) => item.provider), "openai-compatible", "tinker"])];
   const modelOptions = models.filter((item) => item.provider === provider);
   const currentStatus = provider ? providerStatuses[provider] : undefined;
   const fieldClass =
@@ -396,11 +522,11 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
         <div className="flex flex-col gap-1">
           <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-primary/80">Runtime Configuration</div>
           <p className="text-sm text-muted-foreground">
-            Configure the default Pi provider on the left and manage any custom OpenAI-compatible endpoint on the right.
+            Configure the default Pi provider and model. Select &ldquo;openai-compatible&rdquo; or &ldquo;tinker&rdquo; to set up a custom endpoint.
           </p>
         </div>
 
-        <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.95fr)]">
+        <div className="mt-5">
           <section className={cardClass}>
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -409,8 +535,18 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                   Choose the provider and model used for new Pi sessions, then keep credentials in sync for that provider.
                 </p>
               </div>
-              <div className="max-w-full truncate rounded-full bg-white px-3 py-1 text-[11px] font-medium text-ink-600 shadow-sm">
-                {provider || "No provider"}
+              <div className={`max-w-full truncate rounded-full px-3 py-1 text-[11px] font-medium shadow-sm ${
+                provider === "tinker"
+                  ? tinkerConfigured ? "bg-primary/10 text-primary" : "bg-white text-ink-500"
+                  : provider === "openai-compatible"
+                    ? customConfigured ? "bg-primary/10 text-primary" : "bg-white text-ink-500"
+                    : "bg-white text-ink-600"
+              }`}>
+                {provider === "tinker"
+                  ? tinkerConfigured ? "Configured" : "Not Configured"
+                  : provider === "openai-compatible"
+                    ? customConfigured ? "Configured" : "Not Configured"
+                    : provider || "No provider"}
               </div>
             </div>
 
@@ -432,173 +568,300 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                   ))}
                 </select>
               </label>
-              <label className="grid min-w-0 gap-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Model</span>
-                <select
-                  className={`${fieldClass} truncate`}
-                  title={model}
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                >
-                  {modelOptions.map((item) => (
-                    <option key={item.id} value={item.id}>{item.label}</option>
-                  ))}
-                </select>
-              </label>
+              {provider !== "tinker" && provider !== "openai-compatible" ? (
+                <label className="grid min-w-0 gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Model</span>
+                  <select
+                    className={`${fieldClass} truncate`}
+                    title={model}
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                  >
+                    {modelOptions.map((item) => (
+                      <option key={item.id} value={item.id}>{item.label}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <label className="grid min-w-0 gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Default Thinking Level</span>
+                  <select
+                    className={fieldClass}
+                    value={thinkingLevel}
+                    onChange={(e) => setThinkingLevel(e.target.value as typeof thinkingLevel)}
+                  >
+                    {["off", "minimal", "low", "medium", "high", "xhigh"].map((item) => (
+                      <option key={item} value={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-              <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Default Thinking Level</span>
-                <select
-                  className={fieldClass}
-                  value={thinkingLevel}
-                  onChange={(e) => setThinkingLevel(e.target.value as typeof thinkingLevel)}
-                >
-                  {["off", "minimal", "low", "medium", "high", "xhigh"].map((item) => (
-                    <option key={item} value={item}>{item}</option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="rounded-2xl border border-ink-900/8 bg-white/80 px-4 py-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-500">Auth Status</div>
-                <div className="mt-2 text-sm text-ink-700">
-                  {currentStatus?.hasAuth
-                    ? `Configured via ${currentStatus.authType === "env" ? "environment" : currentStatus.authType?.replace("_", " ") || "credentials"}`
-                    : "Not configured"}
+            {provider === "openai-compatible" ? (
+              <div className="mt-4 grid gap-4">
+                <label className="grid gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Base URL</span>
+                  <input
+                    type="text"
+                    className={`${fieldClass} font-mono text-[13px]`}
+                    placeholder="https://your-endpoint.example.com/v1"
+                    value={customBaseUrl}
+                    onChange={(e) => setCustomBaseUrl(e.target.value)}
+                  />
+                </label>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-muted-foreground">Model Slug</span>
+                    <input
+                      type="text"
+                      className={`${fieldClass} font-mono text-[13px]`}
+                      placeholder="gpt-4.1-mini or local-model"
+                      value={customModel}
+                      onChange={(e) => setCustomModel(e.target.value)}
+                    />
+                  </label>
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-muted-foreground">API Format</span>
+                    <select
+                      className={fieldClass}
+                      value={customApiFormat}
+                      onChange={(e) => setCustomApiFormat(e.target.value as OpenAICompatibleApiFormat)}
+                    >
+                      <option value="openai-completions">OpenAI Completions</option>
+                      <option value="openai-responses">OpenAI Responses</option>
+                    </select>
+                  </label>
                 </div>
-                {currentStatus?.supportsOAuth && (
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    OAuth supported: {currentStatus.oauthName || provider}
+                <label className="grid gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Endpoint API Key</span>
+                  <input
+                    type="password"
+                    className={`${fieldClass} font-mono text-[13px]`}
+                    placeholder={customConfigured ? "Leave blank to keep the saved key" : "sk-..."}
+                    value={customApiKey}
+                    onChange={(e) => setCustomApiKey(e.target.value)}
+                  />
+                </label>
+                {customConfigured && (
+                  <button
+                    className={`${secondaryButtonClass} text-red-600 hover:text-red-700 hover:bg-red-50`}
+                    onClick={handleRemoveOpenAICompatibleProvider}
+                    disabled={removingCustomProvider}
+                  >
+                    {removingCustomProvider ? <Spinner className="mx-auto w-5 h-5" /> : "Remove Endpoint"}
+                  </button>
+                )}
+              </div>
+            ) : provider === "tinker" ? (
+              <div className="mt-4 grid gap-4">
+                <label className="grid gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Tinker API Key</span>
+                  <input
+                    type="password"
+                    className={`${fieldClass} font-mono text-[13px]`}
+                    placeholder={tinkerConfigured ? "Leave blank to keep the saved key" : "tk-..."}
+                    value={tinkerApiKey}
+                    onChange={(e) => setTinkerApiKey(e.target.value)}
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Checkpoint / Model Path</span>
+                  <input
+                    type="text"
+                    className={`${fieldClass} font-mono text-[13px]`}
+                    placeholder="Paste a tinker:// checkpoint to auto-resolve the base model"
+                    value={tinkerModelPath}
+                    onChange={(e) => setTinkerModelPath(e.target.value)}
+                  />
+                </label>
+                {(tinkerResolving || tinkerResolveError || tinkerBaseModelResolved) && (
+                  <div className="rounded-2xl border border-ink-900/8 bg-white/80 px-4 py-3 text-xs text-muted-foreground">
+                    {tinkerResolving && (
+                      <div className="flex items-center gap-2">
+                        <Spinner className="h-4 w-4" color="currentColor" />
+                        Resolving base model from checkpoint...
+                      </div>
+                    )}
+                    {!tinkerResolving && tinkerBaseModelResolved && (
+                      <div>
+                        Resolved base model: <span className="font-medium text-ink-700">{tinkerBaseModel}</span>
+                      </div>
+                    )}
+                    {!tinkerResolving && tinkerResolveError && (
+                      <div className="text-error">{tinkerResolveError}</div>
+                    )}
                   </div>
                 )}
-              </div>
-            </div>
+                <label className="grid gap-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-medium text-muted-foreground">Base Model</span>
+                    {tinkerBaseModelResolved && (
+                      <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-medium text-primary">
+                        Auto-resolved
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    className={`${fieldClass} font-mono text-[13px]`}
+                    placeholder="Qwen/Qwen3-30B-A3B-Instruct-2507"
+                    value={tinkerBaseModel}
+                    onChange={(e) => {
+                      setTinkerBaseModel(e.target.value);
+                      setTinkerBaseModelResolved(false);
+                    }}
+                    readOnly={tinkerBaseModelResolved}
+                  />
+                </label>
 
-            <div className="mt-5 grid gap-4">
-              <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Provider API Key</span>
-                <input
-                  type="password"
-                  className={fieldClass}
-                  placeholder="sk-..."
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
-              </label>
-
-              <div className={`grid gap-3 ${currentStatus?.supportsOAuth ? "md:grid-cols-3" : "md:grid-cols-1"}`}>
                 <button
-                  className={secondaryButtonClass}
-                  onClick={handleSaveApiKey}
-                  disabled={savingApiKey || !provider.trim() || !apiKey.trim()}
+                  type="button"
+                  className="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-ink-700 transition-colors py-1"
+                  onClick={() => setTinkerAdvancedOpen(!tinkerAdvancedOpen)}
                 >
-                  {savingApiKey ? <Spinner className="mx-auto w-5 h-5" /> : "Save API Key"}
+                  <svg
+                    viewBox="0 0 24 24"
+                    className={`h-3.5 w-3.5 transition-transform ${tinkerAdvancedOpen ? "rotate-90" : ""}`}
+                    fill="none" stroke="currentColor" strokeWidth="2"
+                  >
+                    <path d="M9 18l6-6-6-6" />
+                  </svg>
+                  Advanced Settings
                 </button>
-                {currentStatus?.supportsOAuth && (
-                  <>
-                    <button
-                      className={secondaryButtonClass}
-                      onClick={() => handleAuthAction("login")}
-                      disabled={authBusy || !provider.trim()}
-                    >
-                      Login OAuth
-                    </button>
-                    <button
-                      className={secondaryButtonClass}
-                      onClick={() => handleAuthAction("logout")}
-                      disabled={authBusy || !provider.trim()}
-                    >
-                      Logout
-                    </button>
-                  </>
+
+                {tinkerAdvancedOpen && (
+                  <div className="grid gap-4 rounded-2xl border border-ink-900/6 bg-white/60 p-4">
+                    <label className="grid gap-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">Tinker Base URL</span>
+                      <input
+                        type="text"
+                        className={`${fieldClass} font-mono text-[13px]`}
+                        placeholder="Optional override for ServiceClient(base_url=...)"
+                        value={tinkerBaseUrl}
+                        onChange={(e) => setTinkerBaseUrl(e.target.value)}
+                      />
+                    </label>
+                    <label className="grid gap-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">Renderer Override</span>
+                      <input
+                        type="text"
+                        className={`${fieldClass} font-mono text-[13px]`}
+                        placeholder="Optional; defaults to the recommended renderer"
+                        value={tinkerRendererName}
+                        onChange={(e) => setTinkerRendererName(e.target.value)}
+                      />
+                    </label>
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <label className="grid gap-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Reasoning</span>
+                        <select
+                          className={fieldClass}
+                          value={tinkerReasoning ? "on" : "off"}
+                          onChange={(e) => setTinkerReasoning(e.target.value === "on")}
+                        >
+                          <option value="on">Enabled</option>
+                          <option value="off">Disabled</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Context Window</span>
+                        <input
+                          type="number"
+                          min="1"
+                          className={`${fieldClass} font-mono text-[13px]`}
+                          value={tinkerContextWindow}
+                          onChange={(e) => setTinkerContextWindow(e.target.value)}
+                        />
+                      </label>
+                      <label className="grid gap-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Max Tokens</span>
+                        <input
+                          type="number"
+                          min="1"
+                          className={`${fieldClass} font-mono text-[13px]`}
+                          value={tinkerMaxTokens}
+                          onChange={(e) => setTinkerMaxTokens(e.target.value)}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {tinkerConfigured && (
+                  <button
+                    className={`${secondaryButtonClass} text-red-600 hover:text-red-700 hover:bg-red-50`}
+                    onClick={handleRemoveTinkerProvider}
+                    disabled={removingTinkerProvider}
+                  >
+                    {removingTinkerProvider ? <Spinner className="mx-auto w-5 h-5" /> : "Remove Tinker Provider"}
+                  </button>
                 )}
               </div>
-            </div>
-          </section>
+            ) : (
+              <>
+                <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-muted-foreground">Default Thinking Level</span>
+                    <select
+                      className={fieldClass}
+                      value={thinkingLevel}
+                      onChange={(e) => setThinkingLevel(e.target.value as typeof thinkingLevel)}
+                    >
+                      {["off", "minimal", "low", "medium", "high", "xhigh"].map((item) => (
+                        <option key={item} value={item}>{item}</option>
+                      ))}
+                    </select>
+                  </label>
 
-          <section className={`${cardClass} bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(250,242,236,0.94))]`}>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-base font-semibold text-ink-800">OpenAI-Compatible Endpoint</div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  Save a custom `/v1`-style endpoint with its own base URL, model slug, and API protocol.
-                </p>
-              </div>
-              <div className={`rounded-full px-3 py-1 text-[11px] font-medium shadow-sm ${
-                customConfigured ? "bg-primary/10 text-primary" : "bg-white text-ink-500"
-              }`}>
-                {customConfigured ? "Configured" : "Not Configured"}
-              </div>
-            </div>
+                  <div className="rounded-2xl border border-ink-900/8 bg-white/80 px-4 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-500">Auth Status</div>
+                    <div className="mt-2 text-sm text-ink-700">
+                      {currentStatus?.hasAuth
+                        ? `Configured via ${currentStatus.authType === "env" ? "environment" : currentStatus.authType?.replace("_", " ") || "credentials"}`
+                        : "Not configured"}
+                    </div>
+                    {currentStatus?.supportsOAuth && (
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        OAuth supported: {currentStatus.oauthName || provider}
+                      </div>
+                    )}
+                  </div>
+                </div>
 
-            <div className="mt-5 grid gap-4">
-              <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-muted-foreground">API Format</span>
-                <select
-                  className={fieldClass}
-                  value={customApiFormat}
-                  onChange={(e) => setCustomApiFormat(e.target.value as OpenAICompatibleApiFormat)}
-                >
-                  <option value="openai-completions">OpenAI Completions</option>
-                  <option value="openai-responses">OpenAI Responses</option>
-                </select>
-              </label>
-              <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Base URL</span>
-                <input
-                  type="text"
-                  className={`${fieldClass} font-mono text-[13px]`}
-                  placeholder="https://your-endpoint.example.com/v1"
-                  value={customBaseUrl}
-                  onChange={(e) => setCustomBaseUrl(e.target.value)}
-                />
-              </label>
-              <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Model Slug</span>
-                <input
-                  type="text"
-                  className={`${fieldClass} font-mono text-[13px]`}
-                  placeholder="gpt-4.1-mini or local-model"
-                  value={customModel}
-                  onChange={(e) => setCustomModel(e.target.value)}
-                />
-              </label>
-              <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-muted-foreground">Endpoint API Key</span>
-                <input
-                  type="password"
-                  className={`${fieldClass} font-mono text-[13px]`}
-                  placeholder={customConfigured ? "Leave blank to keep the saved key" : "sk-..."}
-                  value={customApiKey}
-                  onChange={(e) => setCustomApiKey(e.target.value)}
-                />
-              </label>
+                <div className="mt-4 grid gap-4">
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-muted-foreground">Provider API Key</span>
+                    <input
+                      type="password"
+                      className={fieldClass}
+                      placeholder="sk-..."
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                    />
+                  </label>
 
-              <div className="rounded-2xl border border-primary/10 bg-white/80 px-4 py-3 text-xs leading-5 text-muted-foreground">
-                {customConfigured
-                  ? "This endpoint is already stored. Re-saving with a blank key preserves the existing credential."
-                  : "Once saved, this endpoint appears in the default provider picker as `openai-compatible`."}
-              </div>
-
-              <div className="grid gap-3">
-                <button
-                  className="rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={handleSaveOpenAICompatibleProvider}
-                  disabled={savingCustomProvider || !customBaseUrl.trim() || !customModel.trim()}
-                >
-                  {savingCustomProvider ? <Spinner className="mx-auto w-5 h-5" /> : "Save Endpoint"}
-                </button>
-                <button
-                  className={secondaryButtonClass}
-                  onClick={handleRemoveOpenAICompatibleProvider}
-                  disabled={removingCustomProvider || !customConfigured}
-                >
-                  {removingCustomProvider ? <Spinner className="mx-auto w-5 h-5" /> : "Remove Endpoint"}
-                </button>
-              </div>
-            </div>
+                  {currentStatus?.supportsOAuth && (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <button
+                        className={secondaryButtonClass}
+                        onClick={() => handleAuthAction("login")}
+                        disabled={authBusy || !provider.trim()}
+                      >
+                        Login OAuth
+                      </button>
+                      <button
+                        className={secondaryButtonClass}
+                        onClick={() => handleAuthAction("logout")}
+                        disabled={authBusy || !provider.trim()}
+                      >
+                        Logout
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </section>
         </div>
 
@@ -628,9 +891,13 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
           <button
             className="rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50 sm:min-w-36"
             onClick={handleSave}
-            disabled={saving || !provider.trim() || !model.trim()}
+            disabled={saving || !provider.trim() || (
+              provider === "tinker" ? (tinkerResolving || !tinkerBaseModel.trim()) :
+              provider === "openai-compatible" ? (!customBaseUrl.trim() || !customModel.trim()) :
+              !model.trim()
+            )}
           >
-            {saving ? <Spinner className="mx-auto w-5 h-5" /> : "Save Defaults"}
+            {saving ? <Spinner className="mx-auto w-5 h-5" /> : "Save"}
           </button>
         </div>
       </div>

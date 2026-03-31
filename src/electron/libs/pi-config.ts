@@ -16,9 +16,19 @@ import type {
   OpenAICompatibleProviderConfig,
   OpenAICompatibleProviderInput,
   ProviderAuthStatus,
+  TinkerProviderConfig,
+  TinkerProviderInput,
 } from "../types.js";
 import { getAppSkillsDir } from "./skill-store.js";
 import { loadApiConfig } from "./config-store.js";
+import {
+  TINKER_PROVIDER,
+  readStoredTinkerProviderConfig,
+  removeStoredTinkerProviderConfig,
+  toPublicTinkerProviderConfig,
+  writeStoredTinkerProviderConfig,
+} from "./tinker-config.js";
+import { registerTinkerProvider } from "./tinker-provider.js";
 
 const PI_AGENT_DIR_NAME = "pi-agent";
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
@@ -53,6 +63,10 @@ function getAuthPath(): string {
 
 function getModelsPath(): string {
   return join(getPiAgentDir(), "models.json");
+}
+
+function getTinkerConfigPath(): string {
+  return join(getPiAgentDir(), "tinker-provider.json");
 }
 
 type ModelsJsonConfig = {
@@ -171,7 +185,12 @@ export function createPiManagers(cwd: string) {
   ensurePiBootstrap();
   const agentDir = getPiAgentDir();
   const authStorage = AuthStorage.create(getAuthPath());
-  const modelRegistry = new ModelRegistry(authStorage, getModelsPath());
+  // The local file dependency exposes a private constructor in types, but the runtime class is constructible.
+  const ModelRegistryCtor = ModelRegistry as unknown as {
+    new (authStorage: AuthStorage, modelsPath: string): ModelRegistry;
+  };
+  const modelRegistry = new ModelRegistryCtor(authStorage, getModelsPath());
+  registerTinkerProvider(modelRegistry, getTinkerConfigPath());
   const settingsManager = SettingsManager.create(cwd, agentDir);
   return {
     agentDir,
@@ -235,13 +254,13 @@ export function listAvailableModels(): AvailableModel[] {
   const { modelRegistry } = createPiManagers(process.cwd());
   return modelRegistry
     .getAll()
-    .map((model) => ({
+    .map((model: { provider: string; id: string; reasoning?: boolean }) => ({
       provider: model.provider,
       id: model.id,
       label: `${model.provider}/${model.id}`,
       reasoning: Boolean(model.reasoning),
     }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .sort((a: AvailableModel, b: AvailableModel) => a.label.localeCompare(b.label));
 }
 
 export function getProviderAuthStatus(provider: string): ProviderAuthStatus {
@@ -286,6 +305,32 @@ export function getOpenAICompatibleProviderConfig(): OpenAICompatibleProviderCon
     apiFormat: providerConfig.api === "openai-responses" ? "openai-responses" : "openai-completions",
     hasApiKey: authStorage.hasAuth(OPENAI_COMPATIBLE_PROVIDER),
   };
+}
+
+export function getTinkerProviderConfig(): TinkerProviderConfig | null {
+  const config = readStoredTinkerProviderConfig(getTinkerConfigPath());
+  if (!config) {
+    return null;
+  }
+
+  const { authStorage } = createPiManagers(process.cwd());
+  return toPublicTinkerProviderConfig(config, authStorage.hasAuth(TINKER_PROVIDER));
+}
+
+export function saveTinkerProviderConfig(input: TinkerProviderInput): void {
+  writeStoredTinkerProviderConfig(getTinkerConfigPath(), input);
+  if (input.apiKey?.trim()) {
+    const { authStorage } = createPiManagers(process.cwd());
+    authStorage.set(TINKER_PROVIDER, { type: "api_key", key: input.apiKey.trim() });
+  }
+}
+
+export function removeTinkerProviderConfig(): void {
+  removeStoredTinkerProviderConfig(getTinkerConfigPath());
+  const { authStorage } = createPiManagers(process.cwd());
+  if (authStorage.has(TINKER_PROVIDER)) {
+    authStorage.remove(TINKER_PROVIDER);
+  }
 }
 
 export function saveOpenAICompatibleProviderConfig(input: OpenAICompatibleProviderInput): void {

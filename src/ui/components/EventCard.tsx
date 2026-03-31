@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import JsonView from "@uiw/react-json-view";
 import type {
   AppPermissionResult,
   AskUserQuestionInput,
@@ -10,6 +11,7 @@ import type {
   LegacyUserMessage,
   NodeCompletedMessage,
   PiAssistantMessage,
+  PiLlmDebugMessage,
   PiRunResultMessage,
   PiSystemInitMessage,
   PiToolResultMessage,
@@ -177,6 +179,59 @@ const SessionResult = ({ message }: { message: LegacyResultMessage | PiRunResult
           <span className="inline-flex items-center rounded-full bg-surface-tertiary px-2.5 py-0.5 text-ink-700 text-[13px]">Output {formatMillions(message.usage?.output_tokens)}</span>
         </div>
       </div>
+    </div>
+  );
+};
+
+const LlmDebugValue = ({ value }: { value: unknown }) => {
+  if (value === undefined) {
+    return <div className="text-xs text-ink-500">No data</div>;
+  }
+
+  if (value === null || typeof value !== "object") {
+    return (
+      <pre className="text-xs whitespace-pre-wrap font-mono text-ink-800">
+        {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="text-xs overflow-auto">
+      <JsonView value={value} collapsed={2} displayDataTypes={false} />
+    </div>
+  );
+};
+
+const LlmDebugCard = ({ message }: { message: PiLlmDebugMessage }) => {
+  const description = message.model ? `${message.provider ?? "model"}/${message.model}` : message.provider;
+
+  return (
+    <div className="mt-3">
+      <Tool defaultOpen={false}>
+        <ToolHeader
+          icon={<WrenchIcon className="size-4" />}
+          title={message.title || "LLM Debug"}
+          description={description || undefined}
+          state={message.error ? "error" : "completed"}
+        />
+        <ToolContent className="space-y-3">
+          {message.error && (
+            <div className="rounded-lg border border-error/20 bg-error-light/50 px-3 py-2">
+              <div className="text-[11px] uppercase tracking-wide text-error font-semibold mb-1">Error</div>
+              <pre className="text-xs whitespace-pre-wrap font-mono text-error">{message.error}</pre>
+            </div>
+          )}
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-ink-500 font-semibold mb-2">Request</div>
+            <LlmDebugValue value={message.request} />
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-ink-500 font-semibold mb-2">Response</div>
+            <LlmDebugValue value={message.response} />
+          </div>
+        </ToolContent>
+      </Tool>
     </div>
   );
 };
@@ -694,6 +749,10 @@ export function MessageCard({
 
   if (message.type === "run_result") {
     return <SessionResult message={message} />;
+  }
+
+  if (message.type === "llm_debug") {
+    return <LlmDebugCard message={message} />;
   }
 
   if (message.type === "node_completed") {

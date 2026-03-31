@@ -26,18 +26,23 @@ import {
 } from "./libs/skill-store.js";
 import { ensureMemoriesDir, readAllMemorySections, writeMemorySections, getMemoriesDir } from "./libs/memory-store.js";
 import {
+    createPiManagers,
     ensurePiBootstrap,
     getAgentSettings,
     getOpenAICompatibleProviderConfig,
     getProviderAuthStatus,
+    getTinkerProviderConfig,
     listAvailableModels,
     loginProvider,
     logoutProvider,
     removeOpenAICompatibleProviderConfig,
+    removeTinkerProviderConfig,
     saveAgentSettings,
     saveOpenAICompatibleProviderConfig,
     saveProviderApiKey,
+    saveTinkerProviderConfig,
 } from "./libs/pi-config.js";
+import { resolveTinkerCheckpoint } from "./libs/tinker-provider.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -320,6 +325,10 @@ app.on("ready", () => {
         return getOpenAICompatibleProviderConfig();
     });
 
+    ipcMainHandle("get-tinker-provider", () => {
+        return getTinkerProviderConfig();
+    });
+
     ipcMainHandle("save-openai-compatible-provider", (_: any, config: any) => {
         try {
             saveOpenAICompatibleProviderConfig(config);
@@ -339,6 +348,49 @@ app.on("ready", () => {
         } catch (error) {
             return {
                 success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("save-tinker-provider", (_: any, config: any) => {
+        try {
+            saveTinkerProviderConfig(config);
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("remove-tinker-provider", () => {
+        try {
+            removeTinkerProviderConfig();
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("resolve-tinker-checkpoint", async (_: any, tinkerPath: string, apiKey?: string, baseUrl?: string) => {
+        try {
+            const { authStorage } = createPiManagers(process.cwd());
+            const savedCredential = authStorage.get("tinker");
+            const effectiveApiKey =
+                typeof apiKey === "string" && apiKey.trim()
+                    ? apiKey.trim()
+                    : savedCredential?.type === "api_key"
+                        ? savedCredential.key
+                        : undefined;
+            return await resolveTinkerCheckpoint(tinkerPath, effectiveApiKey, baseUrl);
+        } catch (error) {
+            return {
+                ok: false,
                 error: error instanceof Error ? error.message : String(error)
             };
         }

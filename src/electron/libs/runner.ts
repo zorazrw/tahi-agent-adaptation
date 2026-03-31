@@ -12,7 +12,8 @@ import {
   type AgentSessionEvent,
   type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import type { AppPermissionResult, PiAssistantBlock, ServerEvent, StreamMessage } from "../types.js";
+import type { AppPermissionResult, PiAssistantBlock, PiLlmDebugMessage, ServerEvent, StreamMessage } from "../types.js";
+import { runWithLlmDebugContext } from "./llm-debug.js";
 import { createPiManagers, createPiResourceLoader, createPiSessionManager } from "./pi-config.js";
 import type { Session } from "./session-store.js";
 import { hydrateWorkflowTree, type RawWorkflowNode } from "./workflow-tree-utils.js";
@@ -450,8 +451,33 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       },
     });
 
+    let thinkingMessageId: string | undefined;
+
     const unsubscribe = piSession.subscribe((event: AgentSessionEvent) => {
       if (disposed) return;
+
+      if (event.type === "message_start") {
+        const message = asRecord(event.message);
+        if (message?.role === "assistant") {
+          thinkingMessageId = crypto.randomUUID();
+          onEvent({
+            type: "stream.message",
+            payload: {
+              sessionId: session.id,
+              message: {
+                type: "assistant",
+                engine: "pi",
+                id: thinkingMessageId,
+                blocks: [{ type: "thinking", thinking: "" }],
+                provider: piSession.model?.provider,
+                model: piSession.model?.id,
+              },
+            },
+          });
+        }
+        return;
+      }
+
       if (event.type === "tool_execution_start") {
         onEvent({
           type: "stream.message",
@@ -505,6 +531,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         if (!message) return;
         if (message.role === "assistant") {
           const blocks = normalizeAssistantBlocks(message, false);
+          const messageId = thinkingMessageId ?? crypto.randomUUID();
+          thinkingMessageId = undefined;
+
           if (blocks.length > 0) {
             onEvent({
               type: "stream.message",
@@ -513,7 +542,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
                 message: {
                   type: "assistant",
                   engine: "pi",
-                  id: crypto.randomUUID(),
+                  id: messageId,
                   blocks,
                   provider: typeof message.provider === "string" ? message.provider : piSession.model?.provider,
                   model: typeof message.model === "string" ? message.model : piSession.model?.id,
@@ -538,7 +567,26 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     });
 
     try {
-      await piSession.prompt(promptToSend);
+      const llmDebugMessages: PiLlmDebugMessage[] = [];
+      await runWithLlmDebugContext(
+        {
+          provider: piSession.model?.provider,
+          model: piSession.model?.id,
+          emit: (message) => {
+            llmDebugMessages.push(message);
+            onEvent({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message,
+              },
+            });
+          },
+        },
+        async () => {
+          await piSession.prompt(promptToSend);
+        },
+      );
       persistSessionFile();
 
       const runResult = {
@@ -575,19 +623,25 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         },
       });
 
+      const canonicalHistory = buildCanonicalHistory(
+        piSession.sessionFile ?? sessionManager.getSessionFile(),
+        piSession.model?.provider,
+        piSession.model?.id,
+        cwd,
+        piSession.thinkingLevel,
+        sessionManager.buildSessionContext().messages,
+        runResult
+      );
+      const historyWithDebug =
+        llmDebugMessages.length > 0
+          ? [...canonicalHistory.slice(0, -1), ...llmDebugMessages, canonicalHistory[canonicalHistory.length - 1]!]
+          : canonicalHistory;
+
       onEvent({
         type: "session.messagesReset",
         payload: {
           sessionId: session.id,
-          messages: buildCanonicalHistory(
-            piSession.sessionFile ?? sessionManager.getSessionFile(),
-            piSession.model?.provider,
-            piSession.model?.id,
-            cwd,
-            piSession.thinkingLevel,
-            sessionManager.buildSessionContext().messages,
-            runResult
-          ),
+          messages: historyWithDebug,
         },
       });
 

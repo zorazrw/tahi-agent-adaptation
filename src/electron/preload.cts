@@ -37,10 +37,18 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("list-available-models"),
     getOpenAICompatibleProvider: () =>
         ipcInvoke("get-openai-compatible-provider"),
+    getTinkerProvider: () =>
+        ipcInvoke("get-tinker-provider"),
     saveOpenAICompatibleProvider: (config: any) =>
         ipcInvoke("save-openai-compatible-provider", config),
+    saveTinkerProvider: (config: any) =>
+        ipcInvoke("save-tinker-provider", config),
     removeOpenAICompatibleProvider: () =>
         ipcInvoke("remove-openai-compatible-provider"),
+    removeTinkerProvider: () =>
+        ipcInvoke("remove-tinker-provider"),
+    resolveTinkerCheckpoint: (tinkerPath: string, apiKey?: string, baseUrl?: string) =>
+        ipcInvoke("resolve-tinker-checkpoint", tinkerPath, apiKey, baseUrl),
     getProviderAuthStatus: (provider: string) =>
         ipcInvoke("get-provider-auth-status", provider),
     saveProviderApiKey: (provider: string, apiKey: string) =>
