@@ -153,7 +153,7 @@ function App() {
   const isWorkflowMode = !activeSession || activeSession.interactionMode === "workflow";
   const isPlanMode = activeSession?.interactionMode === "plan";
   const isChatMode = activeSession?.interactionMode === "chat";
-  const showChatPanel = isChatMode ? true : previewPanelOpen;
+  const showChatPanel = isChatMode || isPlanMode ? true : previewPanelOpen;
   const showFilePreview = isWorkflowMode || isPlanMode;
 
   const {
