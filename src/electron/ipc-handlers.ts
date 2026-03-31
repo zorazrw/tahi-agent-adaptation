@@ -124,6 +124,8 @@ const sessionContinueVerificationNodeId = new Map<string, string>();
 
 /** Last workflow node the session was driving (solve or explicit selection); used to verify on continue when UI omits verificationNodeId. */
 const sessionLastVerificationNodeId = new Map<string, string>();
+/** Sessions where plan_approve switched mode from plan→chat during a run; auto-continue when the run finishes. */
+const pendingPlanContinuation = new Map<string, string>();
 
 function initializeSessions() {
   if (!sessions) {
@@ -273,10 +275,59 @@ function emit(event: ServerEvent) {
   if (event.type === "session.modeChanged") {
     const { sessionId, interactionMode } = event.payload;
     sessions.updateSession(sessionId, { interactionMode });
+    if (interactionMode === "chat") {
+      const s = sessions.getSession(sessionId);
+      if (s?.planFilePath) {
+        pendingPlanContinuation.set(sessionId, s.planFilePath);
+      }
+    }
   }
 
   if (event.type === "session.status") {
-    sessions!.updateSession(event.payload.sessionId, { status: event.payload.status });
+    sessions.updateSession(event.payload.sessionId, { status: event.payload.status });
+
+    const contPlanPath = pendingPlanContinuation.get(event.payload.sessionId);
+    if (contPlanPath && event.payload.status !== "running") {
+      pendingPlanContinuation.delete(event.payload.sessionId);
+      const session = sessions.getSession(event.payload.sessionId);
+      if (session && session.interactionMode === "chat") {
+        const continuationPrompt = `The plan at ${contPlanPath} has been approved. Read the plan file, then implement it fully. You now have full access to all tools.`;
+        sessions.updateSession(session.id, { status: "running", lastPrompt: continuationPrompt });
+        broadcast({
+          type: "session.status",
+          payload: { sessionId: session.id, status: "running", title: session.title, cwd: session.cwd }
+        });
+        emit({
+          type: "stream.user_prompt",
+          payload: { sessionId: session.id, prompt: continuationPrompt }
+        });
+        runClaude({
+          prompt: continuationPrompt,
+          session,
+          onEvent: emit,
+          onSessionUpdate: (updates) => {
+            sessions.updateSession(session.id, updates);
+          }
+        })
+          .then((handle) => {
+            runnerHandles.set(session.id, handle);
+          })
+          .catch((error) => {
+            sessions.updateSession(session.id, { status: "error" });
+            broadcast({
+              type: "session.status",
+              payload: {
+                sessionId: session.id,
+                status: "error",
+                title: session.title,
+                cwd: session.cwd,
+                error: String(error)
+              }
+            });
+          });
+        return;
+      }
+    }
   }
   if (event.type === "workflow.plan") {
     const { sessionId, workflowTree } = event.payload;
