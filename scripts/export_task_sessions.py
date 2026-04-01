@@ -1166,6 +1166,367 @@ def write_session_to_tasks_dir(
     return written
 
 
+# ────────────────────────────────────────────────────────────────────
+# Weight-based export format
+# ────────────────────────────────────────────────────────────────────
+
+
+def _sdk_message_type(msg: dict) -> Optional[str]:
+    """Return the SDK message type (system/assistant/user/result) or None for non-SDK."""
+    raw = msg.get("raw") if msg.get("role") == "agent" else None
+    if isinstance(raw, dict):
+        return raw.get("type")
+    return None
+
+
+def _extract_workflow_tree_from_tool_use(agent_traj: List[dict]) -> List[dict]:
+    """Extract the WorkflowPlan tool_use input.tasks from the planning trajectory."""
+    for entry in agent_traj:
+        raw = entry.get("raw", {})
+        if raw.get("type") != "assistant":
+            continue
+        for block in (raw.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name", "")
+            if "WorkflowPlan" in name or ("workflow" in name.lower() and "plan" in name.lower()):
+                tasks = block.get("input", {}).get("tasks", [])
+                if tasks:
+                    return tasks
+    return []
+
+
+def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:
+    """Extract workflow tree from a message's state_snapshot."""
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return None
+    wf = snap.get("workflow")
+    return wf if isinstance(wf, list) else None
+
+
+def _snapshot_file_content(norm: dict, path: str) -> Optional[str]:
+    """Get file content from a message's state_snapshot."""
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return None
+    files = snap.get("file")
+    if not isinstance(files, list):
+        return None
+    for f in files:
+        if isinstance(f, dict) and f.get("path") == path:
+            return f.get("content")
+    return None
+
+
+def _extract_verifier_criteria(tree_nodes: list) -> List[str]:
+    """Extract verifier criterion strings from workflow tree nodes."""
+    out = []
+    for n in tree_nodes if isinstance(tree_nodes, list) else []:
+        if not isinstance(n, dict):
+            continue
+        for v in n.get("verifiers") or []:
+            if isinstance(v, dict):
+                out.append(v.get("criterion", ""))
+            elif isinstance(v, str):
+                out.append(v)
+    return out
+
+
+def _extract_verifier_marks(tree_nodes: list) -> List[Optional[str]]:
+    """Extract verifierMarks from workflow tree nodes."""
+    out: List[Optional[str]] = []
+    for n in tree_nodes if isinstance(tree_nodes, list) else []:
+        if not isinstance(n, dict):
+            continue
+        for m in n.get("verifierMarks") or []:
+            out.append(m)
+    return out
+
+
+def _find_node_in_tree(tree: Any, node_id: str) -> Optional[dict]:
+    """Recursively find a node by id in a workflow tree."""
+    if not isinstance(tree, list):
+        return None
+    for n in tree:
+        if not isinstance(n, dict):
+            continue
+        if n.get("id") == node_id:
+            return n
+        found = _find_node_in_tree(n.get("children"), node_id)
+        if found is not None:
+            return found
+    return None
+
+
+def _count_system_inits_before(agent_traj: List[dict], up_to_ts: Optional[float]) -> int:
+    """Count system/init entries that appear before a given timestamp."""
+    count = 0
+    for entry in agent_traj:
+        raw = entry.get("raw", {})
+        if raw.get("type") == "system" and raw.get("subtype") == "init":
+            if up_to_ts is None or entry.get("_ts", 0) < up_to_ts:
+                count += 1
+    return count
+
+
+def build_weight_based_session(
+    cursor: sqlite3.Cursor, session_id: str
+) -> Optional[dict]:
+    """Build the weight-based export for a single session."""
+    row = cursor.execute(
+        """SELECT id, title, workflow_tree, last_prompt, cwd
+           FROM sessions WHERE id = ?""",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        return None
+    sid, title, workflow_tree_raw, last_prompt, cwd = row
+    workflow_tree = parse_json_column(workflow_tree_raw, [])
+
+    try:
+        messages_rows = cursor.execute(
+            """SELECT data, state_snapshot, created_at FROM messages
+               WHERE session_id = ? ORDER BY created_at ASC""",
+            (session_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        messages_rows = [
+            (r[0], None, r[1])
+            for r in cursor.execute(
+                "SELECT data, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+                (session_id,),
+            ).fetchall()
+        ]
+
+    all_msgs: List[dict] = []
+    for data_str, snapshot_raw, ts in messages_rows:
+        try:
+            msg = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        t = msg.get("type")
+        if t == "stream_event":
+            continue
+        norm = dict(msg)
+        norm["_ts"] = ts
+        if snapshot_raw:
+            try:
+                norm["state_snapshot"] = json.loads(snapshot_raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        all_msgs.append(norm)
+
+    initial_task_instruction = ""
+    for m in all_msgs:
+        if m.get("type") == "user_prompt":
+            p = m.get("prompt", "")
+            if isinstance(p, str) and not is_backend_node_user_prompt(p):
+                initial_task_instruction = p
+                break
+    if not initial_task_instruction:
+        initial_task_instruction = last_prompt or ""
+
+    # ── Segment messages into phases ──
+    # Find boundaries: "Proceed with:" prompts mark node execution starts
+    node_starts: List[Tuple[int, str]] = []  # (msg_index, node_description)
+    path_nodes = iter_workflow_nodes_with_path(workflow_tree)
+    path_to_node: Dict[str, dict] = {}
+    for path, node in path_nodes:
+        if isinstance(node.get("id"), str) and path:
+            path_to_node[path] = node
+
+    for i, m in enumerate(all_msgs):
+        if m.get("type") != "user_prompt":
+            continue
+        p = m.get("prompt", "")
+        if not isinstance(p, str) or not p.startswith("Proceed with: "):
+            continue
+        first_line = p.splitlines()[0]
+        path = first_line.removeprefix("Proceed with: ").strip()
+        if path in path_to_node:
+            node_starts.append((i, path))
+
+    # ── Build planning task_unit ──
+    planning_end = node_starts[0][0] if node_starts else len(all_msgs)
+    planning_msgs = all_msgs[:planning_end]
+
+    planning_agent_traj: List[dict] = []
+    planning_human_traj: List[dict] = []
+    prev_workflow_snapshot: Optional[List[dict]] = None
+
+    for m in planning_msgs:
+        t = m.get("type")
+        if t in ("system", "assistant", "user", "result"):
+            planning_agent_traj.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
+
+        elif t == "edit_workflow":
+            wf_after = _snapshot_workflow_tree(m)
+            entry: Dict[str, Any] = {
+                "type": "edit_workflow",
+                "round_index": None,
+            }
+            if prev_workflow_snapshot is not None:
+                entry["workflow_tree_before"] = prev_workflow_snapshot
+            if wf_after is not None:
+                entry["workflow_tree_after"] = wf_after
+                prev_workflow_snapshot = wf_after
+            planning_human_traj.append(entry)
+
+        elif t == "edit_verifier":
+            wf_after = _snapshot_workflow_tree(m)
+            entry = {
+                "type": "edit_verifier",
+                "round_index": None,
+            }
+            if prev_workflow_snapshot is not None:
+                entry["verifiers_before"] = _extract_verifier_criteria(prev_workflow_snapshot)
+            if wf_after is not None:
+                entry["verifiers_after"] = _extract_verifier_criteria(wf_after)
+                prev_workflow_snapshot = wf_after
+            planning_human_traj.append(entry)
+
+    workflow_tree_generated = _extract_workflow_tree_from_tool_use(planning_agent_traj)
+    # workflow_tree at the end of planning phase (after all edits)
+    workflow_tree_after_planning = prev_workflow_snapshot or workflow_tree
+
+    planning_unit: Dict[str, Any] = {
+        "intent": "planning",
+        "agent_trajectory": planning_agent_traj,
+        "human_trajectory": planning_human_traj,
+        "verifiers": [],
+        "workflow_tree_generated": workflow_tree_generated,
+        "workflow_tree_final": workflow_tree_after_planning,
+    }
+
+    # ── Build execution task_units ──
+    task_units: List[dict] = [planning_unit]
+
+    for seg_idx, (start_i, path) in enumerate(node_starts):
+        end_i = node_starts[seg_idx + 1][0] if seg_idx + 1 < len(node_starts) else len(all_msgs)
+        node_msgs = all_msgs[start_i:end_i]
+        node = path_to_node[path]
+        node_id = node.get("id", "")
+        node_desc = node.get("description", "")
+
+        agent_traj: List[dict] = []
+        human_traj: List[dict] = []
+        round_counter = 0
+        node_prompt_consumed = False
+        last_snapshot_msg: Optional[dict] = None
+
+        for m in node_msgs:
+            t = m.get("type")
+
+            if t == "user_prompt":
+                p = m.get("prompt", "")
+                if isinstance(p, str) and is_backend_node_user_prompt(p):
+                    if not node_prompt_consumed:
+                        node_prompt_consumed = True
+                        continue
+                    human_traj.append({
+                        "type": "follow_up",
+                        "round_index": max(round_counter - 1, 0),
+                        "prompt": p,
+                    })
+                    continue
+                human_traj.append({
+                    "type": "follow_up",
+                    "round_index": max(round_counter - 1, 0),
+                    "prompt": p if isinstance(p, str) else "",
+                })
+                continue
+
+            if t in ("system", "assistant", "user", "result"):
+                raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
+                agent_traj.append({"raw": raw_clean})
+                if t == "system" and m.get("subtype") == "init":
+                    round_counter += 1
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+            elif t == "verifier_label":
+                raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
+                agent_traj.append({"raw": raw_clean})
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+            elif t == "file_edit":
+                fe_path = m.get("path", "")
+                edited_content = _snapshot_file_content(m, fe_path)
+                original_content = None
+                if last_snapshot_msg is not None:
+                    original_content = _snapshot_file_content(last_snapshot_msg, fe_path)
+                human_traj.append({
+                    "type": "file_edit",
+                    "round_index": None,
+                    "path": fe_path,
+                    "original": original_content,
+                    "edited": edited_content,
+                })
+
+            elif t == "edit_workflow":
+                wf_after = _snapshot_workflow_tree(m)
+                entry = {"type": "edit_workflow", "round_index": None}
+                if wf_after is not None:
+                    entry["workflow_tree_after"] = wf_after
+                human_traj.append(entry)
+
+            elif t == "edit_verifier":
+                wf_before = _snapshot_workflow_tree(last_snapshot_msg) if last_snapshot_msg else None
+                wf_after = _snapshot_workflow_tree(m)
+                entry: Dict[str, Any] = {"type": "edit_verifier", "round_index": None}
+                if wf_before is not None:
+                    before_node = _find_node_in_tree(wf_before, node_id)
+                    if before_node:
+                        entry["verifiers_before"] = before_node.get("verifiers", [])
+                if wf_after is not None:
+                    after_node = _find_node_in_tree(wf_after, node_id)
+                    if after_node:
+                        entry["verifiers_after"] = after_node.get("verifiers", [])
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+                human_traj.append(entry)
+
+        # Build verifiers from final workflow tree
+        final_node = _find_node_in_tree(workflow_tree, node_id)
+        verifiers: List[dict] = []
+        if final_node:
+            criteria = final_node.get("verifiers", [])
+            marks = final_node.get("verifierMarks", [])
+            for j, c in enumerate(criteria):
+                crit = c.get("criterion", "") if isinstance(c, dict) else str(c)
+                mark = marks[j] if j < len(marks) else None
+                verifiers.append({
+                    "criterion": crit,
+                    "status": mark == "check",
+                })
+
+        task_units.append({
+            "intent": node_desc,
+            "agent_trajectory": agent_traj,
+            "human_trajectory": human_traj,
+            "verifiers": verifiers,
+        })
+
+    return {
+        "uuid": sid,
+        "name": title or "",
+        "initial_task_instruction": initial_task_instruction,
+        "task_units": task_units,
+    }
+
+
+def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> dict:
+    rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
+    sessions = []
+    for (session_id,) in rows:
+        sess = build_weight_based_session(cursor, session_id)
+        if sess:
+            sessions.append(sess)
+    return {"sessions": sessions}
+
+
 def extract_all_sessions(cursor: sqlite3.Cursor, granularity: Granularity) -> List[dict]:
     rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
     out = []
@@ -1199,6 +1560,13 @@ def main() -> int:
         help='Which workflow level to export from workflow_tree: "automation" (depth=0), "control" (depth>0), or "all".',
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    parser.add_argument(
+        "--format",
+        type=str,
+        choices=["default", "weight-based"],
+        default="default",
+        help='Export format: "default" (human-readable trajectory) or "weight-based" (raw SDK messages + human_trajectory for training).',
+    )
     args = parser.parse_args()
 
     db_path = args.db or get_default_db_path()
@@ -1215,6 +1583,24 @@ def main() -> int:
     cursor = conn.cursor()
 
     try:
+        if args.format == "weight-based":
+            if args.session_id:
+                payload = build_weight_based_session(cursor, args.session_id)
+                if not payload:
+                    print(f"Error: session not found: {args.session_id}", file=sys.stderr)
+                    return 1
+                payload = {"sessions": [payload]}
+            else:
+                payload = extract_all_sessions_weight_based(cursor)
+            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
+            if args.output:
+                args.output.write_text(json_str + "\n", encoding="utf-8")
+                n_units = sum(len(s.get("task_units", [])) for s in payload.get("sessions", []))
+                print(f"Wrote {args.output} ({len(payload.get('sessions', []))} sessions, {n_units} task_units)", file=sys.stderr)
+            else:
+                print(json_str)
+            return 0
+
         if args.tasks_dir:
             if not args.session_id:
                 print("Error: --tasks-dir requires --session-id", file=sys.stderr)
