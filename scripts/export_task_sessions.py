@@ -1259,15 +1259,210 @@ def _find_node_in_tree(tree: Any, node_id: str) -> Optional[dict]:
     return None
 
 
-def _count_system_inits_before(agent_traj: List[dict], up_to_ts: Optional[float]) -> int:
-    """Count system/init entries that appear before a given timestamp."""
-    count = 0
+def _flush_partial_group(partials: List[dict]) -> dict:
+    """Merge a group of consecutive assistant partials into one entry."""
+    if len(partials) == 1:
+        return partials[0]
+    merged_content: List[dict] = []
+    for p in partials:
+        for block in (p.get("raw", {}).get("message", {}).get("content") or []):
+            merged_content.append(block)
+    final_raw = dict(partials[-1]["raw"])
+    final_msg = dict(final_raw.get("message", {}))
+    final_msg["content"] = merged_content
+    final_raw["message"] = final_msg
+    return {"raw": final_raw}
+
+
+def _merge_partial_assistant_messages(agent_traj: List[dict]) -> List[dict]:
+    """Merge consecutive assistant messages that belong to one API call.
+
+    Grouping rules (from design doc risk-5):
+    - stop_reason=None  → partial message (includePartialMessages: true)
+    - stop_reason="tool_use"/"end_turn" → final message of an API call
+
+    Consecutive assistant messages are accumulated until either:
+    1. A non-None stop_reason is seen (flush including it), or
+    2. A non-assistant message arrives (flush all pending partials as one group).
+    """
+    out: List[dict] = []
+    pending: List[dict] = []
+
     for entry in agent_traj:
         raw = entry.get("raw", {})
-        if raw.get("type") == "system" and raw.get("subtype") == "init":
-            if up_to_ts is None or entry.get("_ts", 0) < up_to_ts:
-                count += 1
-    return count
+        if raw.get("type") != "assistant":
+            if pending:
+                out.append(_flush_partial_group(pending))
+                pending = []
+            out.append(entry)
+            continue
+
+        pending.append(entry)
+        stop = raw.get("message", {}).get("stop_reason")
+        if stop is not None:
+            out.append(_flush_partial_group(pending))
+            pending = []
+
+    if pending:
+        out.append(_flush_partial_group(pending))
+    return out
+
+
+def _to_llm_native_tree(tree: Any) -> List[dict]:
+    """Convert an Electron-hydrated workflow tree to LLM native format.
+
+    Electron hydrate adds: id, status, verifierMarks, children, and converts
+    verifiers from strings to [{criterion, status}] objects.
+    This function strips all of that back to the raw task format the LLM
+    produced via the WorkflowPlan tool_use:
+      {description, outputFiles, verifiers: [str], children?: [...]}
+    Children are recursively converted and included only if non-empty.
+    """
+    if not isinstance(tree, list):
+        return []
+    out = []
+    for n in tree:
+        if not isinstance(n, dict):
+            continue
+        description = str(n.get("description") or "")
+        output_files = [str(f) for f in (n.get("outputFiles") or [])]
+        raw_verifiers = n.get("verifiers") or []
+        verifiers: List[str] = []
+        for v in raw_verifiers:
+            if isinstance(v, dict):
+                c = v.get("criterion", "")
+                if c:
+                    verifiers.append(str(c))
+            elif isinstance(v, str) and v:
+                verifiers.append(v)
+        children = _to_llm_native_tree(n.get("children"))
+        node: Dict[str, Any] = {
+            "description": description,
+            "outputFiles": output_files,
+            "verifiers": verifiers,
+        }
+        if children:
+            node["children"] = children
+        out.append(node)
+    return out
+
+
+def _slim_tool_use_block(block: dict) -> dict:
+    return {"type": "tool_use", "id": block.get("id", ""), "name": block.get("name", ""), "input": block.get("input", {})}
+
+
+def _slim_tool_result_block(block: dict) -> dict:
+    out: Dict[str, Any] = {"type": "tool_result", "tool_use_id": block.get("tool_use_id", "")}
+    c = block.get("content")
+    if isinstance(c, str):
+        out["content"] = c
+    elif isinstance(c, list):
+        out["content"] = c
+    return out
+
+
+def _slim_content_block(block: dict) -> dict:
+    t = block.get("type")
+    if t == "tool_use":
+        return _slim_tool_use_block(block)
+    if t == "tool_result":
+        return _slim_tool_result_block(block)
+    if t == "text":
+        return {"type": "text", "text": block.get("text", "")}
+    return block
+
+
+def _slim_raw_message(raw: dict) -> dict:
+    """Strip infrastructure metadata from a raw SDK message, keeping only
+    what LLM produced (assistant) or what LLM sees (user/tool_result)."""
+    t = raw.get("type")
+
+    if t == "assistant":
+        msg = raw.get("message", {})
+        content = [_slim_content_block(b) for b in (msg.get("content") or []) if isinstance(b, dict)]
+        out: Dict[str, Any] = {"type": "assistant", "content": content}
+        sr = msg.get("stop_reason")
+        if sr is not None:
+            out["stop_reason"] = sr
+        return out
+
+    if t == "user":
+        msg = raw.get("message", {})
+        raw_content = msg.get("content") or raw.get("content") or []
+        content = [_slim_content_block(b) for b in raw_content if isinstance(b, dict)]
+        return {"type": "user", "content": content}
+
+    if t == "system":
+        out = {"type": "system", "subtype": raw.get("subtype", "")}
+        if raw.get("model"):
+            out["model"] = raw["model"]
+        return out
+
+    if t == "result":
+        out = {"type": "result", "subtype": raw.get("subtype", "")}
+        r = raw.get("result")
+        if r is not None:
+            out["result"] = r
+        return out
+
+    if t == "verifier_label":
+        return {"type": "verifier_label", "nodeId": raw.get("nodeId", "")}
+
+    return raw
+
+
+def _merge_parallel_tool_results(agent_traj: List[dict]) -> List[dict]:
+    """Merge consecutive user/tool_result messages whose tool_use_ids all
+    belong to the preceding assistant message's tool_use blocks."""
+    out: List[dict] = []
+    for entry in agent_traj:
+        raw = entry.get("raw", {})
+        if raw.get("type") != "user":
+            out.append(entry)
+            continue
+        content = raw.get("content") or raw.get("message", {}).get("content") or []
+        is_tool_result = all(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in content
+        ) and len(content) > 0
+        if not is_tool_result or not out:
+            out.append(entry)
+            continue
+        prev = out[-1]
+        prev_raw = prev.get("raw", {})
+        prev_type = prev_raw.get("type")
+        if prev_type == "user":
+            prev_content = prev_raw.get("content") or prev_raw.get("message", {}).get("content") or []
+            prev_is_tool_result = all(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in prev_content
+            ) and len(prev_content) > 0
+            if prev_is_tool_result:
+                merged_raw = dict(prev_raw)
+                merged_raw["content"] = list(prev_content) + list(content)
+                if "message" in merged_raw:
+                    del merged_raw["message"]
+                out[-1] = {"raw": merged_raw}
+                continue
+        out.append(entry)
+    return out
+
+
+WORKFLOW_PLAN_INSTRUCTION = "\n".join([
+    "",
+    "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
+    "Do NOT write out steps as text. Use the tool with structured JSON input.",
+    "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
+    "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to a path (e.g. report.md, summary.txt) or use verifiers to describe what the operator can check (e.g. file exists, content contains X).",
+    "For control mode (detailed view): add optional children to any main step to break it into detailed sub-steps; the number of sub-steps can depend on that step's complexity.",
+    "Do NOT add separate validation/verification/testing steps — our system handles verification via verifier criteria on each node.",
+    "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
+    "For outputFiles: prefer .md for document-style output so the UI shows markdown preview; use .txt when markdown does not apply.",
+    "After calling the tool, STOP. Do NOT execute any steps yourself.",
+    "The human operator will trigger each step individually.",
+    "",
+    "Task instruction:",
+])
 
 
 def build_weight_based_session(
@@ -1351,14 +1546,14 @@ def build_weight_based_session(
     planning_end = node_starts[0][0] if node_starts else len(all_msgs)
     planning_msgs = all_msgs[:planning_end]
 
-    planning_agent_traj: List[dict] = []
+    planning_agent_traj_raw: List[dict] = []
     planning_human_traj: List[dict] = []
     prev_workflow_snapshot: Optional[List[dict]] = None
 
     for m in planning_msgs:
         t = m.get("type")
         if t in ("system", "assistant", "user", "result"):
-            planning_agent_traj.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
+            planning_agent_traj_raw.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
 
         elif t == "edit_workflow":
             wf_after = _snapshot_workflow_tree(m)
@@ -1386,17 +1581,34 @@ def build_weight_based_session(
                 prev_workflow_snapshot = wf_after
             planning_human_traj.append(entry)
 
-    workflow_tree_generated = _extract_workflow_tree_from_tool_use(planning_agent_traj)
-    # workflow_tree at the end of planning phase (after all edits)
+    planning_agent_traj_merged = _merge_partial_assistant_messages(planning_agent_traj_raw)
+    workflow_tree_generated = _extract_workflow_tree_from_tool_use(planning_agent_traj_merged)
     workflow_tree_after_planning = prev_workflow_snapshot or workflow_tree
+    planning_agent_traj_final = _merge_parallel_tool_results(planning_agent_traj_merged)
+    planning_agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in planning_agent_traj_final]
+
+    # Normalize planning human_trajectory workflow snapshots to LLM native format
+    for h in planning_human_traj:
+        if h.get("type") == "edit_workflow":
+            if "workflow_tree_before" in h:
+                h["workflow_tree_before"] = _to_llm_native_tree(h["workflow_tree_before"])
+            if "workflow_tree_after" in h:
+                h["workflow_tree_after"] = _to_llm_native_tree(h["workflow_tree_after"])
+
+    # Reconstruct the planning first-turn prompt:
+    # WORKFLOW_PLAN_INSTRUCTION + user's initial task instruction
+    # NOTE: memoryPrefix is not available from DB; will be accurate once
+    # effective_prompt is persisted (TODO: modify src/electron).
+    planning_prompt = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
 
     planning_unit: Dict[str, Any] = {
         "intent": "planning",
+        "prompt_first_turn": planning_prompt,
         "agent_trajectory": planning_agent_traj,
         "human_trajectory": planning_human_traj,
         "verifiers": [],
         "workflow_tree_generated": workflow_tree_generated,
-        "workflow_tree_final": workflow_tree_after_planning,
+        "workflow_tree_final": _to_llm_native_tree(workflow_tree_after_planning),
     }
 
     # ── Build execution task_units ──
@@ -1409,10 +1621,11 @@ def build_weight_based_session(
         node_id = node.get("id", "")
         node_desc = node.get("description", "")
 
-        agent_traj: List[dict] = []
+        agent_traj_raw: List[dict] = []
         human_traj: List[dict] = []
         round_counter = 0
         node_prompt_consumed = False
+        node_first_turn_prompt: Optional[str] = None
         last_snapshot_msg: Optional[dict] = None
 
         for m in node_msgs:
@@ -1423,6 +1636,9 @@ def build_weight_based_session(
                 if isinstance(p, str) and is_backend_node_user_prompt(p):
                     if not node_prompt_consumed:
                         node_prompt_consumed = True
+                        # Capture buildPromptForNode prompt as first-turn prompt.
+                        # NOTE: memoryPrefix not included (TODO: persist effective_prompt).
+                        node_first_turn_prompt = p
                         continue
                     human_traj.append({
                         "type": "follow_up",
@@ -1439,7 +1655,7 @@ def build_weight_based_session(
 
             if t in ("system", "assistant", "user", "result"):
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
-                agent_traj.append({"raw": raw_clean})
+                agent_traj_raw.append({"raw": raw_clean})
                 if t == "system" and m.get("subtype") == "init":
                     round_counter += 1
                 if m.get("state_snapshot"):
@@ -1447,7 +1663,7 @@ def build_weight_based_session(
 
             elif t == "verifier_label":
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
-                agent_traj.append({"raw": raw_clean})
+                agent_traj_raw.append({"raw": raw_clean})
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
 
@@ -1502,12 +1718,18 @@ def build_weight_based_session(
                     "status": mark == "check",
                 })
 
-        task_units.append({
+        agent_traj_merged = _merge_partial_assistant_messages(agent_traj_raw)
+        agent_traj_with_results = _merge_parallel_tool_results(agent_traj_merged)
+        agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in agent_traj_with_results]
+
+        unit: Dict[str, Any] = {
             "intent": node_desc,
+            "prompt_first_turn": node_first_turn_prompt or "",
             "agent_trajectory": agent_traj,
             "human_trajectory": human_traj,
             "verifiers": verifiers,
-        })
+        }
+        task_units.append(unit)
 
     return {
         "uuid": sid,
