@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DPO from export_task_sessions JSON: pairwise agent segments (j vs j+1)."""
+"""OPD from export_task_sessions JSON: one learning unit per agent→human segment."""
 
 from __future__ import annotations
 
@@ -15,21 +15,18 @@ if str(_scripts) not in sys.path:
 import session_export_common as s  # noqa: E402
 
 
-def _dpo_units(traj: list) -> tuple[dict | None, list[dict]]:
+def _opd_units(traj: list) -> tuple[dict | None, list[dict]]:
     initial, pairs = s.pair_segments(traj)
-    if len(pairs) < 2:
+    if not pairs:
         return initial, []
     prefix = list(initial["steps"]) if initial else []
     units = []
-    for j in range(len(pairs) - 1):
-        ag, hm = pairs[j]
-        ag1, _ = pairs[j + 1]
+    for j, (ag, hm) in enumerate(pairs):
         units.append(
             {
                 "index": j,
                 "user_messages": [s.user_text(x) for x in prefix],
-                "rejected_trajectory": list(ag),
-                "chosen_trajectory": list(ag1),
+                "agent_trajectory": list(ag),
                 "human_trajectory": list(hm),
             }
         )
@@ -43,13 +40,13 @@ def _session(blob: dict) -> dict:
     if not isinstance(traj, list):
         out = {**meta, "initial_message": None, "learning_units": [], "error": "bad_trajectory"}
     else:
-        initial, units = _dpo_units(traj)
+        initial, units = _opd_units(traj)
         out = {**meta, "initial_message": initial, "learning_units": units}
     return s.strip_actor(out)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Export trajectories as DPO learning units.")
+    p = argparse.ArgumentParser(description="Export trajectories as OPD learning units.")
     p.add_argument("input", nargs="?", default="-")
     p.add_argument("-o", "--output", default="-")
     args = p.parse_args()

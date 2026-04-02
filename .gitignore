@@ -28,3 +28,5 @@ dist-electron
 
 # Local test DB for scripts
 scripts/test_sessions.db
+
+**/__pycache__/
