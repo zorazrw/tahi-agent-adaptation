@@ -1,4 +1,4 @@
-"""Shared trajectory parsing for export_dpo_data / export_opd_data."""
+"""Shared trajectory parsing for export_dpo_data, export_opd_data, export_reinforce_data."""
 
 from __future__ import annotations
 
