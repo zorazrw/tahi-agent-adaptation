@@ -511,6 +511,34 @@ def _assistant_message_has_tool_use(m: dict) -> bool:
     return False
 
 
+def _assistant_tool_use_ids(m: dict) -> set:
+    """Return the set of tool_use ids from an assistant message."""
+    raw = m.get("raw")
+    if not isinstance(raw, dict):
+        return set()
+    ids: set = set()
+    for block in (raw.get("message") or {}).get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            tid = block.get("id")
+            if tid:
+                ids.add(tid)
+    return ids
+
+
+def _tool_result_message_ids(norm: dict) -> set:
+    """Return the set of tool_use_ids referenced by tool_result blocks in a user message."""
+    raw = norm.get("raw")
+    if not isinstance(raw, dict) or raw.get("type") != "user":
+        return set()
+    ids: set = set()
+    for b in (raw.get("message") or {}).get("content") or []:
+        if isinstance(b, dict) and b.get("type") == "tool_result":
+            tid = b.get("tool_use_id")
+            if tid:
+                ids.add(tid)
+    return ids
+
+
 def _assistant_text_only_payload(m: dict) -> Optional[str]:
     """
     If this normalized agent message is an ``assistant`` SDK message with only text blocks (no
@@ -672,6 +700,8 @@ def build_full_session_trajectory(
         trajectory_row("agent", f"plan({json.dumps(initial_query, ensure_ascii=False)})", plan_env),
     ]
 
+    msgs = _merge_partial_assistant_messages(msgs)
+
     consumed_initial_user = False
     pending_skip_tool_result = False
     idx = 0
@@ -736,13 +766,24 @@ def build_full_session_trajectory(
             consume = 1 + extra
             merged_tool: Optional[str] = None
             if _assistant_message_has_tool_use(m):
-                tail_i = idx + consume
-                if tail_i < len(msgs) and is_tool_result_message(msgs[tail_i]):
-                    tr_raw = msgs[tail_i].get("raw")
+                expected_ids = _assistant_tool_use_ids(m)
+                tr_parts: List[str] = []
+                scan = idx + consume
+                while scan < len(msgs) and expected_ids:
+                    if not is_tool_result_message(msgs[scan]):
+                        break
+                    rids = _tool_result_message_ids(msgs[scan])
+                    if not rids or not rids.issubset(expected_ids):
+                        break
+                    tr_raw = msgs[scan].get("raw")
                     if isinstance(tr_raw, dict):
-                        merged_tool = _tool_result_blob(tr_raw)
+                        tr_parts.append(_tool_result_blob(tr_raw))
+                    expected_ids -= rids
                     consume += 1
-            env_idx = idx + 1 if (extra == 1 or merged_tool is not None) else idx
+                    scan += 1
+                if tr_parts:
+                    merged_tool = "\n\n".join(p for p in tr_parts if p and p != "(empty)") or "(empty)"
+            env_idx = min(idx + consume - 1, len(msgs) - 1) if (extra == 1 or merged_tool is not None) else idx
             step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
             traj.append(
                 trajectory_row(
@@ -782,6 +823,8 @@ def build_slice_trajectory(
         verifier_marks,
         include_files=True,
     )
+    msgs = _merge_partial_assistant_messages(msgs)
+
     traj: List[dict] = []
     idx = 0
     while idx < len(msgs):
@@ -824,13 +867,24 @@ def build_slice_trajectory(
             consume = 1 + extra
             merged_tool: Optional[str] = None
             if _assistant_message_has_tool_use(m):
-                tail_i = idx + consume
-                if tail_i < len(msgs) and is_tool_result_message(msgs[tail_i]):
-                    tr_raw = msgs[tail_i].get("raw")
+                expected_ids = _assistant_tool_use_ids(m)
+                tr_parts: List[str] = []
+                scan = idx + consume
+                while scan < len(msgs) and expected_ids:
+                    if not is_tool_result_message(msgs[scan]):
+                        break
+                    rids = _tool_result_message_ids(msgs[scan])
+                    if not rids or not rids.issubset(expected_ids):
+                        break
+                    tr_raw = msgs[scan].get("raw")
                     if isinstance(tr_raw, dict):
-                        merged_tool = _tool_result_blob(tr_raw)
+                        tr_parts.append(_tool_result_blob(tr_raw))
+                    expected_ids -= rids
                     consume += 1
-            env_idx = idx + 1 if (extra == 1 or merged_tool is not None) else idx
+                    scan += 1
+                if tr_parts:
+                    merged_tool = "\n\n".join(p for p in tr_parts if p and p != "(empty)") or "(empty)"
+            env_idx = min(idx + consume - 1, len(msgs) - 1) if (extra == 1 or merged_tool is not None) else idx
             step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
             traj.append(
                 trajectory_row(
@@ -1284,11 +1338,13 @@ def _flush_partial_group(partials: List[dict]) -> dict:
     for p in partials:
         for block in (p.get("raw", {}).get("message", {}).get("content") or []):
             merged_content.append(block)
-    final_raw = dict(partials[-1]["raw"])
+    result = dict(partials[-1])
+    final_raw = dict(result.get("raw", {}))
     final_msg = dict(final_raw.get("message", {}))
     final_msg["content"] = merged_content
     final_raw["message"] = final_msg
-    return {"raw": final_raw}
+    result["raw"] = final_raw
+    return result
 
 
 def _merge_partial_assistant_messages(agent_traj: List[dict]) -> List[dict]:
