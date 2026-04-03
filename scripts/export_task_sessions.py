@@ -41,9 +41,26 @@ Database location (Electron userData):
 - Windows: %APPDATA%\\Agent Cowork\\sessions.db
 - Linux: ~/.config/Agent Cowork/sessions.db
 
+Formats
+-------
+--format default (default)
+  Human-readable action trajectory. Each step has actor, action, tool_result, and environment.
+  Used by the existing context-export pipeline.
+
+--format weight-based
+  Raw SDK messages + human actions for training. Each session is split into task_units
+  (one planning unit + one per workflow node). Each unit has:
+    prompt_first_turn   : full prompt sent to the LM for the first turn (memoryPrefix included
+                          when effective_prompt is persisted; otherwise reconstructed)
+    agent_trajectory    : slimmed raw SDK messages (assistant/user/result/system/verifier_label)
+    human_trajectory    : follow_up, file_edit, edit_workflow, edit_verifier actions
+    verifiers           : final verifier criteria + pass/fail status
+  Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
+
 Usage:
   conda activate code   # optional: use "code" env
   python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
+    [--format {default,weight-based}] \\
     [--tasks-dir DIR [--task-unit-id NODE_UUID]] [--granularity {all,automation,control}]
   # Per-task files: --tasks-dir requires --session-id. Each task unit is written as tasks/{unit-id}.json
   # (unit id is the workflow node id, a UUID). With --task-unit-id, only that file is updated.
