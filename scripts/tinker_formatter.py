@@ -1,15 +1,12 @@
 import json
 import re
+
 import chz
 import datasets
 
-from tinker_cookbook.preference.preference_datasets import ComparisonDatasetBuilder
-from tinker_cookbook.preference.types import (
-    Comparison,
-    ComparisonRenderer,
-    ComparisonRendererFromChatRenderer,
-    LabeledComparison,
-)
+from tinker_cookbook.renderers.base import ToolCall
+from tinker_cookbook.supervised.data import SupervisedDatasetFromHFDataset, conversation_to_datum
+from tinker_cookbook.supervised.types import ChatDatasetBuilder, SupervisedDataset
 
 
 _TOOL_NAME_RE = re.compile(r"^([A-Za-z_][\w]*)\(")
@@ -99,11 +96,14 @@ def traj_to_chat(trajectory: list[dict]) -> list[dict]:
             if parsed is not None:
                 t_name, arguments = parsed
                 tool_seq += 1
+                call_id = f"call_{tool_seq}"
                 chat.append(
                     {
                         "role": "assistant",
+                        "content": "",
                         "tool_calls": [
                             {
+                                "id": call_id,
                                 "type": "function",
                                 "function": {"name": t_name, "arguments": arguments},
                             }
@@ -115,6 +115,7 @@ def traj_to_chat(trajectory: list[dict]) -> list[dict]:
                     chat.append(
                         {
                             "role": "tool",
+                            "tool_call_id": call_id,
                             "content": tr
                             if isinstance(tr, str)
                             else json.dumps(tr, ensure_ascii=False),
@@ -126,55 +127,86 @@ def traj_to_chat(trajectory: list[dict]) -> list[dict]:
     return chat
 
 
+def _hydrate_tool_calls(conversation: list[dict]) -> list[dict]:
+    """Convert plain-dict tool_calls to ToolCall pydantic objects for the renderer.
+
+    Also strips ``tool_calls`` keys that Arrow set to ``None`` so the
+    renderer never encounters them.
+    """
+    out = []
+    for msg in conversation:
+        if msg.get("tool_calls"):
+            msg = {
+                **msg,
+                "tool_calls": [
+                    ToolCall(
+                        id=tc.get("id"),
+                        function=ToolCall.FunctionBody(
+                            name=tc["function"]["name"],
+                            arguments=tc["function"]["arguments"],
+                        ),
+                    )
+                    for tc in msg["tool_calls"]
+                ],
+            }
+        elif "tool_calls" in msg:
+            msg = {k: v for k, v in msg.items() if k != "tool_calls"}
+        out.append(msg)
+    return out
+
+
 @chz.chz
-class DPODataBuilder(ComparisonDatasetBuilder):
+class DPODataBuilder(ChatDatasetBuilder):
+    """Build interleaved chosen/rejected Datum pairs for DPO training.
+
+    Reads a JSON file produced by ``export_dpo_data.py`` and converts each
+    learning unit into a ``[chosen_datum, rejected_datum]`` pair suitable for
+    :func:`tinker_dpo.main`.
+    """
+
     train_path: str
     test_path: str | None = None
-    
-    def get_train_and_test_datasets(self) -> tuple[datasets.Dataset, datasets.Dataset | None]:
-        import json
-        
-        train_data = []
-        with open(self.train_path, "r") as f:
-            for datum in json.load(f)["learning_units"]:
-                datum = {
-                    "completion_A": traj_to_chat(datum["chosen_trajectory"]),
-                    "completion_B": traj_to_chat(datum["rejected_trajectory"]),
-                    "user_messages": datum["user_messages"],
+
+    def _load(self, path: str) -> list[dict]:
+        with open(path, "r") as f:
+            raw = json.load(f)
+        rows = []
+        for unit in raw["learning_units"]:
+            prompt = [{"role": "user", "content": msg} for msg in unit["user_messages"]]
+            rows.append(
+                {
+                    "prompt": prompt,
+                    "chosen": traj_to_chat(unit["chosen_trajectory"]),
+                    "rejected": traj_to_chat(unit["rejected_trajectory"]),
                 }
-                train_data.append(datum)
-        train_dataset = datasets.Dataset.from_list(train_data)
-        
+            )
+        return rows
+
+    def __call__(self) -> tuple[SupervisedDataset, SupervisedDataset | None]:
+        train_rows = self._load(self.train_path)
+        train_ds = datasets.Dataset.from_list(train_rows)
+
+        def flatmap_fn(row: dict) -> list:
+            chosen_convo = _hydrate_tool_calls(row["prompt"] + row["chosen"])
+            rejected_convo = _hydrate_tool_calls(row["prompt"] + row["rejected"])
+            chosen_datum = conversation_to_datum(
+                chosen_convo, self.renderer, self.common_config.max_length
+            )
+            rejected_datum = conversation_to_datum(
+                rejected_convo, self.renderer, self.common_config.max_length
+            )
+            return [chosen_datum, rejected_datum]
+
+        train_dataset = SupervisedDatasetFromHFDataset(
+            train_ds, batch_size=self.common_config.batch_size, flatmap_fn=flatmap_fn
+        )
+
         test_dataset = None
         if self.test_path is not None:
-            test_data = []
-            with open(self.test_path, "r") as f:
-                for datum in json.load(f)["learning_units"]:
-                    datum = {
-                        "completion_A": traj_to_chat(datum["chosen_trajectory"]),
-                        "completion_B": traj_to_chat(datum["rejected_trajectory"]),
-                        "user_messages": datum["user_messages"],
-                    }
-                    test_data.append(datum)
-            test_dataset = datasets.Dataset.from_list(test_data)
-            
-        return train_dataset, test_dataset
-    
-    def example_to_labeled_comparison(self, example: dict) -> LabeledComparison | None:
-        prompt_conversion = [
-            {"role": "user", "content": msg} for msg in example["user_messages"]
-        ]
-        comparison = Comparison(
-            prompt_conversion=prompt_conversion,
-            completion_A=example["completion_A"],
-            completion_B=example["completion_B"],
-        )
-        return LabeledComparison(comparison=comparison, label="A")
-    
+            test_rows = self._load(self.test_path)
+            test_ds = datasets.Dataset.from_list(test_rows)
+            test_dataset = SupervisedDatasetFromHFDataset(
+                test_ds, batch_size=len(test_ds), flatmap_fn=flatmap_fn
+            )
 
-if __name__ == "__main__":
-    dpo_data_builder = DPODataBuilder(train_path="scripts/dpo.json")
-    train_dataset, test_dataset = dpo_data_builder.get_train_and_test_datasets()
-    for example in train_dataset:
-        print(example)
-        break
+        return train_dataset, test_dataset

@@ -23,7 +23,6 @@ from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.format_colorized import format_colorized
 from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_multiplier
 from tinker_cookbook.utils.misc_utils import iteration_dir
-from tinker_cookbook.supervised.types import ChatDatasetBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -594,3 +593,62 @@ def print_example(datum: tinker.Datum, tokenizer: Tokenizer, label: str = ""):
     weights = datum.loss_fn_inputs["weights"].data
     logger.info(f"\n{label} Example:")
     logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
+    
+    
+if __name__ == "__main__":
+    import argparse
+
+    from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
+    from tinker_formatter import DPODataBuilder
+
+    parser = argparse.ArgumentParser(description="DPO training on agent trajectories")
+    parser.add_argument("--train-path", required=True, help="Path to DPO training JSON")
+    parser.add_argument("--test-path", default=None, help="Path to DPO test JSON")
+    parser.add_argument(
+        "--model-name", required=True,
+        help="Base model (e.g. meta-llama/Llama-3.1-8B-Instruct)",
+    )
+    parser.add_argument(
+        "--renderer-name", required=True,
+        help="Renderer matching model family (e.g. llama3, qwen3)",
+    )
+    parser.add_argument("--log-path", required=True, help="Directory for checkpoints and logs")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--max-length", type=int, default=None)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--dpo-beta", type=float, default=0.1)
+    parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument("--lora-rank", type=int, default=32)
+    parser.add_argument("--load-checkpoint-path", default=None)
+    parser.add_argument("--wandb-project", default=None)
+    parser.add_argument("--wandb-name", default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
+    args = parser.parse_args()
+
+    dataset_builder = DPODataBuilder(
+        train_path=args.train_path,
+        test_path=args.test_path,
+        common_config=ChatDatasetBuilderCommonConfig(
+            model_name_for_tokenizer=args.model_name,
+            renderer_name=args.renderer_name,
+            max_length=args.max_length,
+            batch_size=args.batch_size,
+        ),
+    )
+
+    config = Config(
+        log_path=args.log_path,
+        model_name=args.model_name,
+        dataset_builder=dataset_builder,
+        renderer_name=args.renderer_name,
+        learning_rate=args.learning_rate,
+        dpo_beta=args.dpo_beta,
+        num_epochs=args.num_epochs,
+        lora_rank=args.lora_rank,
+        load_checkpoint_path=args.load_checkpoint_path,
+        wandb_project=args.wandb_project,
+        wandb_name=args.wandb_name,
+        max_steps=args.max_steps,
+    )
+
+    main(config)
