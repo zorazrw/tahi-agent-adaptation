@@ -395,7 +395,7 @@ function parseTranslate(el: HTMLElement): { x: number; y: number } {
   return { x: 0, y: 0 };
 }
 
-export type PreviewTextAlignH = "left" | "center" | "right" | "justify";
+export type PreviewTextAlignH = "left" | "center" | "right";
 export type PreviewTextAlignV = "start" | "middle" | "end";
 
 const TEXT_ALIGN_BLOCK_TAGS = new Set([
@@ -443,6 +443,16 @@ function getDesignModeBlockElement(doc: Document): HTMLElement | null {
  */
 export function applyPreviewTextAlignment(
   doc: Document | null | undefined,
+  axis: "h",
+  value: PreviewTextAlignH
+): boolean;
+export function applyPreviewTextAlignment(
+  doc: Document | null | undefined,
+  axis: "v",
+  value: PreviewTextAlignV
+): boolean;
+export function applyPreviewTextAlignment(
+  doc: Document | null | undefined,
   axis: "h" | "v",
   value: PreviewTextAlignH | PreviewTextAlignV
 ): boolean {
@@ -450,18 +460,18 @@ export function applyPreviewTextAlignment(
   try {
     doc.body.focus();
     if (axis === "h") {
-      const cmds: Record<PreviewTextAlignH, string> = {
-        left: "justifyLeft",
-        center: "justifyCenter",
-        right: "justifyRight",
-        justify: "justifyFull",
-      };
-      return doc.execCommand(cmds[value as PreviewTextAlignH], false);
+      const cmd =
+        value === "left"
+          ? "justifyLeft"
+          : value === "center"
+            ? "justifyCenter"
+            : "justifyRight";
+      return doc.execCommand(cmd, false);
     }
+    const v = value as PreviewTextAlignV;
     const block = getDesignModeBlockElement(doc);
     if (!block || block === doc.body || block === doc.documentElement) return false;
-    const jc =
-      value === "start" ? "flex-start" : value === "middle" ? "center" : "flex-end";
+    const jc = v === "start" ? "flex-start" : v === "middle" ? "center" : "flex-end";
     block.style.display = "flex";
     block.style.flexDirection = "column";
     block.style.justifyContent = jc;

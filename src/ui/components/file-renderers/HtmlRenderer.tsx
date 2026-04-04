@@ -32,6 +32,11 @@ type Props = { data: { kind: "html"; content: string } } & EditableRendererProps
 
 type HtmlVisualTool = "none" | "text" | "layout";
 
+const previewToolbarMenuItemBtn =
+  "flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8";
+const previewToolbarPopoverTriggerBtn =
+  "inline-flex items-center justify-center rounded-md p-1.5 text-xs font-medium bg-ink-900/5 text-ink-600 hover:bg-ink-900/10";
+
 /** Tiny glyphs for the Move-mode picker (ink palette, matches inserted shapes). */
 function PreviewShapeMenuGlyph({ kind }: { kind: PreviewShapeKind }) {
   const common = "shrink-0 block text-ink-600";
@@ -181,46 +186,48 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
       const doc = iframeRef.current?.contentDocument;
       if (!doc?.body) return;
       insertPreviewShape(doc, kind);
-      markVisualLikelyDirty();
       markVisualDirtyFromDoc();
       setShapeMenuOpen(false);
     },
-    [markVisualDirtyFromDoc, markVisualLikelyDirty]
+    [markVisualDirtyFromDoc]
   );
 
-  const handleTextAlign = useCallback(
-    (axis: "h" | "v", value: PreviewTextAlignH | PreviewTextAlignV) => {
+  const applyTextAlignH = useCallback(
+    (value: PreviewTextAlignH) => {
       const doc = iframeRef.current?.contentDocument;
-      if (!applyPreviewTextAlignment(doc, axis, value)) return;
-      markVisualLikelyDirty();
+      if (!applyPreviewTextAlignment(doc, "h", value)) return;
       markVisualDirtyFromDoc();
       setAlignMenuOpen(false);
       iframeRef.current?.contentWindow?.focus();
     },
-    [markVisualDirtyFromDoc, markVisualLikelyDirty]
+    [markVisualDirtyFromDoc]
+  );
+
+  const applyTextAlignV = useCallback(
+    (value: PreviewTextAlignV) => {
+      const doc = iframeRef.current?.contentDocument;
+      if (!applyPreviewTextAlignment(doc, "v", value)) return;
+      markVisualDirtyFromDoc();
+      setAlignMenuOpen(false);
+      iframeRef.current?.contentWindow?.focus();
+    },
+    [markVisualDirtyFromDoc]
   );
 
   useEffect(() => {
-    if (!shapeMenuOpen) return;
+    if (!shapeMenuOpen && !alignMenuOpen) return;
     const onDocDown = (e: MouseEvent) => {
-      if (shapeMenuRef.current && !shapeMenuRef.current.contains(e.target as Node)) {
+      const t = e.target as Node;
+      if (shapeMenuOpen && shapeMenuRef.current && !shapeMenuRef.current.contains(t)) {
         setShapeMenuOpen(false);
       }
-    };
-    document.addEventListener("mousedown", onDocDown, true);
-    return () => document.removeEventListener("mousedown", onDocDown, true);
-  }, [shapeMenuOpen]);
-
-  useEffect(() => {
-    if (!alignMenuOpen) return;
-    const onDocDown = (e: MouseEvent) => {
-      if (alignMenuRef.current && !alignMenuRef.current.contains(e.target as Node)) {
+      if (alignMenuOpen && alignMenuRef.current && !alignMenuRef.current.contains(t)) {
         setAlignMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", onDocDown, true);
     return () => document.removeEventListener("mousedown", onDocDown, true);
-  }, [alignMenuOpen]);
+  }, [shapeMenuOpen, alignMenuOpen]);
 
   useEffect(() => {
     if (visualTool !== "layout") setShapeMenuOpen(false);
@@ -385,7 +392,7 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
                   title="Text alignment"
                   aria-expanded={alignMenuOpen}
                   aria-haspopup="menu"
-                  className="inline-flex items-center justify-center rounded-md p-1.5 text-xs font-medium bg-ink-900/5 text-ink-600 hover:bg-ink-900/10"
+                  className={previewToolbarPopoverTriggerBtn}
                 >
                   <AlignCenterHorizontal className="size-4" aria-hidden />
                   <span className="sr-only">Text alignment</span>
@@ -409,8 +416,8 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
                           role="menuitem"
                           title={title}
                           aria-label={title}
-                          className="flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8"
-                          onClick={() => handleTextAlign("h", val as PreviewTextAlignH)}
+                          className={previewToolbarMenuItemBtn}
+                          onClick={() => applyTextAlignH(val)}
                         >
                           <Icon className="size-4 shrink-0" aria-hidden />
                         </button>
@@ -431,8 +438,8 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
                           role="menuitem"
                           title={title}
                           aria-label={`Vertical ${title.toLowerCase()}`}
-                          className="flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8"
-                          onClick={() => handleTextAlign("v", val as PreviewTextAlignV)}
+                          className={previewToolbarMenuItemBtn}
+                          onClick={() => applyTextAlignV(val)}
                         >
                           <Icon className="size-4 shrink-0" aria-hidden />
                         </button>
@@ -450,7 +457,7 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
                   title="Insert shape"
                   aria-expanded={shapeMenuOpen}
                   aria-haspopup="menu"
-                  className="inline-flex items-center justify-center rounded-md p-1.5 text-xs font-medium bg-ink-900/5 text-ink-600 hover:bg-ink-900/10"
+                  className={previewToolbarPopoverTriggerBtn}
                 >
                   <ShapesIcon className="size-4" aria-hidden />
                   <span className="sr-only">Insert shape</span>
@@ -475,7 +482,7 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
                               ? "Insert circle"
                               : "Insert line"
                         }
-                        className="flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8"
+                        className={previewToolbarMenuItemBtn}
                         onClick={() => handleInsertShape(kind)}
                       >
                         <PreviewShapeMenuGlyph kind={kind} />
