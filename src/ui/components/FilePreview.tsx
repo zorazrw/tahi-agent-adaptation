@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
-import { CopyIcon, FolderOpenIcon, RefreshCcwIcon } from "lucide-react";
-import { getRenderer } from "./file-renderers";
+import { CopyIcon, FolderOpenIcon, Loader2Icon, RefreshCcwIcon, SaveIcon } from "lucide-react";
+import { getRenderer, type HtmlVisualSaveChrome } from "./file-renderers";
 import { ZoomControls } from "./file-renderers/DocxRenderer";
 
 const FILE_TOOL_NAMES = new Set(["Read", "Write", "Edit"]);
@@ -122,6 +122,15 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
   const [zoom, setZoom] = useState(0.6);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [htmlVisualSaveChrome, setHtmlVisualSaveChrome] = useState<HtmlVisualSaveChrome | null>(null);
+
+  const onHtmlVisualSaveChromeChange = useCallback((chrome: HtmlVisualSaveChrome | null) => {
+    setHtmlVisualSaveChrome(chrome);
+  }, []);
+
+  useEffect(() => {
+    setHtmlVisualSaveChrome(null);
+  }, [filePath]);
 
   const handleCopyFileContent = () => {
     const text = getCopyableContent(result);
@@ -168,6 +177,28 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
         <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}
         </span>
+        {result && "kind" in result && result.kind === "html" && htmlVisualSaveChrome && (
+          <button
+            type="button"
+            onClick={() => htmlVisualSaveChrome.save()}
+            disabled={htmlVisualSaveChrome.disabled}
+            className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors disabled:opacity-50 disabled:pointer-events-auto"
+            aria-label={htmlVisualSaveChrome.saving ? "Saving preview changes" : "Save preview changes"}
+            title={
+              htmlVisualSaveChrome.error
+                ? htmlVisualSaveChrome.error
+                : htmlVisualSaveChrome.disabled && !htmlVisualSaveChrome.saving
+                  ? "No preview changes to save yet"
+                  : "Save preview changes to file (Ctrl or ⌘+S)"
+            }
+          >
+            {htmlVisualSaveChrome.saving ? (
+              <Loader2Icon className="size-4 animate-spin" aria-hidden />
+            ) : (
+              <SaveIcon className="size-4" aria-hidden />
+            )}
+          </button>
+        )}
         <button
           onClick={() => setRefreshKey((k) => k + 1)}
           className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors"
@@ -234,6 +265,7 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
             cwd={cwd ?? undefined}
             sessionId={sessionId ?? undefined}
             onReload={() => setRefreshKey((k) => k + 1)}
+            onHtmlVisualSaveChromeChange={onHtmlVisualSaveChromeChange}
           />
         )}
       </div>

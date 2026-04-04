@@ -12,12 +12,22 @@ import { HtmlRenderer } from "./HtmlRenderer";
 import { VideoRenderer } from "./VideoRenderer";
 import { AudioRenderer } from "./AudioRenderer";
 
+/** HTML preview Text/Shape toolbar: host (e.g. FilePreview header) can show Save next to Refresh. */
+export type HtmlVisualSaveChrome = {
+  save: () => void;
+  disabled: boolean;
+  saving: boolean;
+  error: string | null;
+};
+
 export type EditableRendererProps = {
   filePath?: string;
   cwd?: string | null;
   /** When set, successful saves record a ``file_edit`` message for this task session. */
   sessionId?: string | null;
   onReload?: () => void;
+  /** HTML preview only: fired when visual edit (Text/Shape) save affordance should appear or clear. */
+  onHtmlVisualSaveChromeChange?: (chrome: HtmlVisualSaveChrome | null) => void;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

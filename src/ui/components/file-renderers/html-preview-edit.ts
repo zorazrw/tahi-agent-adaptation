@@ -4,7 +4,7 @@ export type HtmlDocCleanup = () => void;
 
 const MOVE_STYLE_ID = "__ac-html-move-injected";
 
-/** User-placed shapes in Move mode (serialized with the saved HTML). */
+/** User-placed shapes in Shape mode (serialized with the saved HTML). */
 export type PreviewShapeKind = "rectangle" | "circle" | "line";
 
 const PREVIEW_SHAPE_CLASS = "ac-preview-shape";
@@ -35,9 +35,15 @@ function getShapeInner(wrap: HTMLElement): HTMLElement | null {
   return wrap.querySelector(`:scope > .${PREVIEW_SHAPE_INNER_CLASS}`) as HTMLElement | null;
 }
 
-function getLineBar(inner: HTMLElement): HTMLElement | null {
-  const ch = inner.firstElementChild;
-  return ch instanceof HTMLElement && ch.tagName === "DIV" ? ch : null;
+/** Line stroke is a non-chrome ``div`` inside inner — never use ``firstElementChild`` (resize handle may come first). */
+function getLineStrokeBar(inner: HTMLElement): HTMLElement | null {
+  for (const c of inner.children) {
+    if (!(c instanceof HTMLElement)) continue;
+    if (c.classList.contains(PREVIEW_SHAPE_CHROME_CLASS)) continue;
+    if (c.classList.contains("ac-preview-shape-handle")) continue;
+    if (c.tagName === "DIV") return c;
+  }
+  return null;
 }
 
 function getShapeBodyElement(wrap: HTMLElement): HTMLElement | null {
@@ -99,7 +105,7 @@ function selectLayoutBlock(doc: Document, el: HTMLElement): void {
 }
 
 /**
- * Delete controls + selection from the live document (e.g. when leaving Move mode).
+ * Delete controls + selection from the live document (e.g. when leaving Shape mode).
  */
 export function stripPreviewShapeEditorUi(doc: Document): void {
   stripEphemeralPreviewUiFromSubtree(doc);
@@ -134,7 +140,7 @@ function tryDeleteSelectedLayoutBlock(doc: Document | null | undefined): boolean
   return true;
 }
 
-/** Shape removal first, then LM layout block marked for delete in Move mode. */
+/** Shape removal first, then LM layout block marked for delete in Shape mode. */
 export function tryDeleteSelectedPreviewOrLayoutBlock(doc: Document | null | undefined): boolean {
   if (tryDeleteSelectedPreviewShape(doc)) return true;
   return tryDeleteSelectedLayoutBlock(doc);
@@ -348,7 +354,7 @@ const WRAPPER_PARENT_TAGS = new Set([
 ]);
 
 /**
- * Walk up from the hit target so Move drags a layout box (card, panel), not only inner text nodes.
+ * Walk up from the hit target so Shape mode drags a layout box (card, panel), not only inner text nodes.
  */
 function promoteToLayoutDragRoot(doc: Document, start: HTMLElement): HTMLElement {
   const view = doc.defaultView;
@@ -482,6 +488,78 @@ export function applyPreviewTextAlignment(
   }
 }
 
+/** Last non-collapsed designMode range per document — survives host toolbar / color picker focus loss. */
+const previewTextColorRangeByDoc = new WeakMap<Document, Range>();
+
+function stashPreviewTextColorSelection(doc: Document): void {
+  const sel = doc.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+  try {
+    previewTextColorRangeByDoc.set(doc, sel.getRangeAt(0).cloneRange());
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Snapshot selection before host UI steals focus (e.g. palette ``pointerdown``). Safe to call no-op if collapsed.
+ */
+export function snapshotPreviewTextColorSelection(doc: Document | null | undefined): void {
+  if (!doc || doc.designMode !== "on") return;
+  stashPreviewTextColorSelection(doc);
+}
+
+function takeRangeForPreviewTextColor(doc: Document): Range | null {
+  const sel = doc.getSelection();
+  if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+    try {
+      return sel.getRangeAt(0).cloneRange();
+    } catch {
+      /* fall through */
+    }
+  }
+  const saved = previewTextColorRangeByDoc.get(doc);
+  if (!saved) return null;
+  try {
+    if (!saved.commonAncestorContainer.isConnected) {
+      previewTextColorRangeByDoc.delete(doc);
+      return null;
+    }
+    return saved.cloneRange();
+  } catch {
+    previewTextColorRangeByDoc.delete(doc);
+    return null;
+  }
+}
+
+/**
+ * Text mode: set **foreground** (``color``) on the current selection. Uses a stashed range when host
+ * toolbar / color dialog cleared the live selection.
+ */
+export function applyPreviewTextColor(doc: Document | null | undefined, color: string): boolean {
+  if (!doc || doc.designMode !== "on" || !doc.body) return false;
+  const range = takeRangeForPreviewTextColor(doc);
+  if (!range) return false;
+  try {
+    const span = doc.createElement("span");
+    span.style.color = color;
+    const frag = range.extractContents();
+    span.appendChild(frag);
+    range.insertNode(span);
+    previewTextColorRangeByDoc.delete(doc);
+    doc.body.focus();
+    const sel = doc.getSelection();
+    sel?.removeAllRanges();
+    const nr = doc.createRange();
+    nr.selectNodeContents(span);
+    nr.collapse(false);
+    sel?.addRange(nr);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function attachHtmlTextEdit(
   doc: Document,
   onChange: () => void,
@@ -534,6 +612,9 @@ export function attachHtmlTextEdit(
   /** IME (e.g. CJK): `input` may be incomplete until composition ends. */
   doc.addEventListener("compositionend", onUserEdit);
 
+  const onDesignModeSelectionChange = () => stashPreviewTextColorSelection(doc);
+  doc.addEventListener("selectionchange", onDesignModeSelectionChange);
+
   const win = doc.defaultView;
   requestAnimationFrame(() => {
     win?.focus();
@@ -552,6 +633,8 @@ export function attachHtmlTextEdit(
     doc.removeEventListener("input", onUserEdit);
     doc.removeEventListener("keyup", onUserEdit);
     doc.removeEventListener("compositionend", onUserEdit);
+    doc.removeEventListener("selectionchange", onDesignModeSelectionChange);
+    previewTextColorRangeByDoc.delete(doc);
     if (onSaveShortcut) {
       doc.removeEventListener("keydown", onSaveKey, true);
     }
@@ -667,7 +750,7 @@ export function attachHtmlLayoutDrag(
 
       if (onResizeHandle || inCornerZone) {
         const kind = (shapeWrap.getAttribute("data-ac-shape") ?? "rectangle") as PreviewShapeKind;
-        const bar = kind === "line" ? getLineBar(inner) : null;
+        const bar = kind === "line" ? getLineStrokeBar(inner) : null;
         const cs = doc.defaultView?.getComputedStyle(inner);
         const startW = parseFloat(inner.style.width) || parseFloat(cs?.width ?? "0") || 40;
         const startH = parseFloat(inner.style.height) || parseFloat(cs?.height ?? "0") || 40;
@@ -762,7 +845,7 @@ export function attachHtmlLayoutDrag(
       inner.style.height = `${s}px`;
     } else {
       inner.style.width = `${Math.max(48, Math.round(startW + dx))}px`;
-      const bar = getLineBar(inner);
+      const bar = getLineStrokeBar(inner);
       const bh = Math.max(2, Math.round(startBarH + dy));
       inner.style.minHeight = `${Math.max(12, bh + 8)}px`;
       inner.style.height = `${Math.max(12, bh + 8)}px`;

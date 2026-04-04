@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import hljs from "highlight.js";
 import {
-  SaveIcon,
-  Loader2Icon,
   ShapesIcon,
+  Palette,
   AlignCenterHorizontal,
   TextAlignStart,
   TextAlignCenter,
@@ -21,6 +20,8 @@ import {
   attachHtmlLayoutDrag,
   insertPreviewShape,
   applyPreviewTextAlignment,
+  applyPreviewTextColor,
+  snapshotPreviewTextColorSelection,
   isDeleteOrBackspaceKey,
   tryDeleteSelectedPreviewOrLayoutBlock,
   type PreviewShapeKind,
@@ -37,7 +38,42 @@ const previewToolbarMenuItemBtn =
 const previewToolbarPopoverTriggerBtn =
   "inline-flex items-center justify-center rounded-md p-1.5 text-xs font-medium bg-ink-900/5 text-ink-600 hover:bg-ink-900/10";
 
-/** Tiny glyphs for the Move-mode picker (ink palette, matches inserted shapes). */
+/** Fallback value for the hidden ``custom`` color input. */
+const PREVIEW_DEFAULT_TEXT_COLOR = "#000000";
+
+/** One hue family per column (left→right); each column is light→dark top→bottom. */
+const PREVIEW_TEXT_COLOR_COLUMNS: readonly { label: string; shades: readonly string[] }[] = [
+  {
+    label: "Red",
+    shades: ["#ffe4e6", "#fecdd3", "#fda4af", "#fb7185", "#e11d48", "#9f1239", "#450a0a"],
+  },
+  {
+    label: "Orange",
+    shades: ["#ffedd5", "#fed7aa", "#fdba74", "#fb923c", "#ea580c", "#c2410c", "#7c2d12"],
+  },
+  {
+    label: "Yellow",
+    shades: ["#fefce8", "#fef9c3", "#fef08a", "#facc15", "#ca8a04", "#a16207", "#713f12"],
+  },
+  {
+    label: "Green",
+    shades: ["#f0fdf4", "#dcfce7", "#86efac", "#22c55e", "#16a34a", "#166534", "#052e16"],
+  },
+  {
+    label: "Blue",
+    shades: ["#eff6ff", "#dbeafe", "#93c5fd", "#3b82f6", "#2563eb", "#1e3a8a", "#172554"],
+  },
+  {
+    label: "Purple",
+    shades: ["#faf5ff", "#f3e8ff", "#d8b4fe", "#a855f7", "#7e22ce", "#581c87", "#3b0764"],
+  },
+  {
+    label: "Gray",
+    shades: ["#ffffff", "#f3f4f6", "#d1d5db", "#9ca3af", "#6b7280", "#374151", "#030712"],
+  },
+];
+
+/** Tiny glyphs for the Shape-mode picker (ink palette, matches inserted shapes). */
 function PreviewShapeMenuGlyph({ kind }: { kind: PreviewShapeKind }) {
   const common = "shrink-0 block text-ink-600";
   if (kind === "rectangle") {
@@ -87,7 +123,14 @@ function PreviewShapeMenuGlyph({ kind }: { kind: PreviewShapeKind }) {
   );
 }
 
-export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
+export function HtmlRenderer({
+  data,
+  filePath,
+  cwd,
+  sessionId,
+  onReload,
+  onHtmlVisualSaveChromeChange,
+}: Props) {
   const [mode, setMode] = useViewToggle("preview");
   const codeRef = useRef<HTMLElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -104,6 +147,10 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
   const shapeMenuRef = useRef<HTMLDivElement>(null);
   const [alignMenuOpen, setAlignMenuOpen] = useState(false);
   const alignMenuRef = useRef<HTMLDivElement>(null);
+  const [colorMenuOpen, setColorMenuOpen] = useState(false);
+  const colorMenuRef = useRef<HTMLDivElement>(null);
+  const previewTextColorCustomInputRef = useRef<HTMLInputElement>(null);
+  const [previewTextColor, setPreviewTextColor] = useState(PREVIEW_DEFAULT_TEXT_COLOR);
 
   const visualDirtyRef = useRef(visualDirty);
   const visualSavingRef = useRef(visualSaving);
@@ -214,8 +261,19 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
     [markVisualDirtyFromDoc]
   );
 
+  const applyPreviewTextColorHex = useCallback(
+    (hex: string) => {
+      setPreviewTextColor(hex);
+      const doc = iframeRef.current?.contentDocument;
+      if (!applyPreviewTextColor(doc, hex)) return;
+      markVisualDirtyFromDoc();
+      iframeRef.current?.contentWindow?.focus();
+    },
+    [markVisualDirtyFromDoc]
+  );
+
   useEffect(() => {
-    if (!shapeMenuOpen && !alignMenuOpen) return;
+    if (!shapeMenuOpen && !alignMenuOpen && !colorMenuOpen) return;
     const onDocDown = (e: MouseEvent) => {
       const t = e.target as Node;
       if (shapeMenuOpen && shapeMenuRef.current && !shapeMenuRef.current.contains(t)) {
@@ -224,14 +282,20 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
       if (alignMenuOpen && alignMenuRef.current && !alignMenuRef.current.contains(t)) {
         setAlignMenuOpen(false);
       }
+      if (colorMenuOpen && colorMenuRef.current && !colorMenuRef.current.contains(t)) {
+        setColorMenuOpen(false);
+      }
     };
     document.addEventListener("mousedown", onDocDown, true);
     return () => document.removeEventListener("mousedown", onDocDown, true);
-  }, [shapeMenuOpen, alignMenuOpen]);
+  }, [shapeMenuOpen, alignMenuOpen, colorMenuOpen]);
 
   useEffect(() => {
     if (visualTool !== "layout") setShapeMenuOpen(false);
-    if (visualTool !== "text") setAlignMenuOpen(false);
+    if (visualTool !== "text") {
+      setAlignMenuOpen(false);
+      setColorMenuOpen(false);
+    }
   }, [visualTool]);
 
   const attachPreviewTool = useCallback(
@@ -330,7 +394,37 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
     return () => window.removeEventListener("keydown", onKey, true);
   }, [mode, visualTool, canEdit, onVisualSaveHotkey]);
 
-  /** `allow-same-origin` must apply from the first paint when the file is saveable; otherwise the iframe document is opaque and parent JS never gets a usable `contentDocument`, so Edit text / Move never attach. */
+  useEffect(() => {
+    if (!onHtmlVisualSaveChromeChange) return;
+    return () => onHtmlVisualSaveChromeChange(null);
+  }, [onHtmlVisualSaveChromeChange]);
+
+  useEffect(() => {
+    if (!onHtmlVisualSaveChromeChange) return;
+    if (mode !== "preview" || visualTool === "none" || !canEdit) {
+      onHtmlVisualSaveChromeChange(null);
+      return;
+    }
+    onHtmlVisualSaveChromeChange({
+      save: () => {
+        void handleSaveVisual();
+      },
+      disabled: visualSaving || !visualDirty,
+      saving: visualSaving,
+      error: visualSaveError,
+    });
+  }, [
+    mode,
+    visualTool,
+    canEdit,
+    visualSaving,
+    visualDirty,
+    visualSaveError,
+    onHtmlVisualSaveChromeChange,
+    handleSaveVisual,
+  ]);
+
+  /** `allow-same-origin` must apply from the first paint when the file is saveable; otherwise the iframe document is opaque and parent JS never gets a usable `contentDocument`, so Text / Shape never attach. */
   const previewSandbox = canEdit ? "allow-scripts allow-same-origin" : "allow-scripts";
 
   const toolBtn = (id: HtmlVisualTool, label: string) => (
@@ -358,32 +452,95 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
               <span className="text-ink-900/15 text-xs" aria-hidden>
                 |
               </span>
-              <span className="text-xs text-muted-foreground shrink-0">In preview:</span>
               {toolBtn("text", "Text")}
-              {toolBtn("layout", "Move")}
+              {toolBtn("layout", "Shape")}
             </>
           )}
         </div>
         {mode === "preview" && visualTool !== "none" && canEdit && (
           <div className="flex items-center gap-2 shrink-0">
-            <span className="text-ink-900/15 text-xs" aria-hidden>
-              |
-            </span>
-            <button
-              type="button"
-              onClick={handleSaveVisual}
-              disabled={visualSaving || !visualDirty}
-              title={
-                visualDirty
-                  ? "Save preview changes to file (Ctrl or ⌘+S)"
-                  : "No changes to save yet (edit or drag first)"
-              }
-              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium bg-primary text-white hover:bg-primary/90 disabled:opacity-50 disabled:pointer-events-auto"
-            >
-              {visualSaving ? <Loader2Icon className="size-3.5 animate-spin" /> : <SaveIcon className="size-3.5" />}
-              {visualSaving ? "Saving…" : "Save"}
-            </button>
-            {visualSaveError && <span className="text-xs text-error">{visualSaveError}</span>}
+            {visualTool === "text" && (
+              <div className="relative inline-flex" ref={colorMenuRef}>
+                <input
+                  ref={previewTextColorCustomInputRef}
+                  type="color"
+                  value={previewTextColor}
+                  onChange={(e) => {
+                    const hex = e.target.value;
+                    applyPreviewTextColorHex(hex);
+                    setColorMenuOpen(false);
+                  }}
+                  className="absolute h-px w-px opacity-0 -z-10"
+                  tabIndex={-1}
+                  aria-hidden
+                />
+                <button
+                  type="button"
+                  onPointerDownCapture={() => {
+                    const doc = iframeRef.current?.contentDocument;
+                    snapshotPreviewTextColorSelection(doc);
+                  }}
+                  onClick={() => setColorMenuOpen((o) => !o)}
+                  title="Text color (select text first)"
+                  aria-expanded={colorMenuOpen}
+                  aria-haspopup="menu"
+                  className={previewToolbarPopoverTriggerBtn}
+                >
+                  <Palette className="size-4" aria-hidden />
+                  <span className="sr-only">Text color</span>
+                </button>
+                {colorMenuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 top-full z-50 mt-1 w-max max-w-[calc(100vw-2rem)] rounded-md border border-ink-900/15 bg-white p-2 shadow-md"
+                  >
+                    <div
+                      className="flex gap-1.5"
+                      role="group"
+                      aria-label="Preset text colors by hue (columns), light to dark (top to bottom)"
+                    >
+                      {PREVIEW_TEXT_COLOR_COLUMNS.map((col) => (
+                        <div
+                          key={col.label}
+                          className="flex flex-col gap-1"
+                          role="group"
+                          aria-label={`${col.label} shades`}
+                        >
+                          {col.shades.map((hex) => (
+                            <button
+                              key={`${col.label}-${hex}`}
+                              type="button"
+                              role="menuitem"
+                              title={`${col.label}: ${hex}`}
+                              aria-label={`Apply ${col.label} ${hex}`}
+                              className="size-7 shrink-0 rounded border border-ink-900/20 shadow-sm outline-none ring-offset-2 hover:scale-105 focus-visible:ring-2 focus-visible:ring-ink-900/25 transition-transform"
+                              style={{ backgroundColor: hex }}
+                              onClick={() => {
+                                applyPreviewTextColorHex(hex);
+                                setColorMenuOpen(false);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-2 border-t border-ink-900/10 pt-2">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="w-full rounded px-2 py-1.5 text-left text-xs font-medium text-ink-700 hover:bg-ink-900/8"
+                        onClick={() => {
+                          setColorMenuOpen(false);
+                          previewTextColorCustomInputRef.current?.click();
+                        }}
+                      >
+                        Custom color…
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {visualTool === "text" && (
               <div className="relative" ref={alignMenuRef}>
                 <button
