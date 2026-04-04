@@ -37,3 +37,14 @@ python scripts/export_task_sessions.py --session-id <uuid> -o session.json
 python scripts/export_task_sessions.py --format weight -o out_weight.json
 
 Output: with `--session-id`, one session object; when exporting all sessions, a JSON array of session objects (same structure as in the script docstring).
+```
+
+## induce.py
+
+Standalone Python 3 script (stdlib only) to extract memories and skills from session JSON (e.g. ``out.json``).
+
+**Usage:**
+
+```bash
+python scripts/induce.py --data_path out.json --output_dir "."
+```
