@@ -23,11 +23,7 @@ import {
   syncAppSkills,
   isValidFlatSkillMdFileName,
 } from "./libs/skill-store.js";
-import {
-  runExportAndExtractContext,
-  runFullSessionExportAndExtract,
-  setContextInductionNotifier,
-} from "./libs/context-export.js";
+import { runFullSessionExportAndExtract, setContextInductionNotifier } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
 import { buildExportEnvironmentSnapshot, shouldWriteSnapshotForSdkMessage } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
@@ -215,7 +211,7 @@ async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Pr
   }
 }
 
-function runPostSolverExport(sessionId: string, nodeId: string): void {
+function runPostSolverExport(sessionId: string, _nodeId: string): void {
   const store = initializeSessions();
   const session = store.getSession(sessionId);
   if (!session) return;
@@ -224,8 +220,6 @@ function runPostSolverExport(sessionId: string, nodeId: string): void {
   const planFullyDone = Boolean(treeAfter?.length && treeAfter.every(isNodeFullyComplete));
   if (planFullyDone) {
     runFullSessionExportAndExtract(sessionId);
-  } else {
-    runExportAndExtractContext(sessionId, nodeId);
   }
 }
 

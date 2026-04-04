@@ -200,6 +200,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         options: {
           cwd: session.cwd ?? DEFAULT_CWD,
           settingSources: ["user", "project"],
+          maxThinkingTokens: 0,
           resume: resumeSessionId,
           resumeSessionAt,
           abortController,
