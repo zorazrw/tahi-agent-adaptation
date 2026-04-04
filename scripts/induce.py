@@ -1,7 +1,7 @@
 """
 Extract memories and skills from session JSON (e.g. ``out.json``).
 
-Accepts export shape ``{ uuid, name, trajectory }`` or ``{ sessions: [...] }``.
+Accepts export shape ``{ uuid, name, trajectory }``, a JSON array of those objects, or legacy ``{ sessions: [...] }``.
 Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 
 Requires: anthropic, python-dotenv. API key resolution matches the Electron app (see below).

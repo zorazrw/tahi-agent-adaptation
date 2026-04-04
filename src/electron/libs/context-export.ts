@@ -86,74 +86,9 @@ function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<v
 }
 
 /**
- * Export one workflow node to userData/tasks/{taskUnitId}.json, then run induce.py.
- * Includes all workflow levels so --task-unit-id matches nodes solved in detail mode.
- * Export JSON shape: `{ uuid, name, trajectory }` where each step has
- * `actor` ("user" | "agent"), `action` (e.g. tools, `message`, `verify`, `edit_workflow()`, `edit_verifier()`),
- * optional `tool_result`, and `environment` when present — always `workflow` + `file` arrays (same shape for every step).
- */
-export function runExportAndExtractContext(sessionId: string, taskUnitId: string): void {
-  const root = scriptsRootDir();
-  if (!root) {
-    logLine("Skip: scripts/ not found (dev: open repo root; packaged: extraResources).");
-    return;
-  }
-  const exportScript = join(root, "export_task_sessions.py");
-  const induceScript = join(root, "induce.py");
-  if (!existsSync(exportScript) || !existsSync(induceScript)) {
-    logLine(`Skip: missing export or induce script under ${root}`);
-    return;
-  }
-
-  const userData = app.getPath("userData");
-  const dbPath = join(userData, "sessions.db");
-  const tasksDir = join(userData, "tasks");
-  const taskJsonPath = join(tasksDir, `${taskUnitId}.json`);
-  if (!existsSync(dbPath)) {
-    logLine("Skip: sessions.db missing.");
-    return;
-  }
-  mkdirSync(tasksDir, { recursive: true });
-
-  const py = pythonExecutable();
-  enqueueSessionExport(sessionId, () =>
-    inductionWrap(sessionId, async () => {
-      logLine(`export_task_sessions session=${sessionId} taskUnit=${taskUnitId}`);
-      const exportProc = spawn(
-        py,
-        [
-          exportScript,
-          "--db",
-          dbPath,
-          "--session-id",
-          sessionId,
-          "--tasks-dir",
-          tasksDir,
-          "--task-unit-id",
-          taskUnitId,
-          "--granularity",
-          "all",
-          "--pretty",
-        ],
-        { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
-      );
-      await spawnClosed(exportProc, "export_task_sessions");
-      logLine("induce.py starting (per-unit)");
-      const induceProc = spawn(
-        py,
-        [induceScript, "--data_path", taskJsonPath, "--output_dir", userData],
-        { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
-      );
-      await spawnClosed(induceProc, "induce.py");
-      logLine("induce.py finished OK (per-unit)");
-    })
-  );
-}
-
-/**
- * When every workflow step is done, export the full session once (all task units) and run induce.py.
+ * When every workflow step is done, export the full session once and run induce.py.
  * Queued after any prior per-step jobs so the DB holds the complete trajectory.
- * Full-session file uses the same `{ uuid, name, trajectory }` schema (all units in one trajectory).
+ * Full-session file uses the same `{ uuid, name, trajectory }` schema (full trajectory in one object).
  */
 export function runFullSessionExportAndExtract(sessionId: string): void {
   const root = scriptsRootDir();
@@ -190,9 +125,6 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
           dbPath,
           "--session-id",
           sessionId,
-          "--granularity",
-          "all",
-          "--pretty",
           "--output",
           fullJsonPath,
         ],

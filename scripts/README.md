@@ -19,15 +19,13 @@ Standalone Python 3 script (stdlib only) to export task sessions from the Agent 
 | `--format` | Output | Use case |
 |------------|--------|----------|
 | `default` (default) | Human-readable action trajectory (`actor`, `action`, `environment`) | Context export pipeline |
-| `weight-based` | Raw SDK messages split into `task_units` with `agent_trajectory`, `human_trajectory`, `verifiers`, `prompt_first_turn` | DPO / OPSD / RL training (`scripts/weight/`) |
+| `weight` | Raw SDK messages split into `task_units` with `agent_trajectory`, `human_trajectory`, `verifiers`, `prompt_first_turn` | DPO / OPSD / RL training (`scripts/weight/`) |
 
 **Usage:**
 
-Use the `code` conda env if you have it: `conda activate code`
-
 ```bash
 # Default DB path (e.g. macOS: ~/Library/Application Support/Agent Cowork/sessions.db)
-python scripts/export_task_sessions.py --pretty
+python scripts/export_task_sessions.py
 
 # Custom DB path
 python scripts/export_task_sessions.py --db /path/to/sessions.db -o out.json
@@ -35,14 +33,7 @@ python scripts/export_task_sessions.py --db /path/to/sessions.db -o out.json
 # Single session
 python scripts/export_task_sessions.py --session-id <uuid> -o session.json
 
-# Override via env
-AGENT_COWORK_DB=/path/to/sessions.db python scripts/export_task_sessions.py -o out.json
-
 # Weight-based export (for training; see Formats table above)
-python scripts/export_task_sessions.py --format weight-based -o out_weight.json
+python scripts/export_task_sessions.py --format weight -o out_weight.json
 
-# Weight-based, single session + custom DB
-python scripts/export_task_sessions.py --db /path/to/sessions.db --session-id <uuid> --format weight-based -o out.json
-```
-
-Output: one JSON object per session (or `{"sessions": [...]}` when exporting all), with the structure described in the script docstring.
+Output: with `--session-id`, one session object; when exporting all sessions, a JSON array of session objects (same structure as in the script docstring).

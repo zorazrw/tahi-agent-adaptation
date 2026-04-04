@@ -47,7 +47,7 @@ Formats
   Human-readable action trajectory. Each step has actor, action, tool_result, and environment.
   Used by the existing context-export pipeline.
 
---format weight-based
+--format weight
   Raw SDK messages + human actions for training. Each session is split into task_units
   (one planning unit + one per workflow node). Each unit has:
     prompt_first_turn   : full prompt sent to the LM for the first turn (memoryPrefix included
@@ -60,10 +60,7 @@ Formats
 Usage:
   conda activate code   # optional: use "code" env
   python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
-    [--format {default,weight-based}] \\
-    [--tasks-dir DIR [--task-unit-id NODE_UUID]] [--granularity {all,automation,control}]
-  # Per-task files: --tasks-dir requires --session-id. Each task unit is written as tasks/{unit-id}.json
-  # (unit id is the workflow node id, a UUID). With --task-unit-id, only that file is updated.
+    [--format {default,weight}]
   # Use AGENT_COWORK_DB to override DB path:
   AGENT_COWORK_DB=/path/to/sessions.db python export_task_sessions.py
 """
@@ -74,7 +71,7 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Cap per-file inlined content to keep exports bounded (bytes).
 MAX_OUTPUT_FILE_BYTES = 500_000
@@ -804,106 +801,6 @@ def build_full_session_trajectory(
     return traj
 
 
-def build_slice_trajectory(
-    msgs: List[dict],
-    cwd_val: Optional[str],
-    workflow_tree: Any,
-    steps: list,
-    output_files: list,
-    verification_criteria: list,
-    verifier_marks: list,
-) -> List[dict]:
-    """Messages for one workflow node run, in order, with final session environment."""
-    final_env = build_environment_state(
-        cwd_val,
-        workflow_tree,
-        steps,
-        output_files,
-        verification_criteria,
-        verifier_marks,
-        include_files=True,
-    )
-    msgs = _merge_partial_assistant_messages(msgs)
-
-    traj: List[dict] = []
-    idx = 0
-    while idx < len(msgs):
-        m = msgs[idx]
-        if m.get("type") == "verifier_label":
-            step_env, _snap = environment_for_norm(m, final_env)
-            nid_raw = m.get("nodeId", "")
-            nid = str(nid_raw) if nid_raw is not None else ""
-            act = f"verify({json.dumps(nid, ensure_ascii=False)})"
-            traj.append(trajectory_row("agent", act, step_env))
-            idx += 1
-            continue
-
-        if m.get("role") == "user":
-            if m.get("type") == "user_prompt" and is_backend_node_user_prompt(m.get("prompt")):
-                idx += 1
-                continue
-            if m.get("type") == "edit_workflow":
-                step_env, _snap = environment_for_norm(m, final_env)
-                traj.append(trajectory_row("user", "edit_workflow()", step_env))
-                idx += 1
-                continue
-            if m.get("type") == "edit_verifier":
-                step_env, _snap = environment_for_norm(m, final_env)
-                traj.append(trajectory_row("user", "edit_verifier()", step_env))
-                idx += 1
-                continue
-            if m.get("type") == "file_edit":
-                step_env, _snap = environment_for_norm(m, final_env)
-                p_raw = m.get("path", "")
-                p = str(p_raw) if p_raw is not None else ""
-                act = f"file_edit({json.dumps(p, ensure_ascii=False)})"
-                traj.append(trajectory_row("user", act, step_env))
-                idx += 1
-                continue
-            u_env, _u_snap = environment_for_norm(m, final_env)
-            traj.append(trajectory_row("user", describe_human_action(m), u_env))
-        elif m.get("role") == "agent":
-            action, extra = agent_export_action(msgs, idx)
-            consume = 1 + extra
-            merged_tool: Optional[str] = None
-            if _assistant_message_has_tool_use(m):
-                expected_ids = _assistant_tool_use_ids(m)
-                tr_parts: List[str] = []
-                scan = idx + consume
-                while scan < len(msgs) and expected_ids:
-                    if not is_tool_result_message(msgs[scan]):
-                        break
-                    rids = _tool_result_message_ids(msgs[scan])
-                    if not rids or not rids.issubset(expected_ids):
-                        break
-                    tr_raw = msgs[scan].get("raw")
-                    if isinstance(tr_raw, dict):
-                        tr_parts.append(_tool_result_blob(tr_raw))
-                    expected_ids -= rids
-                    consume += 1
-                    scan += 1
-                if tr_parts:
-                    merged_tool = "\n\n".join(p for p in tr_parts if p and p != "(empty)") or "(empty)"
-            env_idx = min(idx + consume - 1, len(msgs) - 1) if (extra == 1 or merged_tool is not None) else idx
-            step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
-            traj.append(
-                trajectory_row(
-                    "agent",
-                    action,
-                    step_env,
-                    tool_result=merged_tool,
-                )
-            )
-            idx += consume
-            continue
-        else:
-            traj.append(
-                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], final_env)
-            )
-        idx += 1
-    return traj
-
-
 def extract_initial_task_instruction(action_trajectory: List[dict], fallback: str) -> str:
     for m in action_trajectory:
         if m.get("role") == "user" and m.get("type") == "user_prompt":
@@ -912,46 +809,6 @@ def extract_initial_task_instruction(action_trajectory: List[dict], fallback: st
                 continue
             return (prompt if isinstance(prompt, str) else "") or fallback or ""
     return fallback or ""
-
-
-Granularity = Literal["all", "automation", "control"]
-
-
-def flatten_workflow_tree(tree: Any, granularity: Granularity) -> List[dict]:
-    """
-    Flatten stored workflow_tree (WorkflowNode[]) into a stable list.
-
-    Expected node shape (from UI):
-      { id, description, outputFiles, verifiers, verifierMarks, children, ... }
-    """
-    if not isinstance(tree, list):
-        return []
-
-    out: List[dict] = []
-
-    def include_node(node: dict) -> bool:
-        if granularity == "all":
-            return True
-        depth = node.get("depth")
-        if not isinstance(depth, int):
-            return False
-        if granularity == "automation":
-            return depth == 0
-        # control
-        return depth > 0
-
-    def walk(nodes: Any) -> None:
-        if not isinstance(nodes, list):
-            return
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            if include_node(n):
-                out.append(n)
-            walk(n.get("children"))
-
-    walk(tree)
-    return out
 
 
 def iter_workflow_nodes_with_path(tree: Any) -> List[tuple[str, dict]]:
@@ -975,92 +832,6 @@ def iter_workflow_nodes_with_path(tree: Any) -> List[tuple[str, dict]]:
 
     walk(tree, [])
     return out
-
-
-def segment_trajectory_by_resume_points(action_trajectory: List[dict], workflow_tree: Any) -> dict[str, List[dict]]:
-    """
-    Segment the session message stream into per-node slices using each node's resumePoint.uuid.
-
-    In the app, node-solving prompts are broadcast to the UI but not persisted; however, each node
-    stores resumePoint.uuid as the last SDK assistant UUID before the node run starts. We can use
-    those UUIDs as stable boundaries in the persisted message log.
-
-    Returns mapping: node_id -> list of normalized trajectory messages (slice for that node run).
-    """
-    # Index assistant UUID -> trajectory index
-    uuid_to_index: dict[str, int] = {}
-    for i, m in enumerate(action_trajectory):
-        if m.get("role") != "agent":
-            continue
-        raw = m.get("raw")
-        if not isinstance(raw, dict):
-            continue
-        u = raw.get("uuid")
-        if isinstance(u, str):
-            uuid_to_index[u] = i
-
-    # Collect (start_index, node_id) for nodes with resumePoint.uuid
-    starts: List[tuple[int, str]] = []
-    for _, node in iter_workflow_nodes_with_path(workflow_tree):
-        node_id = node.get("id")
-        if not isinstance(node_id, str):
-            continue
-        rp = node.get("resumePoint")
-        if not isinstance(rp, dict):
-            continue
-        u = rp.get("uuid")
-        if not isinstance(u, str):
-            continue
-        idx = uuid_to_index.get(u)
-        if idx is None:
-            continue
-        starts.append((idx + 1, node_id))
-
-    # Order by occurrence in trajectory; build slices between boundaries
-    starts.sort(key=lambda x: x[0])
-    node_to_slice: dict[str, List[dict]] = {}
-    for i, (start_i, node_id) in enumerate(starts):
-        end_i = starts[i + 1][0] if i + 1 < len(starts) else len(action_trajectory)
-        node_to_slice[node_id] = action_trajectory[start_i:end_i]
-    return node_to_slice
-
-
-def segment_trajectory_by_persisted_node_prompts(action_trajectory: List[dict], workflow_tree: Any) -> dict[str, List[dict]]:
-    """
-    Segment by persisted node-solving prompts (preferred when available).
-
-    After a node solve starts, the app emits a `user_prompt` containing the nodePrompt built from:
-      buildPromptForNode(node.description, pathContext, ...)
-    We can recover the node by matching the pathContext, which is the first line: "Proceed with: {path}".
-    """
-    path_nodes = iter_workflow_nodes_with_path(workflow_tree)
-    path_to_node_id: dict[str, str] = {}
-    for path, node in path_nodes:
-        node_id = node.get("id")
-        if isinstance(node_id, str) and path:
-            path_to_node_id[path] = node_id
-
-    runs: List[tuple[int, str]] = []
-    for i, m in enumerate(action_trajectory):
-        if m.get("role") != "user" or m.get("type") != "user_prompt":
-            continue
-        prompt = m.get("prompt", "")
-        if not isinstance(prompt, str) or not prompt.startswith("Proceed with: "):
-            continue
-        first_line = prompt.splitlines()[0]
-        path = first_line.removeprefix("Proceed with: ").strip()
-        node_id = path_to_node_id.get(path)
-        if node_id:
-            runs.append((i, node_id))
-
-    if not runs:
-        return {}
-
-    node_to_slice: dict[str, List[dict]] = {}
-    for idx, (start_i, node_id) in enumerate(runs):
-        end_i = runs[idx + 1][0] if idx + 1 < len(runs) else len(action_trajectory)
-        node_to_slice[node_id] = action_trajectory[start_i:end_i]
-    return node_to_slice
 
 
 def normalize_message(msg: dict) -> dict:
@@ -1107,9 +878,7 @@ def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:
     return [msg for msg in trajectory if not _is_export_noise_message(msg)]
 
 
-def extract_session(
-    cursor: sqlite3.Cursor, session_id: str, granularity: Granularity
-) -> Optional[Tuple[dict, List[dict]]]:
+def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
     row = cursor.execute(
         """SELECT id, title, last_prompt, workflow_tree, steps, output_files, verification_criteria, verifier_marks,
                   completed_step_indices, status, cwd, created_at, updated_at
@@ -1156,9 +925,6 @@ def extract_session(
     action_trajectory = filter_out_stream_events(action_trajectory)
 
     initial_task_instruction = extract_initial_task_instruction(action_trajectory, last_prompt or "")
-    node_id_to_segment = segment_trajectory_by_persisted_node_prompts(action_trajectory, workflow_tree)
-    if not node_id_to_segment:
-        node_id_to_segment = segment_trajectory_by_resume_points(action_trajectory, workflow_tree)
 
     cwd_val = cwd if isinstance(cwd, str) and cwd.strip() else None
     full_traj = build_full_session_trajectory(
@@ -1172,69 +938,11 @@ def extract_session(
         verifier_marks,
     )
 
-    public: dict = {
+    return {
         "uuid": sid,
         "name": title or "",
         "trajectory": full_traj,
     }
-
-    unit_payloads: List[dict] = []
-    tree_nodes = flatten_workflow_tree(workflow_tree, granularity)
-    if tree_nodes:
-        for node in tree_nodes:
-            node_id = node.get("id") if isinstance(node.get("id"), str) else None
-            if not node_id:
-                continue
-            segment = node_id_to_segment.get(node_id, [])
-            intent = str(node.get("description") or "")
-            ut = build_slice_trajectory(
-                segment,
-                cwd_val,
-                workflow_tree,
-                steps,
-                output_files,
-                verification_criteria,
-                verifier_marks,
-            )
-            display_name = f"{title} — {intent}" if title else intent
-            unit_payloads.append({"uuid": node_id, "name": display_name, "trajectory": ut})
-    else:
-        # Legacy fallback: flat steps grid columns
-        if granularity in ("all", "automation"):
-            workflow_steps = build_workflow_steps(steps, output_files, verification_criteria, verifier_marks)
-            for i, step in enumerate(workflow_steps):
-                step_idx = step.get("step_index", i)
-                unit_id = f"{sid}-step-{step_idx}"
-                intent = step.get("step_description", "")
-                display_name = f"{title} — {intent}" if title else str(intent)
-                unit_payloads.append({"uuid": unit_id, "name": display_name, "trajectory": []})
-
-    return public, unit_payloads
-
-
-def write_session_to_tasks_dir(
-    unit_payloads: List[dict],
-    tasks_dir: Path,
-    *,
-    only_unit_id: Optional[str] = None,
-    pretty: bool = False,
-) -> int:
-    """Write each unit payload to ``tasks_dir / f\"{uuid}.json\"``."""
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    written = 0
-    for payload in unit_payloads:
-        uid = payload.get("uuid")
-        if not isinstance(uid, str) or not uid:
-            continue
-        if only_unit_id is not None and uid != only_unit_id:
-            continue
-        path = tasks_dir / f"{uid}.json"
-        body = json.dumps(payload, indent=2 if pretty else None, ensure_ascii=False)
-        if not body.endswith("\n"):
-            body += "\n"
-        path.write_text(body, encoding="utf-8")
-        written += 1
-    return written
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1812,55 +1520,37 @@ def build_weight_based_session(
     }
 
 
-def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> dict:
+def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> List[dict]:
     rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
     sessions = []
     for (session_id,) in rows:
         sess = build_weight_based_session(cursor, session_id)
         if sess:
             sessions.append(sess)
-    return {"sessions": sessions}
+    return sessions
 
 
-def extract_all_sessions(cursor: sqlite3.Cursor, granularity: Granularity) -> List[dict]:
+def extract_all_sessions(cursor: sqlite3.Cursor) -> List[dict]:
     rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
     out = []
     for (session_id,) in rows:
-        sess = extract_session(cursor, session_id, granularity)
+        sess = extract_session(cursor, session_id)
         if sess:
-            out.append(sess[0])
+            out.append(sess)
     return out
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export Agent Cowork task sessions to JSON")
     parser.add_argument("--db", type=Path, help="Path to sessions.db (default: Electron userData location)")
-    parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout). Ignored if --tasks-dir is set.")
-    parser.add_argument(
-        "--tasks-dir",
-        type=Path,
-        help="Write one file per task unit: {unit-id}.json (requires --session-id). Use --task-unit-id to update only one file.",
-    )
-    parser.add_argument(
-        "--task-unit-id",
-        type=str,
-        help="With --tasks-dir, only write/update this task unit's JSON (workflow node id / unit id).",
-    )
+    parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout)")
     parser.add_argument("--session-id", type=str, help="Export only this session ID")
-    parser.add_argument(
-        "--granularity",
-        type=str,
-        choices=["all", "automation", "control"],
-        default="automation",
-        help='Which workflow level to export from workflow_tree: "automation" (depth=0), "control" (depth>0), or "all".',
-    )
-    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     parser.add_argument(
         "--format",
         type=str,
-        choices=["default", "weight-based"],
+        choices=["default", "weight"],
         default="default",
-        help='Export format: "default" (human-readable trajectory) or "weight-based" (raw SDK messages + human_trajectory for training).',
+        help='Export format: "default" (human-readable trajectory) or "weight" (raw SDK messages + human_trajectory for training).',
     )
     args = parser.parse_args()
 
@@ -1878,66 +1568,38 @@ def main() -> int:
     cursor = conn.cursor()
 
     try:
-        if args.format == "weight-based":
+        if args.format == "weight":
             if args.session_id:
-                payload = build_weight_based_session(cursor, args.session_id)
-                if not payload:
+                sess = build_weight_based_session(cursor, args.session_id)
+                if not sess:
                     print(f"Error: session not found: {args.session_id}", file=sys.stderr)
                     return 1
-                payload = {"sessions": [payload]}
+                payload = [sess]
             else:
                 payload = extract_all_sessions_weight_based(cursor)
-            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
+            json_str = json.dumps(payload, indent=2, ensure_ascii=False)
             if args.output:
                 args.output.write_text(json_str + "\n", encoding="utf-8")
-                n_units = sum(len(s.get("task_units", [])) for s in payload.get("sessions", []))
-                print(f"Wrote {args.output} ({len(payload.get('sessions', []))} sessions, {n_units} task_units)", file=sys.stderr)
+                n_units = sum(len(s.get("task_units", [])) for s in payload)
+                print(f"Wrote {args.output} ({len(payload)} sessions, {n_units} task_units)", file=sys.stderr)
             else:
                 print(json_str)
             return 0
 
-        if args.tasks_dir:
-            if not args.session_id:
-                print("Error: --tasks-dir requires --session-id", file=sys.stderr)
-                return 1
-            packed = extract_session(cursor, args.session_id, args.granularity)
-            if not packed:
+        if args.session_id:
+            payload = extract_session(cursor, args.session_id)
+            if not payload:
                 print(f"Error: session not found: {args.session_id}", file=sys.stderr)
                 return 1
-            _public, unit_payloads = packed
-            n = write_session_to_tasks_dir(
-                unit_payloads,
-                args.tasks_dir,
-                only_unit_id=args.task_unit_id,
-                pretty=args.pretty,
-            )
-            if args.task_unit_id and n == 0:
-                print(
-                    f"Error: no task unit with id {args.task_unit_id!r} in this session export",
-                    file=sys.stderr,
-                )
-                return 1
-            print(f"Wrote {n} task file(s) under {args.tasks_dir}", file=sys.stderr)
-        elif args.session_id:
-            packed = extract_session(cursor, args.session_id, args.granularity)
-            if not packed:
-                print(f"Error: session not found: {args.session_id}", file=sys.stderr)
-                return 1
-            payload, _units = packed
-            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
-            if args.output:
-                args.output.write_text(json_str, encoding="utf-8")
-                print(f"Wrote {args.output}", file=sys.stderr)
-            else:
-                print(json_str)
         else:
-            payload = {"sessions": extract_all_sessions(cursor, args.granularity)}
-            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
-            if args.output:
-                args.output.write_text(json_str, encoding="utf-8")
-                print(f"Wrote {args.output}", file=sys.stderr)
-            else:
-                print(json_str)
+            payload = extract_all_sessions(cursor)
+
+        json_str = json.dumps(payload, indent=2, ensure_ascii=False)
+        if args.output:
+            args.output.write_text(json_str + "\n", encoding="utf-8")
+            print(f"Wrote {args.output}", file=sys.stderr)
+        else:
+            print(json_str)
     finally:
         conn.close()
 
