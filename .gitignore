@@ -33,3 +33,4 @@ scripts/test_sessions.db
 
 # Local test files
 trash/*
+**/__pycache__/
