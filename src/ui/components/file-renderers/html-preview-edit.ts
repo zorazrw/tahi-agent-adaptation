@@ -4,25 +4,316 @@ export type HtmlDocCleanup = () => void;
 
 const MOVE_STYLE_ID = "__ac-html-move-injected";
 
-export function serializeIframeDocument(doc: Document): string {
-  const injected = doc.getElementById(MOVE_STYLE_ID);
-  const parent = injected?.parentNode ?? null;
-  const next = injected?.nextSibling ?? null;
-  injected?.remove();
-  try {
-    const dt = doc.doctype;
-    let preamble = "";
-    if (dt) {
-      const pub = dt.publicId ? ` PUBLIC "${dt.publicId}"` : "";
-      const sys = dt.systemId ? ` "${dt.systemId}"` : "";
-      preamble = `<!DOCTYPE ${dt.name}${pub}${sys}>\n`;
-    }
-    return preamble + (doc.documentElement?.outerHTML ?? "");
-  } finally {
-    if (injected && parent) {
-      parent.insertBefore(injected, next);
+/** User-placed shapes in Move mode (serialized with the saved HTML). */
+export type PreviewShapeKind = "rectangle" | "circle" | "line";
+
+const PREVIEW_SHAPE_CLASS = "ac-preview-shape";
+const PREVIEW_SHAPE_INNER_CLASS = "ac-preview-shape-inner";
+const PREVIEW_SHAPE_CHROME_CLASS = "ac-preview-shape-chrome";
+const PREVIEW_SHAPE_SELECTED_CLASS = "ac-preview-shape--selected";
+const LAYOUT_BLOCK_SELECTED_CLASS = "ac-preview-layout-selected";
+
+const NON_DELETABLE_LAYOUT_TAGS = new Set([
+  "HTML",
+  "BODY",
+  "HEAD",
+  "SCRIPT",
+  "STYLE",
+  "LINK",
+  "META",
+  "BASE",
+  "TITLE",
+  "NOSCRIPT",
+  "TEMPLATE",
+]);
+
+/** App ink tokens (see ``index.css``); iframe has no Tailwind, so use fixed neutrals. */
+const SHAPE_INK_STROKE = "#666661";
+const SHAPE_INK_FILL = "rgba(102, 102, 97, 0.08)";
+
+function getShapeInner(wrap: HTMLElement): HTMLElement | null {
+  return wrap.querySelector(`:scope > .${PREVIEW_SHAPE_INNER_CLASS}`) as HTMLElement | null;
+}
+
+function getLineBar(inner: HTMLElement): HTMLElement | null {
+  const ch = inner.firstElementChild;
+  return ch instanceof HTMLElement && ch.tagName === "DIV" ? ch : null;
+}
+
+function getShapeBodyElement(wrap: HTMLElement): HTMLElement | null {
+  const named = getShapeInner(wrap);
+  if (named) return named;
+  for (const c of wrap.children) {
+    if (!(c instanceof HTMLElement)) continue;
+    if (c.classList.contains(PREVIEW_SHAPE_CHROME_CLASS)) continue;
+    return c;
+  }
+  return null;
+}
+
+/**
+ * SE corner resize zone (viewport coords). Slop scales with shape size so tiny shapes are not 100% “resize”.
+ */
+function isPointerInSeResizeZone(inner: HTMLElement, clientX: number, clientY: number): boolean {
+  const r = inner.getBoundingClientRect();
+  const w = Math.max(1, r.width);
+  const h = Math.max(1, r.height);
+  const sx = Math.min(40, Math.max(16, w * 0.28));
+  const sy = Math.min(40, Math.max(16, h * 0.28));
+  return (
+    clientX >= r.right - sx &&
+    clientX <= r.right + 12 &&
+    clientY >= r.bottom - sy &&
+    clientY <= r.bottom + 12
+  );
+}
+
+/**
+ * Remove ephemeral shape UI from a detached DOM subtree (used when serializing a clone).
+ */
+function stripEphemeralPreviewUiFromSubtree(root: ParentNode): void {
+  root.querySelectorAll(`.${PREVIEW_SHAPE_CHROME_CLASS}`).forEach((el) => el.remove());
+  root.querySelectorAll(`.${PREVIEW_SHAPE_SELECTED_CLASS}`).forEach((el) =>
+    el.classList.remove(PREVIEW_SHAPE_SELECTED_CLASS)
+  );
+  root.querySelectorAll(`.${LAYOUT_BLOCK_SELECTED_CLASS}`).forEach((el) =>
+    el.classList.remove(LAYOUT_BLOCK_SELECTED_CLASS)
+  );
+}
+
+function isDeletableLayoutBlock(el: HTMLElement): boolean {
+  const tag = el.tagName.toUpperCase();
+  if (NON_DELETABLE_LAYOUT_TAGS.has(tag)) return false;
+  if (!el.parentElement) return false;
+  return true;
+}
+
+function clearLayoutBlockSelection(doc: Document): void {
+  doc.querySelectorAll(`.${LAYOUT_BLOCK_SELECTED_CLASS}`).forEach((n) => n.classList.remove(LAYOUT_BLOCK_SELECTED_CLASS));
+}
+
+function selectLayoutBlock(doc: Document, el: HTMLElement): void {
+  if (!isDeletableLayoutBlock(el)) return;
+  clearLayoutBlockSelection(doc);
+  el.classList.add(LAYOUT_BLOCK_SELECTED_CLASS);
+}
+
+/**
+ * Delete controls + selection from the live document (e.g. when leaving Move mode).
+ */
+export function stripPreviewShapeEditorUi(doc: Document): void {
+  stripEphemeralPreviewUiFromSubtree(doc);
+}
+
+/** Forward-delete / Backspace—covers layout labels and ``code`` for embedded iframes / macOS. */
+export function isDeleteOrBackspaceKey(e: KeyboardEvent): boolean {
+  return (
+    e.key === "Delete" ||
+    e.key === "Backspace" ||
+    e.code === "Delete" ||
+    e.code === "Backspace"
+  );
+}
+
+/** If a preview shape is selected, remove it and clear selection. */
+export function tryDeleteSelectedPreviewShape(doc: Document | null | undefined): boolean {
+  if (!doc) return false;
+  const sel = doc.querySelector(`.${PREVIEW_SHAPE_SELECTED_CLASS}`) as HTMLElement | null;
+  if (!sel?.classList.contains(PREVIEW_SHAPE_CLASS)) return false;
+  sel.remove();
+  selectPreviewShape(doc, null);
+  return true;
+}
+
+function tryDeleteSelectedLayoutBlock(doc: Document | null | undefined): boolean {
+  if (!doc) return false;
+  const el = doc.querySelector(`.${LAYOUT_BLOCK_SELECTED_CLASS}`) as HTMLElement | null;
+  if (!el || !isDeletableLayoutBlock(el)) return false;
+  el.remove();
+  clearLayoutBlockSelection(doc);
+  return true;
+}
+
+/** Shape removal first, then LM layout block marked for delete in Move mode. */
+export function tryDeleteSelectedPreviewOrLayoutBlock(doc: Document | null | undefined): boolean {
+  if (tryDeleteSelectedPreviewShape(doc)) return true;
+  return tryDeleteSelectedLayoutBlock(doc);
+}
+
+/**
+ * Attach one delete control + SE resize handle per shape (idempotent).
+ */
+export function mountPreviewShapeChrome(doc: Document, wrap: HTMLElement): void {
+  let inner = getShapeInner(wrap);
+  if (!inner) {
+    const first = wrap.firstElementChild;
+    if (!(first instanceof HTMLElement)) return;
+    if (first.classList.contains(PREVIEW_SHAPE_CHROME_CLASS)) return;
+    inner = first;
+    inner.classList.add(PREVIEW_SHAPE_INNER_CLASS);
+  }
+
+  inner.style.position = "relative";
+  inner.style.overflow = "visible";
+  wrap.style.overflow = "visible";
+
+  if (!wrap.querySelector(".ac-preview-shape-delete")) {
+    const del = doc.createElement("button");
+    del.type = "button";
+    del.className = `${PREVIEW_SHAPE_CHROME_CLASS} ac-preview-shape-delete`;
+    del.setAttribute("aria-label", "Remove shape");
+    del.textContent = "×";
+    del.style.cssText = [
+      "position:absolute",
+      "top:-10px",
+      "right:-10px",
+      "width:22px",
+      "height:22px",
+      "padding:0",
+      "line-height:20px",
+      "font-size:16px",
+      "font-weight:600",
+      "border-radius:9999px",
+      `border:1px solid ${SHAPE_INK_STROKE}`,
+      "background:#fff",
+      "color:#2d2d2a",
+      "cursor:pointer",
+      "z-index:10004",
+      "box-sizing:border-box",
+    ].join(";");
+    wrap.appendChild(del);
+  }
+
+  if (!inner.querySelector(".ac-preview-shape-handle")) {
+    const handle = doc.createElement("div");
+    handle.className = `${PREVIEW_SHAPE_CHROME_CLASS} ac-preview-shape-handle ac-preview-shape-handle--se`;
+    handle.dataset.handle = "se";
+    /** Inside inner so parent ``overflow:hidden`` on body/slides does not clip; sits on the corner. */
+    handle.style.cssText = [
+      "position:absolute",
+      "right:2px",
+      "bottom:2px",
+      "width:16px",
+      "height:16px",
+      "box-sizing:border-box",
+      `border:1px solid ${SHAPE_INK_STROKE}`,
+      "background:#fff",
+      "z-index:5",
+      "cursor:nwse-resize",
+      "touch-action:none",
+      "box-shadow:0 0 0 1px rgba(255,255,255,0.9)",
+    ].join(";");
+    inner.appendChild(handle);
+  }
+}
+
+/** After load / new insert: ensure every shape has interaction chrome. */
+export function mountAllPreviewShapeChrome(doc: Document): void {
+  doc.querySelectorAll(`.${PREVIEW_SHAPE_CLASS}`).forEach((el) => {
+    if (el instanceof HTMLElement) mountPreviewShapeChrome(doc, el);
+  });
+}
+
+function selectPreviewShape(doc: Document, wrap: HTMLElement | null, opts?: { focus?: boolean }): void {
+  clearLayoutBlockSelection(doc);
+  const doFocus = opts?.focus !== false;
+  doc.querySelectorAll(`.${PREVIEW_SHAPE_CLASS}`).forEach((el) => {
+    if (!(el instanceof HTMLElement)) return;
+    el.classList.remove(PREVIEW_SHAPE_SELECTED_CLASS);
+    el.removeAttribute("tabindex");
+  });
+  if (wrap) {
+    wrap.classList.add(PREVIEW_SHAPE_SELECTED_CLASS);
+    if (doFocus) {
+      wrap.setAttribute("tabindex", "-1");
+      try {
+        wrap.focus({ preventScroll: true });
+      } catch {
+        /* ignore */
+      }
     }
   }
+}
+
+export function insertPreviewShape(doc: Document, kind: PreviewShapeKind): void {
+  const body = doc.body;
+  if (!body) return;
+
+  const n = body.querySelectorAll(`.${PREVIEW_SHAPE_CLASS}`).length;
+  const left = 40 + (n % 6) * 28;
+  const top = 40 + (n % 6) * 28;
+
+  const wrap = doc.createElement("div");
+  wrap.className = PREVIEW_SHAPE_CLASS;
+  wrap.setAttribute("data-ac-shape", kind);
+  wrap.style.cssText = [
+    "position:fixed",
+    `left:${left}px`,
+    `top:${top}px`,
+    "z-index:10000",
+    "pointer-events:auto",
+    "box-sizing:border-box",
+    "cursor:grab",
+    "overflow:visible",
+  ].join(";");
+
+  const inner = doc.createElement("div");
+  inner.className = PREVIEW_SHAPE_INNER_CLASS;
+  inner.style.boxSizing = "border-box";
+  inner.style.position = "relative";
+  inner.style.overflow = "visible";
+
+  if (kind === "rectangle") {
+    inner.style.width = "120px";
+    inner.style.height = "72px";
+    inner.style.border = `1px solid ${SHAPE_INK_STROKE}`;
+    inner.style.background = SHAPE_INK_FILL;
+    inner.style.borderRadius = "4px";
+  } else if (kind === "circle") {
+    inner.style.width = "80px";
+    inner.style.height = "80px";
+    inner.style.border = `1px solid ${SHAPE_INK_STROKE}`;
+    inner.style.background = SHAPE_INK_FILL;
+    inner.style.borderRadius = "50%";
+  } else {
+    inner.style.width = "140px";
+    inner.style.minHeight = "20px";
+    inner.style.height = "20px";
+    inner.style.display = "flex";
+    inner.style.alignItems = "center";
+    const bar = doc.createElement("div");
+    bar.style.height = "4px";
+    bar.style.width = "100%";
+    bar.style.borderRadius = "2px";
+    bar.style.background = SHAPE_INK_STROKE;
+    bar.style.flexShrink = "0";
+    inner.appendChild(bar);
+    wrap.appendChild(inner);
+    body.appendChild(wrap);
+    mountPreviewShapeChrome(doc, wrap);
+    return;
+  }
+
+  wrap.appendChild(inner);
+  body.appendChild(wrap);
+  mountPreviewShapeChrome(doc, wrap);
+}
+
+export function serializeIframeDocument(doc: Document): string {
+  const liveRoot = doc.documentElement;
+  if (!liveRoot) return "";
+  const cloneRoot = liveRoot.cloneNode(true) as HTMLElement;
+  stripEphemeralPreviewUiFromSubtree(cloneRoot);
+  cloneRoot.querySelector(`#${MOVE_STYLE_ID}`)?.remove();
+
+  const dt = doc.doctype;
+  let preamble = "";
+  if (dt) {
+    const pub = dt.publicId ? ` PUBLIC "${dt.publicId}"` : "";
+    const sys = dt.systemId ? ` "${dt.systemId}"` : "";
+    preamble = `<!DOCTYPE ${dt.name}${pub}${sys}>\n`;
+  }
+  return preamble + cloneRoot.outerHTML;
 }
 
 function resolveDragTarget(doc: Document, target: EventTarget | null): HTMLElement | null {
@@ -104,6 +395,83 @@ function parseTranslate(el: HTMLElement): { x: number; y: number } {
   return { x: 0, y: 0 };
 }
 
+export type PreviewTextAlignH = "left" | "center" | "right" | "justify";
+export type PreviewTextAlignV = "start" | "middle" | "end";
+
+const TEXT_ALIGN_BLOCK_TAGS = new Set([
+  "P",
+  "DIV",
+  "SECTION",
+  "ARTICLE",
+  "ASIDE",
+  "MAIN",
+  "HEADER",
+  "FOOTER",
+  "NAV",
+  "BLOCKQUOTE",
+  "FIGURE",
+  "LI",
+  "TD",
+  "TH",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+]);
+
+function getDesignModeBlockElement(doc: Document): HTMLElement | null {
+  const sel = doc.getSelection();
+  if (!sel || sel.rangeCount === 0) return doc.body;
+  let node: Node | null = sel.anchorNode;
+  if (!node) return doc.body;
+  if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+  let el = node as HTMLElement | null;
+  while (el) {
+    if (el === doc.body || el === doc.documentElement) return doc.body;
+    const tag = el.tagName?.toUpperCase() ?? "";
+    if (TEXT_ALIGN_BLOCK_TAGS.has(tag)) return el;
+    el = el.parentElement;
+  }
+  return doc.body;
+}
+
+/**
+ * Apply alignment in preview Text mode (``designMode``). Horizontal uses execCommand; vertical
+ * uses flex on the current block (not ``body``).
+ */
+export function applyPreviewTextAlignment(
+  doc: Document | null | undefined,
+  axis: "h" | "v",
+  value: PreviewTextAlignH | PreviewTextAlignV
+): boolean {
+  if (!doc || doc.designMode !== "on" || !doc.body) return false;
+  try {
+    doc.body.focus();
+    if (axis === "h") {
+      const cmds: Record<PreviewTextAlignH, string> = {
+        left: "justifyLeft",
+        center: "justifyCenter",
+        right: "justifyRight",
+        justify: "justifyFull",
+      };
+      return doc.execCommand(cmds[value as PreviewTextAlignH], false);
+    }
+    const block = getDesignModeBlockElement(doc);
+    if (!block || block === doc.body || block === doc.documentElement) return false;
+    const jc =
+      value === "start" ? "flex-start" : value === "middle" ? "center" : "flex-end";
+    block.style.display = "flex";
+    block.style.flexDirection = "column";
+    block.style.justifyContent = jc;
+    if (!block.style.minHeight) block.style.minHeight = "2.5em";
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function attachHtmlTextEdit(
   doc: Document,
   onChange: () => void,
@@ -181,6 +549,27 @@ export function attachHtmlTextEdit(
   };
 }
 
+type LayoutDragState =
+  | {
+      mode: "move";
+      el: HTMLElement;
+      startX: number;
+      startY: number;
+      baseX: number;
+      baseY: number;
+    }
+  | {
+      mode: "resize";
+      wrap: HTMLElement;
+      inner: HTMLElement;
+      kind: PreviewShapeKind;
+      startX: number;
+      startY: number;
+      startW: number;
+      startH: number;
+      startBarH: number;
+    };
+
 export function attachHtmlLayoutDrag(
   doc: Document,
   onChange: () => void,
@@ -195,19 +584,38 @@ export function attachHtmlLayoutDrag(
   const style = doc.createElement("style");
   style.id = MOVE_STYLE_ID;
   style.textContent = `
-    body.layout-mode * { cursor: grab !important; }
-    body.layout-mode *:active { cursor: grabbing !important; }
     body.layout-mode { user-select: none !important; }
+    body.layout-mode *:not(.ac-preview-shape-handle):not(.ac-preview-shape-delete) {
+      cursor: grab !important;
+    }
+    body.layout-mode *:not(.ac-preview-shape-handle):not(.ac-preview-shape-delete):active {
+      cursor: grabbing !important;
+    }
+    body.layout-mode .ac-preview-shape-handle {
+      cursor: nwse-resize !important;
+      touch-action: none !important;
+    }
+    body.layout-mode .ac-preview-shape-delete {
+      cursor: pointer !important;
+    }
+    body.layout-mode .${PREVIEW_SHAPE_SELECTED_CLASS} {
+      outline: 1px solid ${SHAPE_INK_STROKE};
+      outline-offset: 1px;
+    }
+    body.layout-mode .${LAYOUT_BLOCK_SELECTED_CLASS} {
+      outline: 1px dashed ${SHAPE_INK_STROKE};
+      outline-offset: 2px;
+    }
+    body.layout-mode .${PREVIEW_SHAPE_INNER_CLASS} {
+      position: relative !important;
+      overflow: visible !important;
+    }
   `;
   doc.head?.appendChild(style);
 
-  let dragging: {
-    el: HTMLElement;
-    startX: number;
-    startY: number;
-    baseX: number;
-    baseY: number;
-  } | null = null;
+  mountAllPreviewShapeChrome(doc);
+
+  let dragging: LayoutDragState | null = null;
 
   const endDrag = () => {
     if (!dragging) return;
@@ -217,13 +625,103 @@ export function attachHtmlLayoutDrag(
 
   const onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
+    const target = e.target as Node;
+    const el = target instanceof Element ? target : target.parentElement;
+    if (!el) return;
+
+    const delBtn = el.closest(".ac-preview-shape-delete");
+    if (delBtn) {
+      const wrap = delBtn.closest(`.${PREVIEW_SHAPE_CLASS}`);
+      if (wrap) {
+        e.preventDefault();
+        e.stopPropagation();
+        wrap.remove();
+        selectPreviewShape(doc, null);
+        onChange();
+      }
+      return;
+    }
+
+    const shapeWrap = el.closest(`.${PREVIEW_SHAPE_CLASS}`) as HTMLElement | null;
+    if (shapeWrap) {
+      e.preventDefault();
+      e.stopPropagation();
+      const inner = getShapeBodyElement(shapeWrap);
+      if (!inner) return;
+
+      const handleEl = el.closest(".ac-preview-shape-handle") as HTMLElement | null;
+      const onResizeHandle = Boolean(handleEl);
+      const inCornerZone = !onResizeHandle && isPointerInSeResizeZone(inner, e.clientX, e.clientY);
+
+      if (!inner.classList.contains(PREVIEW_SHAPE_INNER_CLASS)) inner.classList.add(PREVIEW_SHAPE_INNER_CLASS);
+
+      if (onResizeHandle || inCornerZone) {
+        const kind = (shapeWrap.getAttribute("data-ac-shape") ?? "rectangle") as PreviewShapeKind;
+        const bar = kind === "line" ? getLineBar(inner) : null;
+        const cs = doc.defaultView?.getComputedStyle(inner);
+        const startW = parseFloat(inner.style.width) || parseFloat(cs?.width ?? "0") || 40;
+        const startH = parseFloat(inner.style.height) || parseFloat(cs?.height ?? "0") || 40;
+        const startBarH = bar
+          ? parseFloat(bar.style.height) || parseFloat(doc.defaultView?.getComputedStyle(bar).height ?? "4") || 4
+          : 4;
+        selectPreviewShape(doc, shapeWrap, { focus: false });
+        dragging = {
+          mode: "resize",
+          wrap: shapeWrap,
+          inner,
+          kind,
+          startX: e.clientX,
+          startY: e.clientY,
+          startW,
+          startH,
+          startBarH,
+        };
+        const captureEl = handleEl ?? inner;
+        try {
+          captureEl.setPointerCapture(e.pointerId);
+        } catch {
+          try {
+            shapeWrap.setPointerCapture(e.pointerId);
+          } catch {
+            /* ignore */
+          }
+        }
+        return;
+      }
+
+      selectPreviewShape(doc, shapeWrap);
+      const { x, y } = parseTranslate(shapeWrap);
+      dragging = {
+        mode: "move",
+        el: shapeWrap,
+        startX: e.clientX,
+        startY: e.clientY,
+        baseX: x,
+        baseY: y,
+      };
+      const pos = doc.defaultView?.getComputedStyle(shapeWrap).position;
+      if (pos === "static") shapeWrap.style.position = "relative";
+      try {
+        shapeWrap.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
+    selectPreviewShape(doc, null);
+
     const hit = resolveDragTarget(doc, e.target);
-    if (!hit) return;
+    if (!hit) {
+      clearLayoutBlockSelection(doc);
+      return;
+    }
     const he = promoteToLayoutDragRoot(doc, hit);
     e.preventDefault();
     e.stopPropagation();
+    selectLayoutBlock(doc, he);
     const { x, y } = parseTranslate(he);
-    dragging = { el: he, startX: e.clientX, startY: e.clientY, baseX: x, baseY: y };
+    dragging = { mode: "move", el: he, startX: e.clientX, startY: e.clientY, baseX: x, baseY: y };
     const pos = doc.defaultView?.getComputedStyle(he).position;
     if (pos === "static") he.style.position = "relative";
     try {
@@ -236,28 +734,72 @@ export function attachHtmlLayoutDrag(
   const onPointerMove = (e: PointerEvent) => {
     if (!dragging) return;
     e.preventDefault();
+    if (dragging.mode === "move") {
+      const dx = e.clientX - dragging.startX;
+      const dy = e.clientY - dragging.startY;
+      dragging.el.style.transform = `translate(${dragging.baseX + dx}px, ${dragging.baseY + dy}px)`;
+      return;
+    }
     const dx = e.clientX - dragging.startX;
     const dy = e.clientY - dragging.startY;
-    dragging.el.style.transform = `translate(${dragging.baseX + dx}px, ${dragging.baseY + dy}px)`;
+    const { inner, kind, startW, startH, startBarH } = dragging;
+    if (kind === "rectangle") {
+      inner.style.width = `${Math.max(32, Math.round(startW + dx))}px`;
+      inner.style.height = `${Math.max(24, Math.round(startH + dy))}px`;
+    } else if (kind === "circle") {
+      const s = Math.max(28, Math.round(startW + (dx + dy) / 2));
+      inner.style.width = `${s}px`;
+      inner.style.height = `${s}px`;
+    } else {
+      inner.style.width = `${Math.max(48, Math.round(startW + dx))}px`;
+      const bar = getLineBar(inner);
+      const bh = Math.max(2, Math.round(startBarH + dy));
+      inner.style.minHeight = `${Math.max(12, bh + 8)}px`;
+      inner.style.height = `${Math.max(12, bh + 8)}px`;
+      if (bar) {
+        bar.style.height = `${bh}px`;
+      }
+    }
   };
 
   const onPointerUp = () => {
     endDrag();
   };
 
-  doc.addEventListener("pointerdown", onPointerDown, true);
-  doc.addEventListener("pointermove", onPointerMove, true);
-  doc.addEventListener("pointerup", onPointerUp, true);
-  doc.addEventListener("pointercancel", onPointerUp, true);
+  /**
+   * Iframe ``blur`` often fires while resizing (pointer still captured) when the OS shifts
+   * focus or the pointer leaves the frame. Clearing ``dragging`` there stops ``pointermove``
+   * from applying width/height — resize appears broken.
+   */
+  const onWinBlur = () => {
+    if (dragging?.mode === "resize") return;
+    endDrag();
+  };
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (!isDeleteOrBackspaceKey(e)) return;
+    const t = e.target;
+    if (t instanceof Element && t.closest?.("input,textarea,[contenteditable=true],select")) return;
+    if (!tryDeleteSelectedPreviewOrLayoutBlock(doc)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onChange();
+  };
 
   const win = doc.defaultView;
-  win?.addEventListener("blur", endDrag);
 
-  /** Live inline `style` updates (transform, position) don’t always deliver pointerup inside the iframe in Electron when releasing outside; observe attributes instead. */
+  doc.addEventListener("pointerdown", onPointerDown, true);
+  /** Deliver move/up on the iframe window so pointer capture + leaving the frame still updates / ends the gesture. */
+  win?.addEventListener("pointermove", onPointerMove, true);
+  win?.addEventListener("pointerup", onPointerUp, true);
+  win?.addEventListener("pointercancel", onPointerUp, true);
+  win?.addEventListener("blur", onWinBlur);
+
+  /** DOM inserts (e.g. shapes) + live inline `style` updates (transform, box sizes). */
   let dirtyFlush = 0;
   const flushDirty = () => {
-    window.clearTimeout(dirtyFlush);
-    dirtyFlush = window.setTimeout(() => {
+    (win ?? window).clearTimeout(dirtyFlush);
+    dirtyFlush = (win ?? window).setTimeout(() => {
       onChange();
     }, 0);
   };
@@ -265,8 +807,9 @@ export function attachHtmlLayoutDrag(
   if (doc.documentElement) {
     attrObs.observe(doc.documentElement, {
       subtree: true,
+      childList: true,
       attributes: true,
-      attributeFilter: ["style"],
+      attributeFilter: ["style", "class"],
     });
   }
 
@@ -277,17 +820,22 @@ export function attachHtmlLayoutDrag(
     doc.addEventListener("keydown", onSaveKey, true);
   }
 
+  /** ``document`` does not always receive keys when focus is unclear; the iframe window does. */
+  win?.addEventListener("keydown", onKeyDown, true);
+
   return () => {
-    window.clearTimeout(dirtyFlush);
+    (win ?? window).clearTimeout(dirtyFlush);
     attrObs.disconnect();
     if (onSaveShortcut) {
       doc.removeEventListener("keydown", onSaveKey, true);
     }
+    win?.removeEventListener("keydown", onKeyDown, true);
     doc.removeEventListener("pointerdown", onPointerDown, true);
-    doc.removeEventListener("pointermove", onPointerMove, true);
-    doc.removeEventListener("pointerup", onPointerUp, true);
-    doc.removeEventListener("pointercancel", onPointerUp, true);
-    win?.removeEventListener("blur", endDrag);
+    win?.removeEventListener("pointermove", onPointerMove, true);
+    win?.removeEventListener("pointerup", onPointerUp, true);
+    win?.removeEventListener("pointercancel", onPointerUp, true);
+    win?.removeEventListener("blur", onWinBlur);
+    stripPreviewShapeEditorUi(doc);
     body.classList.remove("layout-mode");
     style.remove();
   };

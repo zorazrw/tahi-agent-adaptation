@@ -1,6 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import hljs from "highlight.js";
-import { SaveIcon, Loader2Icon } from "lucide-react";
+import {
+  SaveIcon,
+  Loader2Icon,
+  ShapesIcon,
+  AlignCenterHorizontal,
+  TextAlignStart,
+  TextAlignCenter,
+  TextAlignEnd,
+  AlignVerticalJustifyStart,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd,
+} from "lucide-react";
 import { ViewToggle, useViewToggle } from "./ViewToggle";
 import type { EditableRendererProps } from "./index";
 import { EditableTextPanel } from "./EditableTextPanel";
@@ -8,11 +19,68 @@ import {
   serializeIframeDocument,
   attachHtmlTextEdit,
   attachHtmlLayoutDrag,
+  insertPreviewShape,
+  applyPreviewTextAlignment,
+  isDeleteOrBackspaceKey,
+  tryDeleteSelectedPreviewOrLayoutBlock,
+  type PreviewShapeKind,
+  type PreviewTextAlignH,
+  type PreviewTextAlignV,
 } from "./html-preview-edit";
 
 type Props = { data: { kind: "html"; content: string } } & EditableRendererProps;
 
 type HtmlVisualTool = "none" | "text" | "layout";
+
+/** Tiny glyphs for the Move-mode picker (ink palette, matches inserted shapes). */
+function PreviewShapeMenuGlyph({ kind }: { kind: PreviewShapeKind }) {
+  const common = "shrink-0 block text-ink-600";
+  if (kind === "rectangle") {
+    return (
+      <svg className={common} width="28" height="28" viewBox="0 0 28 28" aria-hidden>
+        <rect
+          x="5"
+          y="8"
+          width="18"
+          height="12"
+          rx="2"
+          fill="currentColor"
+          fillOpacity={0.07}
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+      </svg>
+    );
+  }
+  if (kind === "circle") {
+    return (
+      <svg className={common} width="28" height="28" viewBox="0 0 28 28" aria-hidden>
+        <circle
+          cx="14"
+          cy="14"
+          r="6.75"
+          fill="currentColor"
+          fillOpacity={0.07}
+          stroke="currentColor"
+          strokeWidth="1.5"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg className={common} width="28" height="28" viewBox="0 0 28 28" aria-hidden>
+      <line
+        x1="8"
+        y1="19"
+        x2="20"
+        y2="9"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
   const [mode, setMode] = useViewToggle("preview");
@@ -27,6 +95,10 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
   const [visualDirty, setVisualDirty] = useState(false);
   const [visualSaving, setVisualSaving] = useState(false);
   const [visualSaveError, setVisualSaveError] = useState<string | null>(null);
+  const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
+  const shapeMenuRef = useRef<HTMLDivElement>(null);
+  const [alignMenuOpen, setAlignMenuOpen] = useState(false);
+  const alignMenuRef = useRef<HTMLDivElement>(null);
 
   const visualDirtyRef = useRef(visualDirty);
   const visualSavingRef = useRef(visualSaving);
@@ -104,6 +176,57 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
     void handleSaveVisualRef.current();
   }, []);
 
+  const handleInsertShape = useCallback(
+    (kind: PreviewShapeKind) => {
+      const doc = iframeRef.current?.contentDocument;
+      if (!doc?.body) return;
+      insertPreviewShape(doc, kind);
+      markVisualLikelyDirty();
+      markVisualDirtyFromDoc();
+      setShapeMenuOpen(false);
+    },
+    [markVisualDirtyFromDoc, markVisualLikelyDirty]
+  );
+
+  const handleTextAlign = useCallback(
+    (axis: "h" | "v", value: PreviewTextAlignH | PreviewTextAlignV) => {
+      const doc = iframeRef.current?.contentDocument;
+      if (!applyPreviewTextAlignment(doc, axis, value)) return;
+      markVisualLikelyDirty();
+      markVisualDirtyFromDoc();
+      setAlignMenuOpen(false);
+      iframeRef.current?.contentWindow?.focus();
+    },
+    [markVisualDirtyFromDoc, markVisualLikelyDirty]
+  );
+
+  useEffect(() => {
+    if (!shapeMenuOpen) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (shapeMenuRef.current && !shapeMenuRef.current.contains(e.target as Node)) {
+        setShapeMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocDown, true);
+    return () => document.removeEventListener("mousedown", onDocDown, true);
+  }, [shapeMenuOpen]);
+
+  useEffect(() => {
+    if (!alignMenuOpen) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (alignMenuRef.current && !alignMenuRef.current.contains(e.target as Node)) {
+        setAlignMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocDown, true);
+    return () => document.removeEventListener("mousedown", onDocDown, true);
+  }, [alignMenuOpen]);
+
+  useEffect(() => {
+    if (visualTool !== "layout") setShapeMenuOpen(false);
+    if (visualTool !== "text") setAlignMenuOpen(false);
+  }, [visualTool]);
+
   const attachPreviewTool = useCallback(
     (tool: "text" | "layout") => {
       const doc = iframeRef.current?.contentDocument;
@@ -171,6 +294,27 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
     return () => clearTimeout(id);
   }, [visualTool, mode, canEdit]);
 
+  /**
+   * Delete / Backspace while a shape is selected: host window often has focus (toolbar), so the iframe
+   * never sees the key. Handle here and mirror dirty state.
+   */
+  useEffect(() => {
+    if (mode !== "preview" || visualTool !== "layout" || !canEdit) return;
+    const onHostKey = (e: KeyboardEvent) => {
+      if (!isDeleteOrBackspaceKey(e)) return;
+      const t = e.target;
+      if (t instanceof Element && t.closest?.("input,textarea,[contenteditable=true],select")) return;
+      const idoc = iframeRef.current?.contentDocument;
+      if (!tryDeleteSelectedPreviewOrLayoutBlock(idoc)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      markVisualLikelyDirty();
+      markVisualDirtyFromDoc();
+    };
+    window.addEventListener("keydown", onHostKey, true);
+    return () => window.removeEventListener("keydown", onHostKey, true);
+  }, [mode, visualTool, canEdit, markVisualDirtyFromDoc, markVisualLikelyDirty]);
+
   /** Ctrl/Cmd+S from the shell (toolbar focused); iframe focused is handled inside attachHtmlTextEdit / attachHtmlLayoutDrag. */
   useEffect(() => {
     if (mode !== "preview" || visualTool === "none" || !canEdit) return;
@@ -186,7 +330,7 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
     <button
       type="button"
       onClick={() => setVisualTool((t) => (t === id ? "none" : id))}
-      className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+      className={`rounded-md px-2 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ink-900/20 focus-visible:ring-offset-2 focus-visible:ring-offset-white ${
         visualTool === id
           ? "bg-ink-800 text-white"
           : "bg-ink-900/5 text-ink-600 hover:bg-ink-900/10"
@@ -199,20 +343,22 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex flex-wrap items-center gap-2 pb-2 border-b border-ink-900/10 mb-2 shrink-0">
-        <ViewToggle mode={mode} onChange={setMode} />
-        <span className="text-xs text-muted-foreground">HTML</span>
-        {mode === "preview" && canEdit && (
-          <>
-            <span className="text-ink-900/15 text-xs" aria-hidden>
-              |
-            </span>
-            <span className="text-xs text-muted-foreground shrink-0">In preview:</span>
-            {toolBtn("text", "Text")}
-            {toolBtn("layout", "Move")}
-          </>
-        )}
+        <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1">
+          <ViewToggle mode={mode} onChange={setMode} />
+          <span className="text-xs text-muted-foreground">HTML</span>
+          {mode === "preview" && canEdit && (
+            <>
+              <span className="text-ink-900/15 text-xs" aria-hidden>
+                |
+              </span>
+              <span className="text-xs text-muted-foreground shrink-0">In preview:</span>
+              {toolBtn("text", "Text")}
+              {toolBtn("layout", "Move")}
+            </>
+          )}
+        </div>
         {mode === "preview" && visualTool !== "none" && canEdit && (
-          <>
+          <div className="flex items-center gap-2 shrink-0">
             <span className="text-ink-900/15 text-xs" aria-hidden>
               |
             </span>
@@ -231,7 +377,115 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
               {visualSaving ? "Saving…" : "Save"}
             </button>
             {visualSaveError && <span className="text-xs text-error">{visualSaveError}</span>}
-          </>
+            {visualTool === "text" && (
+              <div className="relative" ref={alignMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setAlignMenuOpen((o) => !o)}
+                  title="Text alignment"
+                  aria-expanded={alignMenuOpen}
+                  aria-haspopup="menu"
+                  className="inline-flex items-center justify-center rounded-md p-1.5 text-xs font-medium bg-ink-900/5 text-ink-600 hover:bg-ink-900/10"
+                >
+                  <AlignCenterHorizontal className="size-4" aria-hidden />
+                  <span className="sr-only">Text alignment</span>
+                </button>
+                {alignMenuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 top-full z-50 mt-1 flex flex-col gap-1.5 rounded-md border border-ink-900/15 bg-white p-1.5 shadow-md"
+                  >
+                    <div className="flex items-center gap-0.5" role="group" aria-label="Horizontal align">
+                      {(
+                        [
+                          ["left", TextAlignStart, "Align left"],
+                          ["center", TextAlignCenter, "Align center"],
+                          ["right", TextAlignEnd, "Align right"],
+                        ] as const
+                      ).map(([val, Icon, title]) => (
+                        <button
+                          key={val}
+                          type="button"
+                          role="menuitem"
+                          title={title}
+                          aria-label={title}
+                          className="flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8"
+                          onClick={() => handleTextAlign("h", val as PreviewTextAlignH)}
+                        >
+                          <Icon className="size-4 shrink-0" aria-hidden />
+                        </button>
+                      ))}
+                    </div>
+                    <div className="h-px bg-ink-900/10" aria-hidden />
+                    <div className="flex items-center gap-0.5" role="group" aria-label="Vertical align block">
+                      {(
+                        [
+                          ["start", AlignVerticalJustifyStart, "Top"],
+                          ["middle", AlignVerticalJustifyCenter, "Middle"],
+                          ["end", AlignVerticalJustifyEnd, "Bottom"],
+                        ] as const
+                      ).map(([val, Icon, title]) => (
+                        <button
+                          key={val}
+                          type="button"
+                          role="menuitem"
+                          title={title}
+                          aria-label={`Vertical ${title.toLowerCase()}`}
+                          className="flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8"
+                          onClick={() => handleTextAlign("v", val as PreviewTextAlignV)}
+                        >
+                          <Icon className="size-4 shrink-0" aria-hidden />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {visualTool === "layout" && (
+              <div className="relative" ref={shapeMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setShapeMenuOpen((o) => !o)}
+                  title="Insert shape"
+                  aria-expanded={shapeMenuOpen}
+                  aria-haspopup="menu"
+                  className="inline-flex items-center justify-center rounded-md p-1.5 text-xs font-medium bg-ink-900/5 text-ink-600 hover:bg-ink-900/10"
+                >
+                  <ShapesIcon className="size-4" aria-hidden />
+                  <span className="sr-only">Insert shape</span>
+                </button>
+                {shapeMenuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 top-full z-50 mt-1 flex items-center gap-0.5 rounded-md border border-ink-900/15 bg-white p-1 shadow-md"
+                  >
+                    {(["rectangle", "circle", "line"] as const).map((kind) => (
+                      <button
+                        key={kind}
+                        type="button"
+                        role="menuitem"
+                        title={
+                          kind === "rectangle" ? "Rectangle" : kind === "circle" ? "Circle" : "Line"
+                        }
+                        aria-label={
+                          kind === "rectangle"
+                            ? "Insert rectangle"
+                            : kind === "circle"
+                              ? "Insert circle"
+                              : "Insert line"
+                        }
+                        className="flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8"
+                        onClick={() => handleInsertShape(kind)}
+                      >
+                        <PreviewShapeMenuGlyph kind={kind} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
       {mode === "preview" ? (
