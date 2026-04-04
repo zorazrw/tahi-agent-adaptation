@@ -107,7 +107,9 @@ function parseTranslate(el: HTMLElement): { x: number; y: number } {
 export function attachHtmlTextEdit(
   doc: Document,
   onChange: () => void,
-  onSaveShortcut?: (e: KeyboardEvent) => void
+  onSaveShortcut?: (e: KeyboardEvent) => void,
+  /** Fires synchronously on user edit so Save / Ctrl+S can run before the next React render (refs stay in sync). */
+  onUserInput?: () => void
 ): HtmlDocCleanup {
   if (!doc.body) return () => {};
 
@@ -134,6 +136,11 @@ export function attachHtmlTextEdit(
     dirtyFlush = globalThis.setTimeout(() => onChange(), 0);
   };
 
+  const onUserEdit = () => {
+    onUserInput?.();
+    flushDirty();
+  };
+
   const obs = new MutationObserver(() => flushDirty());
   if (doc.documentElement) {
     obs.observe(doc.documentElement, {
@@ -144,11 +151,10 @@ export function attachHtmlTextEdit(
     });
   }
 
-  const onEdit = () => flushDirty();
-  doc.addEventListener("input", onEdit);
-  doc.addEventListener("keyup", onEdit);
+  doc.addEventListener("input", onUserEdit);
+  doc.addEventListener("keyup", onUserEdit);
   /** IME (e.g. CJK): `input` may be incomplete until composition ends. */
-  doc.addEventListener("compositionend", onEdit);
+  doc.addEventListener("compositionend", onUserEdit);
 
   const win = doc.defaultView;
   requestAnimationFrame(() => {
@@ -165,9 +171,9 @@ export function attachHtmlTextEdit(
   return () => {
     globalThis.clearTimeout(dirtyFlush);
     obs.disconnect();
-    doc.removeEventListener("input", onEdit);
-    doc.removeEventListener("keyup", onEdit);
-    doc.removeEventListener("compositionend", onEdit);
+    doc.removeEventListener("input", onUserEdit);
+    doc.removeEventListener("keyup", onUserEdit);
+    doc.removeEventListener("compositionend", onUserEdit);
     if (onSaveShortcut) {
       doc.removeEventListener("keydown", onSaveKey, true);
     }

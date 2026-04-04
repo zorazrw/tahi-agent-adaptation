@@ -1,3 +1,4 @@
+import { basename } from "path";
 import type { VerifierMark } from "../types.js";
 
 export type NodeStatus = "pending" | "running" | "completed" | "error";
@@ -141,11 +142,26 @@ export type RawWorkflowNode = {
   children?: RawWorkflowNode[];
 };
 
+/** Normalize plan output file entries to a single basename (plan step should register names only). */
+export function normalizePlanOutputFiles(paths: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of paths) {
+    const s = String(raw ?? "").trim();
+    if (!s) continue;
+    const norm = basename(s.replace(/\\/g, "/")).trim();
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(norm);
+  }
+  return out;
+}
+
 export function hydrateWorkflowTree(input: RawWorkflowNode[], depth = 0): WorkflowNode[] {
   return input.map((raw) => ({
     id: crypto.randomUUID(),
     description: raw.description,
-    outputFiles: raw.outputFiles,
+    outputFiles: normalizePlanOutputFiles(raw.outputFiles),
     verifiers: raw.verifiers,
     verifierMarks: raw.verifiers.map(() => undefined),
     children: raw.children ? hydrateWorkflowTree(raw.children, depth + 1) : [],

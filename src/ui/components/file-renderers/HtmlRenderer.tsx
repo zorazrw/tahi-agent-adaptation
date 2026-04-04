@@ -58,7 +58,15 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
   const markVisualDirtyFromDoc = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc?.documentElement) return;
-    setVisualDirty(serializeIframeDocument(doc) !== editContentRef.current);
+    const dirty = serializeIframeDocument(doc) !== editContentRef.current;
+    visualDirtyRef.current = dirty;
+    setVisualDirty(dirty);
+  }, []);
+
+  /** Sync ref immediately on keystroke so ⌘/Ctrl+S works before React re-renders (hotkey reads the ref). */
+  const markVisualLikelyDirty = useCallback(() => {
+    visualDirtyRef.current = true;
+    setVisualDirty(true);
   }, []);
 
   const handleSaveVisual = useCallback(async () => {
@@ -72,6 +80,7 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
       if (result.success) {
         setEditContent(html);
         editContentRef.current = html;
+        visualDirtyRef.current = false;
         setVisualDirty(false);
         onReload?.();
       } else {
@@ -105,11 +114,11 @@ export function HtmlRenderer({ data, filePath, cwd, sessionId, onReload }: Props
       const onChange = () => markVisualDirtyFromDoc();
       previewCleanupRef.current =
         tool === "text"
-          ? attachHtmlTextEdit(doc, onChange, onVisualSaveHotkey)
+          ? attachHtmlTextEdit(doc, onChange, onVisualSaveHotkey, markVisualLikelyDirty)
           : attachHtmlLayoutDrag(doc, onChange, onVisualSaveHotkey);
       markVisualDirtyFromDoc();
     },
-    [markVisualDirtyFromDoc, runPreviewCleanup, onVisualSaveHotkey]
+    [markVisualDirtyFromDoc, markVisualLikelyDirty, runPreviewCleanup, onVisualSaveHotkey]
   );
 
   useEffect(() => {

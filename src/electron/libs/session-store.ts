@@ -312,6 +312,15 @@ export class SessionStore {
       .run(json, Date.now(), id);
   }
 
+  /** Last persisted workflow tree from the DB (for classifying user edits vs stale in-memory state). */
+  getPersistedWorkflowTree(id: string): WorkflowNode[] | undefined {
+    const row = this.db
+      .prepare(`select workflow_tree from sessions where id = ?`)
+      .get(id) as { workflow_tree: string | null } | undefined;
+    if (!row?.workflow_tree) return undefined;
+    return parseJsonColumn(row.workflow_tree, workflowTreeSchema);
+  }
+
   /** Persist verification depth to DB. */
   persistVerificationDepth(id: string, verificationDepth: number): void {
     this.db

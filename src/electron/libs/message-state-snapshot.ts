@@ -124,10 +124,26 @@ function buildOutputFileEntries(
       error: null,
     };
     let readOk = false;
-    if (base && rel && !rel.startsWith("/") && !rel.startsWith("\\")) {
+    if (rel && isAbsolute(rel)) {
+      try {
+        const absP = resolve(rel);
+        if (existsSync(absP)) {
+          const { text, err } = readTextLimited(absP, MAX_OUTPUT_FILE_BYTES);
+          if (text != null) {
+            item.content = text;
+            item.content_source = "filesystem";
+            readOk = true;
+          } else if (err) item.error = err;
+        } else {
+          item.error = "not_a_file";
+        }
+      } catch {
+        item.error = "resolve_or_read_failed";
+      }
+    } else if (base && rel) {
       try {
         const absP = resolve(join(base, rel));
-        if (base && isPathInsideDir(base, absP)) {
+        if (isPathInsideDir(base, absP)) {
           const { text, err } = readTextLimited(absP, MAX_OUTPUT_FILE_BYTES);
           if (text != null) {
             item.content = text;
@@ -168,6 +184,57 @@ export function buildExportEnvironmentSnapshot(session: Session): ExportEnvironm
   const originals = collectOriginalOutputsMap(tree);
   const files = buildOutputFileEntries(session.cwd, relPaths, originals);
   return { workflow: wf, file: files };
+}
+
+function truncateUtf8ForExport(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  const chunk = buf.subarray(0, maxBytes);
+  return chunk.toString("utf8") + "\n[... export truncated: file larger than max bytes ...]";
+}
+
+/** Canonical path key for matching workflow output paths (absolute vs cwd-relative mix). */
+function resolvedFileKey(cwd: string | undefined, filePath: string): string {
+  const p = String(filePath ?? "").trim();
+  if (!p) return "";
+  try {
+    if (isAbsolute(p)) return resolve(p).replace(/\\/g, "/");
+    if (cwd?.trim()) return resolve(cwd.trim(), p).replace(/\\/g, "/");
+    return resolve(p).replace(/\\/g, "/");
+  } catch {
+    return p.replace(/\\/g, "/");
+  }
+}
+
+/**
+ * Same as ``buildExportEnvironmentSnapshot``, but guarantees ``editedRelPath`` appears in ``file``
+ * with the exact post-write ``editedContent`` (preview Text / Move save). Paths only in the workflow
+ * tree are otherwise included; this upserts or appends so HTML edits are visible in export DB rows.
+ */
+export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
+  session: Session,
+  editedRelPath: string,
+  editedContent: string
+): ExportEnvironmentSnapshot {
+  const base = buildExportEnvironmentSnapshot(session);
+  const cwd = session.cwd;
+  const editedKey = resolvedFileKey(cwd, editedRelPath);
+  const content = truncateUtf8ForExport(editedContent, MAX_OUTPUT_FILE_BYTES);
+  const files = base.file.map((f) => ({ ...f }));
+  const idx = files.findIndex((f) => resolvedFileKey(cwd, String(f.path)) === editedKey);
+  const displayPath = idx >= 0 ? String(files[idx].path) : editedRelPath.replace(/\\/g, "/");
+  const entry: (typeof base.file)[number] = {
+    path: displayPath,
+    content,
+    content_source: "preview_write",
+    error: null,
+  };
+  if (idx >= 0) {
+    files[idx] = { ...files[idx], ...entry };
+  } else {
+    files.push(entry);
+  }
+  return { workflow: base.workflow, file: files };
 }
 
 /** Whether to persist a snapshot for this SDK message (per meaningful agent turn / tool outcome). */

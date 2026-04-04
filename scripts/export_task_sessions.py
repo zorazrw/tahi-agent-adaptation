@@ -30,11 +30,15 @@ Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``sta
 comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
 results; turn ``result``; and a synthetic ``verifier_label`` row after the verifier LM updates marks
 (exported as agent ``verify("…")`` with the workflow node id). Pure ``message("…")`` steps (user or agent) omit ``environment``.
-Older DBs without ``state_snapshot`` fall back to one end-of-session snapshot.
+The export reapplies a carried-forward workflow tree from snapshots so, after ``edit_workflow`` removes
+a step, later steps do not retain that step’s verifiers or output files (and ``file`` rows are aligned
+to the current tree). Older DBs without ``state_snapshot`` fall back to one end-of-session snapshot.
 
-The second is always the agent ``plan({initial query})``; its ``environment`` has the workflow tree
-(with every step ``status`` ``pending``, not DB completion state); each verifier is
-``{"criterion", "status": "failure"}``; ``file`` maps paths to ``null``.
+The second is always the agent ``plan({initial query})``; its ``environment`` uses the workflow tree
+as of the last persisted snapshot before the first ``edit_workflow`` (or WorkflowPlan tool input
+with ``normalizeRoots``), not necessarily ``sessions.workflow_tree`` after later edits. Every step
+``status`` is ``pending``; each verifier is ``{"criterion", "status": "failure"}``; ``file`` maps
+paths to ``null``.
 
 Database location (Electron userData):
 - macOS: ~/Library/Application Support/Agent Cowork/sessions.db
@@ -66,6 +70,7 @@ Usage:
 """
 
 import argparse
+import copy
 import json
 import os
 import sqlite3
@@ -227,7 +232,23 @@ def _build_output_file_entries(
     for rel in rel_paths:
         item: dict = {"path": rel, "content": None, "content_source": None, "error": None}
         read_ok = False
-        if base is not None and rel and not str(rel).startswith(("/", "\\")):
+        rel_path = Path(str(rel).strip()).expanduser() if rel else None
+        if rel_path is not None and rel_path.is_absolute():
+            try:
+                abs_p = rel_path.resolve()
+                if abs_p.is_file():
+                    text, err = _read_text_limited(abs_p, max_bytes)
+                    if text is not None:
+                        item["content"] = text
+                        item["content_source"] = "filesystem"
+                        read_ok = True
+                    elif err:
+                        item["error"] = err
+                else:
+                    item["error"] = "not_a_file"
+            except (OSError, ValueError):
+                item["error"] = "resolve_or_read_failed"
+        elif base is not None and rel:
             try:
                 abs_p = (base / rel).resolve()
                 base_r = base.resolve()
@@ -602,12 +623,99 @@ def _step_omits_environment(actor: str, action: str, tool_result: Optional[str])
     return action.startswith("message(") and " | " not in action
 
 
-def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
-    """Return (environment dict, True if taken from persisted ``state_snapshot`` on this message).
+def _path_variant_strings(cwd: Optional[str], p: str) -> set[str]:
+    """Path strings that may refer to the same file (for matching snapshot rows to workflow outputFiles)."""
+    s = str(p).strip()
+    out: set[str] = set()
+    if not s:
+        return out
+    out.add(s.replace("\\", "/"))
+    try:
+        raw = Path(s)
+        if raw.is_absolute():
+            out.add(str(raw.resolve()).replace("\\", "/"))
+        elif cwd:
+            out.add(str((Path(cwd).expanduser() / s).resolve()).replace("\\", "/"))
+    except (OSError, ValueError):
+        pass
+    return {x for x in out if x}
 
-    Canonical shape is always ``{"workflow": [...], "file": [...]}``. Legacy rows may store only
-    ``file`` or ``verifier`` + ``file``; those are merged with ``default_env["workflow"]``.
+
+def _ordered_output_paths_nested_export_wf(wf: Any) -> List[str]:
+    """Preorder merge of node ``outputFiles`` (same order as tree walk in TS export)."""
+    seen: set[str] = set()
+    ordered: List[str] = []
+
+    def walk(nodes: Any) -> None:
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            for f in (n.get("outputFiles") or []):
+                st = str(f).strip()
+                if st and st not in seen:
+                    seen.add(st)
+                    ordered.append(st)
+            walk(n.get("children"))
+
+    walk(wf)
+    return ordered
+
+
+def _files_realigned_to_workflow(prior_files: Any, target_wf: list, cwd: Optional[str]) -> List[dict]:
+    """Drop file rows not on ``target_wf``; order and path strings follow the workflow tree."""
+    by_variants: Dict[str, dict] = {}
+    if isinstance(prior_files, list):
+        for f in prior_files:
+            if not isinstance(f, dict):
+                continue
+            for k in _path_variant_strings(cwd, str(f.get("path", ""))):
+                by_variants[k] = f
+    out: List[dict] = []
+    for p in _ordered_output_paths_nested_export_wf(target_wf):
+        hit: Optional[dict] = None
+        for k in _path_variant_strings(cwd, p):
+            if k in by_variants:
+                hit = by_variants[k]
+                break
+        if hit is not None:
+            row = dict(hit)
+            row["path"] = p
+            out.append(row)
+        else:
+            out.append({"path": p, "content": None, "content_source": None, "error": None})
+    return out
+
+
+def _realign_env_to_workflow(base_env: dict, target_wf: list, cwd: Optional[str]) -> dict:
+    return {
+        "workflow": copy.deepcopy(target_wf),
+        "file": _files_realigned_to_workflow(base_env.get("file"), target_wf, cwd),
+    }
+
+
+def _build_workflow_timeline(msgs: List[dict]) -> List[Optional[list]]:
     """
+    Carry forward the latest nested ``workflow`` from each message's ``state_snapshot``.
+
+    After ``edit_workflow`` (or any row that refreshes the snapshot), removed steps no longer appear
+    in later indices; rows without a workflow in the snapshot keep the previous tree.
+    """
+    current: Optional[list] = None
+    out: List[Optional[list]] = []
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if isinstance(snap, dict):
+            wf = snap.get("workflow")
+            if isinstance(wf, list):
+                current = copy.deepcopy(wf)
+        out.append(copy.deepcopy(current) if current is not None else None)
+    return out
+
+
+def _environment_for_norm_merge(norm: dict, default_env: dict) -> Tuple[dict, bool]:
+    """Merge snapshot file list with workflow from snapshot or fallback."""
     snap = norm.get("state_snapshot")
     if not isinstance(snap, dict):
         return default_env, False
@@ -616,11 +724,33 @@ def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
         return default_env, False
     wf = snap.get("workflow")
     if isinstance(wf, list):
-        return {"workflow": wf, "file": files}, True
+        return {"workflow": copy.deepcopy(wf), "file": copy.deepcopy(files)}, True
     wf_fb = default_env.get("workflow")
     if isinstance(wf_fb, list):
-        return {"workflow": wf_fb, "file": files}, True
+        return {"workflow": copy.deepcopy(wf_fb), "file": copy.deepcopy(files)}, True
     return default_env, False
+
+
+def environment_for_norm(
+    norm: dict,
+    default_env: dict,
+    *,
+    cwd: Optional[str] = None,
+    workflow_override: Optional[list] = None,
+) -> Tuple[dict, bool]:
+    """Return (environment dict, True if persisted ``state_snapshot`` contributed file content).
+
+    Canonical shape is ``{"workflow": [...], "file": [...]}``.
+    ``workflow_override`` (per-message replayed tree) replaces the merged workflow so removed steps
+    and their output files/verifiers do not appear in later steps. File rows are realigned to that tree.
+    """
+    base, took_snap = _environment_for_norm_merge(norm, default_env)
+    wf_target: Optional[list] = workflow_override
+    if wf_target is None and isinstance(base.get("workflow"), list):
+        wf_target = base["workflow"]
+    if isinstance(wf_target, list):
+        base = _realign_env_to_workflow(base, wf_target, cwd)
+    return base, took_snap
 
 
 def trajectory_row(
@@ -671,6 +801,17 @@ def build_full_session_trajectory(
     verifier_marks: list,
 ) -> List[dict]:
     empty_env = empty_environment()
+    msgs = _merge_partial_assistant_messages(msgs)
+    wf_timeline = _build_workflow_timeline(msgs)
+
+    plan_env = _build_plan_environment(
+        msgs,
+        workflow_tree,
+        steps,
+        output_files,
+        verification_criteria,
+        verifier_marks,
+    )
     final_env = build_environment_state(
         cwd_val,
         workflow_tree,
@@ -680,24 +821,11 @@ def build_full_session_trajectory(
         verifier_marks,
         include_files=True,
     )
-    plan_env = build_environment_state(
-        cwd_val,
-        workflow_tree,
-        steps,
-        output_files,
-        verification_criteria,
-        verifier_marks,
-        include_files=False,
-        file_placeholder=True,
-        plan_snapshot=True,
-    )
 
     traj: List[dict] = [
         trajectory_row("user", f"message({json.dumps(initial_query, ensure_ascii=False)})", empty_env),
         trajectory_row("agent", f"plan({json.dumps(initial_query, ensure_ascii=False)})", plan_env),
     ]
-
-    msgs = _merge_partial_assistant_messages(msgs)
 
     consumed_initial_user = False
     pending_skip_tool_result = False
@@ -727,7 +855,10 @@ def build_full_session_trajectory(
         pending_skip_tool_result = False
 
         if m.get("type") == "verifier_label":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_v = wf_timeline[idx] if idx < len(wf_timeline) else None
+            step_env, _snap = environment_for_norm(
+                m, final_env, cwd=cwd_val, workflow_override=wo_v
+            )
             nid_raw = m.get("nodeId", "")
             nid = str(nid_raw) if nid_raw is not None else ""
             act = f"verify({json.dumps(nid, ensure_ascii=False)})"
@@ -736,18 +867,27 @@ def build_full_session_trajectory(
             continue
 
         if m.get("type") == "edit_workflow":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_e = wf_timeline[idx] if idx < len(wf_timeline) else None
+            step_env, _snap = environment_for_norm(
+                m, final_env, cwd=cwd_val, workflow_override=wo_e
+            )
             traj.append(trajectory_row("user", "edit_workflow()", step_env))
             idx += 1
             continue
         if m.get("type") == "edit_verifier":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_ev = wf_timeline[idx] if idx < len(wf_timeline) else None
+            step_env, _snap = environment_for_norm(
+                m, final_env, cwd=cwd_val, workflow_override=wo_ev
+            )
             traj.append(trajectory_row("user", "edit_verifier()", step_env))
             idx += 1
             continue
 
         if m.get("type") == "file_edit":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_f = wf_timeline[idx] if idx < len(wf_timeline) else None
+            step_env, _snap = environment_for_norm(
+                m, final_env, cwd=cwd_val, workflow_override=wo_f
+            )
             p_raw = m.get("path", "")
             p = str(p_raw) if p_raw is not None else ""
             act = f"file_edit({json.dumps(p, ensure_ascii=False)})"
@@ -756,7 +896,10 @@ def build_full_session_trajectory(
             continue
 
         if m.get("role") == "user":
-            u_env, _u_snap = environment_for_norm(m, final_env)
+            wo_u = wf_timeline[idx] if idx < len(wf_timeline) else None
+            u_env, _u_snap = environment_for_norm(
+                m, final_env, cwd=cwd_val, workflow_override=wo_u
+            )
             traj.append(trajectory_row("user", describe_human_action(m), u_env))
         elif m.get("role") == "agent":
             action, extra = agent_export_action(msgs, idx)
@@ -781,7 +924,10 @@ def build_full_session_trajectory(
                 if tr_parts:
                     merged_tool = "\n\n".join(p for p in tr_parts if p and p != "(empty)") or "(empty)"
             env_idx = min(idx + consume - 1, len(msgs) - 1) if (extra == 1 or merged_tool is not None) else idx
-            step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
+            wo_a = wf_timeline[env_idx] if env_idx < len(wf_timeline) else None
+            step_env, _env_snap = environment_for_norm(
+                msgs[env_idx], final_env, cwd=cwd_val, workflow_override=wo_a
+            )
             traj.append(
                 trajectory_row(
                     "agent",
@@ -793,8 +939,12 @@ def build_full_session_trajectory(
             idx += consume
             continue
         else:
+            wo_x = wf_timeline[idx] if idx < len(wf_timeline) else None
+            x_env, _ = environment_for_norm(
+                {"role": "unknown"}, final_env, cwd=cwd_val, workflow_override=wo_x
+            )
             traj.append(
-                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], final_env)
+                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], x_env)
             )
         idx += 1
 
@@ -975,6 +1125,151 @@ def _extract_workflow_tree_from_tool_use(agent_traj: List[dict]) -> List[dict]:
     return []
 
 
+def normalize_workflow_plan_tasks(tasks: Any) -> List[dict]:
+    """Match electron ``normalizeRoots``: unwrap a single wrapper root that only has children."""
+    if not isinstance(tasks, list) or not tasks:
+        return []
+    roots: List[Any] = list(tasks)
+    while len(roots) == 1:
+        n = roots[0]
+        if not isinstance(n, dict):
+            break
+        ch = n.get("children")
+        if not isinstance(ch, list) or len(ch) == 0:
+            break
+        roots = ch
+    return [x for x in roots if isinstance(x, dict)]
+
+
+def _apply_plan_snapshot_visual(wf: Any) -> List[dict]:
+    """Force plan-row semantics: every node ``pending``, every verifier ``failure``."""
+    if not isinstance(wf, list):
+        return []
+    out: List[dict] = []
+    for n in wf:
+        if not isinstance(n, dict):
+            continue
+        ch = _apply_plan_snapshot_visual(n.get("children"))
+        verifiers: List[dict] = []
+        for v in (n.get("verifiers") or []):
+            if isinstance(v, dict):
+                c = str(v.get("criterion", ""))
+                if c:
+                    verifiers.append({"criterion": c, "status": "failure"})
+            elif isinstance(v, str) and v.strip():
+                verifiers.append({"criterion": v.strip(), "status": "failure"})
+        out.append({
+            "id": n.get("id"),
+            "description": str(n.get("description") or ""),
+            "outputFiles": [str(x) for x in (n.get("outputFiles") or [])],
+            "verifiers": verifiers,
+            "status": "pending",
+            "children": ch,
+        })
+    return out
+
+
+def _tool_tasks_to_export_nested_plan(tasks: Any) -> List[dict]:
+    """Turn raw WorkflowPlan ``tasks`` (after ``normalize_workflow_plan_tasks``) into export workflow JSON."""
+    id_counter = [0]
+
+    def walk(nodes: Any) -> List[dict]:
+        if not isinstance(nodes, list):
+            return []
+        out_local: List[dict] = []
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            nid = f"plan-tool-{id_counter[0]}"
+            id_counter[0] += 1
+            crits = n.get("verifiers") or []
+            verifiers: List[dict] = []
+            for c in crits:
+                if isinstance(c, dict):
+                    s = str(c.get("criterion", ""))
+                else:
+                    s = str(c) if c else ""
+                if s:
+                    verifiers.append({"criterion": s, "status": "failure"})
+            ch_in = n.get("children")
+            ch = walk(ch_in) if isinstance(ch_in, list) else []
+            ofs = [str(x) for x in (n.get("outputFiles") or [])]
+            out_local.append({
+                "id": nid,
+                "description": str(n.get("description") or ""),
+                "outputFiles": ofs,
+                "verifiers": verifiers,
+                "status": "pending",
+                "children": ch,
+            })
+        return out_local
+
+    return walk(tasks)
+
+
+def _snapshot_workflow_for_plan_row(msgs: List[dict]) -> Optional[list]:
+    """Workflow for the synthetic ``plan(...)`` row: pre-edit snapshot or earliest post-plan snapshot."""
+    first_edit_idx: Optional[int] = None
+    for i, m in enumerate(msgs):
+        if m.get("type") == "edit_workflow":
+            first_edit_idx = i
+            break
+    if first_edit_idx is not None:
+        for i in range(first_edit_idx - 1, -1, -1):
+            snap = msgs[i].get("state_snapshot")
+            if not isinstance(snap, dict):
+                continue
+            wf = snap.get("workflow")
+            if isinstance(wf, list) and len(wf) > 0:
+                return copy.deepcopy(wf)
+        return None
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if not isinstance(snap, dict):
+            continue
+        wf = snap.get("workflow")
+        if isinstance(wf, list) and len(wf) > 0:
+            return copy.deepcopy(wf)
+    return None
+
+
+def _build_plan_environment(
+    msgs_merged: List[dict],
+    workflow_tree: Any,
+    steps: list,
+    output_files: list,
+    verification_criteria: list,
+    verifier_marks: list,
+) -> dict:
+    """
+    Environment for the synthetic ``plan(...)`` trajectory row: workflow as it was right after
+    planning (from the last message snapshot before the first ``edit_workflow``, else the earliest
+    snapshot with a workflow), not ``sessions.workflow_tree`` which may reflect later edits.
+    Falls back to WorkflowPlan tool tasks (with ``normalize_workflow_plan_tasks``), then DB tree.
+    """
+    plan_wf: Any = None
+    snap_wf = _snapshot_workflow_for_plan_row(msgs_merged)
+    if snap_wf is not None:
+        plan_wf = _apply_plan_snapshot_visual(snap_wf)
+    else:
+        raw_tasks = _extract_workflow_tree_from_tool_use(msgs_merged)
+        normalized = normalize_workflow_plan_tasks(raw_tasks)
+        if normalized:
+            plan_wf = _tool_tasks_to_export_nested_plan(normalized)
+    if plan_wf is None or (isinstance(plan_wf, list) and len(plan_wf) == 0):
+        plan_wf = workflow_nested_for_export(
+            workflow_tree,
+            steps,
+            output_files,
+            verification_criteria,
+            verifier_marks,
+            plan_snapshot=True,
+        )
+    rel_paths = _ordered_output_paths_nested_export_wf(plan_wf)
+    files = {p: None for p in rel_paths}
+    return {"workflow": plan_wf, "file": files}
+
+
 def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:
     """Extract workflow tree from a message's state_snapshot."""
     snap = norm.get("state_snapshot")
@@ -984,17 +1279,47 @@ def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:
     return wf if isinstance(wf, list) else None
 
 
-def _snapshot_file_content(norm: dict, path: str) -> Optional[str]:
-    """Get file content from a message's state_snapshot."""
+def _snapshot_file_content(
+    norm: dict, path: str, cwd: Optional[str] = None
+) -> Optional[str]:
+    """Get file content from a message's state_snapshot.
+
+    ``path`` is the stored ``file_edit`` path (often cwd-relative after preview save); snapshot rows
+    may use workflow basenames or absolute paths — match with path variants and basename fallback.
+    """
     snap = norm.get("state_snapshot")
     if not isinstance(snap, dict):
         return None
     files = snap.get("file")
     if not isinstance(files, list):
         return None
+    path_s = str(path).strip() if path is not None else ""
+    if not path_s:
+        return None
+    cwd_opt = str(cwd).strip() if cwd else None
+    wanted = _path_variant_strings(cwd_opt, path_s)
     for f in files:
-        if isinstance(f, dict) and f.get("path") == path:
-            return f.get("content")
+        if not isinstance(f, dict):
+            continue
+        fp = str(f.get("path", "")).strip()
+        if not fp:
+            continue
+        if fp == path_s:
+            return f.get("content") if isinstance(f.get("content"), str) else None
+        if wanted & _path_variant_strings(cwd_opt, fp):
+            c = f.get("content")
+            return c if isinstance(c, str) else None
+    base_want = os.path.basename(path_s.replace("\\", "/"))
+    if base_want:
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            fp = str(f.get("path", "")).strip()
+            if not fp:
+                continue
+            if os.path.basename(fp.replace("\\", "/")) == base_want:
+                c = f.get("content")
+                return c if isinstance(c, str) else None
     return None
 
 
@@ -1234,11 +1559,11 @@ WORKFLOW_PLAN_INSTRUCTION = "\n".join([
     "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
     "Do NOT write out steps as text. Use the tool with structured JSON input.",
     "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
-    "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to a path (e.g. report.md, summary.txt) or use verifiers to describe what the operator can check (e.g. file exists, content contains X).",
+    "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to file **names only** (e.g. position_slide.html, report.md, summary.txt)—no folders, no absolute paths, no ../ segments—or use verifiers to describe what the operator can check.",
     "For control mode (detailed view): add optional children to any main step to break it into detailed sub-steps; the number of sub-steps can depend on that step's complexity.",
     "Do NOT add separate validation/verification/testing steps — our system handles verification via verifier criteria on each node.",
     "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
-    "For outputFiles: prefer .md for document-style output so the UI shows markdown preview; use .txt when markdown does not apply.",
+    "For outputFiles: use a single basename per entry (e.g. deliverable.md). Prefer .md for document-style output; use .txt when markdown does not apply.",
     "After calling the tool, STOP. Do NOT execute any steps yourself.",
     "The human operator will trigger each step individually.",
     "",
@@ -1259,6 +1584,11 @@ def build_weight_based_session(
         return None
     sid, title, workflow_tree_raw, last_prompt, cwd = row
     workflow_tree = parse_json_column(workflow_tree_raw, [])
+    export_cwd: Optional[str] = None
+    if cwd is not None:
+        cs = str(cwd).strip()
+        if cs:
+            export_cwd = cs
 
     try:
         messages_rows = cursor.execute(
@@ -1450,10 +1780,10 @@ def build_weight_based_session(
 
             elif t == "file_edit":
                 fe_path = m.get("path", "")
-                edited_content = _snapshot_file_content(m, fe_path)
+                edited_content = _snapshot_file_content(m, fe_path, export_cwd)
                 original_content = None
                 if last_snapshot_msg is not None:
-                    original_content = _snapshot_file_content(last_snapshot_msg, fe_path)
+                    original_content = _snapshot_file_content(last_snapshot_msg, fe_path, export_cwd)
                 human_traj.append({
                     "type": "file_edit",
                     "round_index": None,

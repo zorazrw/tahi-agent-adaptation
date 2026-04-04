@@ -1,7 +1,7 @@
 import { BrowserWindow } from "electron";
 import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
 import { runClaude, buildPromptForNode, buildRegenerateWorkflowPrompt, type RunnerHandle } from "./libs/runner.js";
-import { SessionStore } from "./libs/session-store.js";
+import { SessionStore, type Session } from "./libs/session-store.js";
 import {
   findNodeById,
   findParentNode,
@@ -13,7 +13,7 @@ import {
   completeNodeAndDescendants,
 } from "./libs/workflow-tree-utils.js";
 import { app } from "electron";
-import { join } from "path";
+import { join, relative, resolve, isAbsolute as pathIsAbsolute } from "path";
 import { readFileSync } from "fs";
 import { ensureMemoriesDir, readAllMemorySections, writeMemorySections, getMemoriesDir } from "./libs/memory-store.js";
 import {
@@ -25,7 +25,11 @@ import {
 } from "./libs/skill-store.js";
 import { runFullSessionExportAndExtract, setContextInductionNotifier } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
-import { buildExportEnvironmentSnapshot, shouldWriteSnapshotForSdkMessage } from "./libs/message-state-snapshot.js";
+import {
+  buildExportEnvironmentSnapshot,
+  buildExportEnvironmentSnapshotWithPreviewWrittenFile,
+  shouldWriteSnapshotForSdkMessage,
+} from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
@@ -523,7 +527,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   sessionLastVerificationNodeId.set(sessionId, nodeId);
   sessionContinueVerificationNodeId.delete(sessionId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
-  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits);
+  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",
@@ -792,9 +796,13 @@ export function handleClientEvent(event: ClientEvent) {
   if (event.type === "session.updateWorkflowTree") {
     const { sessionId, workflowTree } = event.payload;
     const sessBefore = sessions.getSession(sessionId);
-    const oldTree = sessBefore?.workflowTree
-      ? (JSON.parse(JSON.stringify(sessBefore.workflowTree)) as WorkflowNode[])
-      : [];
+    const persistedTree = sessions.getPersistedWorkflowTree(sessionId);
+    const oldTree =
+      persistedTree !== undefined
+        ? (JSON.parse(JSON.stringify(persistedTree)) as WorkflowNode[])
+        : sessBefore?.workflowTree
+          ? (JSON.parse(JSON.stringify(sessBefore.workflowTree)) as WorkflowNode[])
+          : [];
     sessions.persistWorkflowTree(sessionId, workflowTree);
     if (hasLiveSession(sessionId)) {
       sessions.updateSession(sessionId, { workflowTree });
@@ -915,17 +923,43 @@ export function handleClientEvent(event: ClientEvent) {
   }
 }
 
-/** Called from main after a successful preview-panel ``write-file`` (full workflow+file snapshot, same as other env rows). */
-export function recordFileEditAfterPreviewSave(sessionId: string, editedRelPath: string): void {
+/** If ``absNorm`` lies under session cwd, return posix relative path for storage/export; else absolute. */
+function fileEditPathForMessage(sess: Session, absNorm: string): string {
+  const cwd = sess.cwd?.trim();
+  if (!cwd) return absNorm;
+  try {
+    const abs = resolve(absNorm);
+    const root = resolve(cwd);
+    const relPath = relative(root, abs);
+    if (relPath && !relPath.startsWith("..") && !pathIsAbsolute(relPath)) {
+      return relPath.replace(/\\/g, "/");
+    }
+  } catch {
+    /* keep absolute */
+  }
+  return absNorm;
+}
+
+/** Called from main after a successful preview-panel ``write-file`` (``file_edit`` row + env snapshot including written HTML/text). */
+export function recordFileEditAfterPreviewSave(
+  sessionId: string,
+  editedAbsPath: string,
+  editedContent?: string
+): void {
   const store = initializeSessions();
   const sess = store.getSession(sessionId);
   if (!sess) return;
-  const pathNorm = editedRelPath.replace(/\\/g, "/");
-  const rowId = store.recordMessage(sessionId, { type: "file_edit", path: pathNorm });
-  store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sess));
+  const pathNormAbs = editedAbsPath.replace(/\\/g, "/");
+  const pathForMessage = fileEditPathForMessage(sess, pathNormAbs);
+  const rowId = store.recordMessage(sessionId, { type: "file_edit", path: pathForMessage });
+  const snapshot =
+    typeof editedContent === "string"
+      ? buildExportEnvironmentSnapshotWithPreviewWrittenFile(sess, pathNormAbs, editedContent)
+      : buildExportEnvironmentSnapshot(sess);
+  store.writeMessageSnapshot(rowId, snapshot);
   broadcast({
     type: "stream.message",
-    payload: { sessionId, message: { type: "file_edit", path: pathNorm } },
+    payload: { sessionId, message: { type: "file_edit", path: pathForMessage } },
   });
 }
 
