@@ -30,3 +30,4 @@ dist-electron
 scripts/test_sessions.db
 
 **/__pycache__/
+**/__pycache__/**

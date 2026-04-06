@@ -1,12 +1,24 @@
 import json
 import re
+from collections.abc import Sequence
 
 import chz
 import datasets
 
+from tinker_cookbook import renderers
 from tinker_cookbook.renderers.base import ToolCall
+from tinker_cookbook.rl.types import EnvGroupBuilder
 from tinker_cookbook.supervised.data import SupervisedDatasetFromHFDataset, conversation_to_datum
 from tinker_cookbook.supervised.types import ChatDatasetBuilder, SupervisedDataset
+
+try:
+    from functools import partial
+
+    from tinker_cookbook.distillation.datasets import PromptOnlyEnv
+    from tinker_cookbook.rl.problem_env import ProblemGroupBuilder
+except ImportError:
+    ProblemGroupBuilder = None  # type: ignore[assignment,misc]
+    PromptOnlyEnv = None  # type: ignore[assignment,misc]
 
 
 _TOOL_NAME_RE = re.compile(r"^([A-Za-z_][\w]*)\(")
@@ -127,6 +139,25 @@ def traj_to_chat(trajectory: list[dict]) -> list[dict]:
     return chat
 
 
+def chat_to_text(messages: list[dict]) -> str:
+    """Serialize OpenAI-style chat messages to a human-readable text format.
+
+    Handles text content, tool calls, and tool results.  Used to convert
+    human correction trajectories into golden-answer strings for SDFT.
+    """
+    parts: list[str] = []
+    for msg in messages:
+        role = msg["role"]
+        content = msg.get("content", "")
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                content += f"\n{fn.get('name', '')}({fn.get('arguments', '')})"
+        if content:
+            parts.append(f"[{role}]: {content}")
+    return "\n".join(parts)
+
+
 def _hydrate_tool_calls(conversation: list[dict]) -> list[dict]:
     """Convert plain-dict tool_calls to ToolCall pydantic objects for the renderer.
 
@@ -210,3 +241,213 @@ class DPODataBuilder(ChatDatasetBuilder):
             )
 
         return train_dataset, test_dataset
+
+
+@chz.chz
+class OPDDataBuilder:
+
+    train_path: str
+    test_path: str | None = None
+
+    def _load(self, path: str) -> list[dict]:
+        with open(path, "r") as f:
+            raw = json.load(f)
+        rows = []
+        # student_prompt = [
+        #     {
+        #         "role": "user",
+        #         "content": raw["initial_message"]["steps"][0]["action"].strip("message(").strip(")"),
+        #     }
+        # ]
+        for unit in raw["learning_units"][1:]:
+            question = "\n".join(unit["user_messages"])
+            golden_answer = chat_to_text(traj_to_chat(unit["human_trajectory"]))
+            student_prompt = [{"role": "user", "content": msg} for msg in unit["user_messages"]]
+            teacher_prompt = student_prompt + [
+                {
+                    "role": "user",
+                    "content": (
+                        "Here is the user's response after the original agent's "
+                        "response was executed. Please use this to improve your "
+                        "response:\n" + golden_answer
+                    ),
+                }
+            ]
+            rows.append(
+                {
+                    "student_prompt": student_prompt,
+                    "teacher_prompt": teacher_prompt,
+                    "question": question,
+                    "golden_answer": golden_answer,
+                }
+            )
+        return rows
+
+    def __call__(
+        self,
+        renderer: renderers.Renderer,
+        batch_size: int = 4,
+        group_size: int = 1,
+    ) -> "OPDSDFTDataset":
+        rows = self._load(self.train_path)
+        questions = [r["question"] for r in rows]
+        golden_answers = [r["golden_answer"] for r in rows]
+        return OPDSDFTDataset(
+            questions=questions,
+            golden_answers=golden_answers,
+            renderer=renderer,
+            batch_size=batch_size,
+            group_size=group_size,
+        )
+
+
+class OPDSDFTDataset:
+    """SDFT batch provider for on-policy distillation using OPD data.
+
+    Implements the ``SDFTBatchProvider`` protocol expected by
+    :func:`tinker_opd.main`.  The *question* is the accumulated user
+    messages and the *golden_answer* is the serialised human-correction
+    trajectory.
+    """
+
+    def __init__(
+        self,
+        questions: list[str],
+        golden_answers: list[str],
+        renderer: renderers.Renderer,
+        batch_size: int = 4,
+        group_size: int = 1,
+    ):
+        if len(questions) != len(golden_answers):
+            raise ValueError(
+                f"questions ({len(questions)}) and golden_answers "
+                f"({len(golden_answers)}) must have the same length"
+            )
+        self._questions = questions
+        self._golden_answers = golden_answers
+        self._renderer = renderer
+        self._batch_size = batch_size
+        self._group_size = group_size
+
+    @classmethod
+    def from_json(
+        cls,
+        data_path: str,
+        renderer: renderers.Renderer,
+        batch_size: int = 4,
+        group_size: int = 1,
+    ) -> "OPDSDFTDataset":
+        """Load OPD data from a JSON file.
+
+        Skips ``learning_units[0]`` (the initial attempt with no prior
+        human correction to distil from).
+        """
+        with open(data_path, "r") as f:
+            raw = json.load(f)
+
+        questions: list[str] = []
+        golden_answers: list[str] = []
+
+        for unit in raw["learning_units"][1:]:
+            questions.append("\n".join(unit["user_messages"]))
+            golden_answers.append(
+                chat_to_text(traj_to_chat(unit["human_trajectory"]))
+            )
+
+        return cls(
+            questions=questions,
+            golden_answers=golden_answers,
+            renderer=renderer,
+            batch_size=batch_size,
+            group_size=group_size,
+        )
+
+    def __len__(self) -> int:
+        return max(1, (len(self._questions) + self._batch_size - 1) // self._batch_size)
+
+    def get_batch(
+        self, index: int
+    ) -> tuple[Sequence[EnvGroupBuilder], list[str], list[str]]:
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._questions))
+
+        batch_questions = self._questions[start:end]
+        batch_golden = self._golden_answers[start:end]
+        builders: list[EnvGroupBuilder] = [
+            self._make_builder(q) for q in batch_questions
+        ]
+        return builders, batch_questions, batch_golden
+
+    def _make_builder(self, question: str) -> EnvGroupBuilder:
+        """Create an EnvGroupBuilder for a single student prompt.
+
+        Prefers the cookbook's ``ProblemGroupBuilder`` / ``PromptOnlyEnv``
+        when available, otherwise falls back to a local minimal builder.
+        """
+        if ProblemGroupBuilder is not None and PromptOnlyEnv is not None:
+            return ProblemGroupBuilder(
+                env_thunk=partial(PromptOnlyEnv, question, self._renderer),
+                num_envs=self._group_size,
+                dataset_name="opd",
+            )
+        return _OPDEnvGroupBuilder(
+            question=question,
+            renderer=self._renderer,
+            group_size=self._group_size,
+        )
+
+
+class _OPDEnvGroupBuilder(EnvGroupBuilder):
+    """Minimal prompt-only ``EnvGroupBuilder`` for SDFT.
+
+    Fallback used when ``tinker_cookbook.recipes.sdft.datasets`` is not
+    installed.  Creates single-turn, zero-reward environments that
+    present the student prompt for on-policy generation.
+    """
+
+    def __init__(
+        self,
+        question: str,
+        renderer: renderers.Renderer,
+        group_size: int = 1,
+    ):
+        self._question = question
+        self._renderer = renderer
+        self._group_size = group_size
+
+    async def make_envs(self) -> Sequence:
+        messages: list[renderers.Message] = [
+            {"role": "user", "content": self._question}  # type: ignore[typeddict-item]
+        ]
+        prompt = self._renderer.build_generation_prompt(messages)
+        envs = []
+        for _ in range(self._group_size):
+            envs.append(_PromptOnlyEnv(prompt))
+        return envs
+
+    def logging_tags(self) -> list[str]:
+        return ["opd"]
+
+
+class _PromptOnlyEnv:
+    """Minimal single-turn environment that yields zero reward.
+
+    Provides an initial ``ModelInput`` prompt and immediately terminates
+    the episode on the first step.  Compatible with the ``Env`` protocol
+    from ``tinker_cookbook.rl.types``.
+    """
+
+    def __init__(self, prompt: object):
+        self._prompt = prompt
+        self._done = False
+
+    def get_initial_observation(self) -> object:
+        return self._prompt
+
+    async def step(self, action: object) -> tuple[object | None, float, bool, dict]:
+        self._done = True
+        return None, 0.0, True, {}
+
+    async def reset(self) -> object:
+        self._done = False
+        return self._prompt
