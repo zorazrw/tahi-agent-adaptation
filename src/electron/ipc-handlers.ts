@@ -158,6 +158,19 @@ function hasLiveSession(sessionId: string): boolean {
   return Boolean(initializeSessions().getSession(sessionId));
 }
 
+/** After Brain dialog saves memory + skills: persist a user action + env snapshot on the active task session. */
+function recordBrainEditAction(sessionId: string): void {
+  const store = initializeSessions();
+  const sess = store.getSession(sessionId);
+  if (!sess) return;
+  const rowId = store.recordMessage(sessionId, { type: "brain_edit" });
+  store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sess));
+  broadcast({
+    type: "stream.message",
+    payload: { sessionId, message: { type: "brain_edit" } },
+  });
+}
+
 /** SDK result message: treat as success for post-step finalization (verifiers, nodeCompleted, status). */
 function isSuccessfulAgentResult(message: unknown): boolean {
   if (!message || typeof message !== "object") return false;
@@ -614,6 +627,14 @@ export function handleClientEvent(event: ClientEvent) {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       broadcast({ type: "skills.writeResult", payload: { requestId, success: false, error: message } });
+    }
+    return;
+  }
+
+  if (event.type === "session.recordBrainEdit") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid) {
+      recordBrainEditAction(sid);
     }
     return;
   }

@@ -36,13 +36,17 @@ export type EditVerifierMessage = { type: "edit_verifier" };
 /** User saved an output/intermediate file from the preview panel (path is relative to session cwd when possible). */
 export type FileEditMessage = { type: "file_edit"; path: string };
 
+/** User saved memory + skill files from the Brain dialog (global files; row is attributed to the active task session). */
+export type BrainEditMessage = { type: "brain_edit" };
+
 export type StreamMessage =
   | SDKMessage
   | UserPromptMessage
   | VerifierLabelMessage
   | EditWorkflowMessage
   | EditVerifierMessage
-  | FileEditMessage;
+  | FileEditMessage
+  | BrainEditMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 
@@ -114,6 +118,7 @@ export type ClientEvent =
   | { type: "session.history"; payload: { sessionId: string } }
   | { type: "session.solveNode"; payload: { sessionId: string; nodeId: string } }
   | { type: "session.regenerateWorkflow"; payload: { sessionId: string } }
+  | { type: "session.recordBrainEdit"; payload: { sessionId: string } }
   | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: PermissionResult } }
   | { type: "memory.read"; payload: { requestId: string } }
   | {

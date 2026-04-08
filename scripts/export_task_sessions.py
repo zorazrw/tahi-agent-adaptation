@@ -23,6 +23,7 @@ The first trajectory step is always the user ``message({initial query})``; like 
 are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
+``brain_edit()`` rows record Brain dialog saves (memory + skill files on disk).
 ``edit_workflow()``, ``edit_verifier()``, and preview ``file_edit("…")`` rows all persist the same
 ``environment`` shape: ``workflow`` (nested steps + verifier criteria/status), ``file`` (output paths + content),
 ``memory`` and ``skill`` (each a map of ``file-name`` → file text as injected at snapshot time).
@@ -58,7 +59,7 @@ Formats
     prompt_first_turn   : full prompt sent to the LM for the first turn (memoryPrefix included
                           when effective_prompt is persisted; otherwise reconstructed)
     agent_trajectory    : slimmed raw SDK messages (assistant/user/result/system/verifier_label)
-    human_trajectory    : follow_up, file_edit, edit_workflow, edit_verifier actions
+    human_trajectory    : follow_up, file_edit, brain_edit, edit_workflow, edit_verifier actions
     verifiers           : final verifier criteria + pass/fail status
   Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
 
@@ -969,6 +970,22 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
+        if m.get("type") == "brain_edit":
+            wo_br = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_br = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_br = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_br,
+                memory=m_br,
+                skill=s_br,
+            )
+            traj.append(trajectory_row("user", "brain_edit()", step_env))
+            idx += 1
+            continue
+
         if m.get("role") == "user":
             wo_u = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_u = mem_timeline[idx] if idx < len(mem_timeline) else {}
@@ -1089,6 +1106,8 @@ def normalize_message(msg: dict) -> dict:
         return {"role": "user", "type": "edit_verifier"}
     if msg.get("type") == "file_edit":
         return {"role": "user", "type": "file_edit", "path": msg.get("path", "")}
+    if msg.get("type") == "brain_edit":
+        return {"role": "user", "type": "brain_edit"}
     if msg.get("type") == "verifier_label":
         return {
             "role": "agent",
@@ -1377,6 +1396,21 @@ def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:
         return None
     wf = snap.get("workflow")
     return wf if isinstance(wf, list) else None
+
+
+def _brain_edit_human_entry(m: dict) -> dict:
+    """Weight-format row for Brain dialog save; includes memory/skill maps from the step snapshot."""
+    snap = m.get("state_snapshot")
+    mem: dict = {}
+    sk: dict = {}
+    if isinstance(snap, dict):
+        mp = snap.get("memory")
+        if isinstance(mp, dict):
+            mem = copy.deepcopy(mp)
+        sp = snap.get("skill")
+        if isinstance(sp, dict):
+            sk = copy.deepcopy(sp)
+    return {"type": "brain_edit", "round_index": None, "memory": mem, "skill": sk}
 
 
 def _snapshot_file_content(
@@ -1792,6 +1826,9 @@ def build_weight_based_session(
                 prev_workflow_snapshot = wf_after
             planning_human_traj.append(entry)
 
+        elif t == "brain_edit":
+            planning_human_traj.append(_brain_edit_human_entry(m))
+
     planning_agent_traj_merged = _merge_partial_assistant_messages(planning_agent_traj_raw)
     workflow_tree_generated = _extract_workflow_tree_from_tool_use(planning_agent_traj_merged)
     workflow_tree_after_planning = prev_workflow_snapshot or workflow_tree
@@ -1914,6 +1951,11 @@ def build_weight_based_session(
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
                 human_traj.append(entry)
+
+            elif t == "brain_edit":
+                human_traj.append(_brain_edit_human_entry(m))
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
 
         # Build verifiers from final workflow tree
         final_node = _find_node_in_tree(workflow_tree, node_id)

@@ -602,7 +602,7 @@ function App() {
       )}
 
       {showMemoryModal && (
-        <MemoryModal onClose={() => setShowMemoryModal(false)} />
+        <MemoryModal onClose={() => setShowMemoryModal(false)} taskSessionId={activeSessionId} />
       )}
 
       {globalError && (
