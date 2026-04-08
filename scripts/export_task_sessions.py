@@ -24,9 +24,10 @@ are omitted — they are LM input, not user chat. Only real follow-ups from the 
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
 ``edit_workflow()``, ``edit_verifier()``, and preview ``file_edit("…")`` rows all persist the same
-``environment`` shape: ``workflow`` (nested steps + verifier criteria/status) and ``file`` (output paths + content).
+``environment`` shape: ``workflow`` (nested steps + verifier criteria/status), ``file`` (output paths + content),
+``memory`` and ``skill`` (each a map of ``file-name`` → file text as injected at snapshot time).
 
-Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, and output files)
+Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, output files, memory/skills)
 comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
 results; turn ``result``; and a synthetic ``verifier_label`` row after the verifier LM updates marks
 (exported as agent ``verify("…")`` with the workflow node id). Pure ``message("…")`` steps (user or agent) omit ``environment``.
@@ -273,7 +274,7 @@ def _build_output_file_entries(
 
 
 def empty_environment() -> dict:
-    return {"workflow": [], "file": []}
+    return {"workflow": [], "file": [], "memory": {}, "skill": {}}
 
 
 def _verifier_success_or_failure(mark: Optional[str], *, plan_snapshot: bool) -> str:
@@ -407,6 +408,8 @@ def build_environment_state(
     file_placeholder: bool = False,
     plan_snapshot: bool = False,
     max_file_bytes: int = MAX_OUTPUT_FILE_BYTES,
+    memory: Optional[dict] = None,
+    skill: Optional[dict] = None,
 ) -> dict:
     wf = workflow_nested_for_export(
         workflow_tree,
@@ -426,7 +429,9 @@ def build_environment_state(
         files = {p: None for p in rel_paths}
     else:
         files = []
-    return {"workflow": wf, "file": files}
+    mem = copy.deepcopy(memory) if isinstance(memory, dict) else {}
+    sk = copy.deepcopy(skill) if isinstance(skill, dict) else {}
+    return {"workflow": wf, "file": files, "memory": mem, "skill": sk}
 
 
 def raw_has_workflow_tool(raw: dict) -> bool:
@@ -714,6 +719,31 @@ def _build_workflow_timeline(msgs: List[dict]) -> List[Optional[list]]:
     return out
 
 
+def _build_memory_skill_timeline(msgs: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """
+    Carry forward ``memory`` / ``skill`` filename→content maps from each message's ``state_snapshot``.
+
+    Older snapshots without these keys keep the previous maps (or empty dict before the first snapshot
+    that defines them).
+    """
+    mem_cur: dict = {}
+    sk_cur: dict = {}
+    mems_out: List[dict] = []
+    sks_out: List[dict] = []
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if isinstance(snap, dict):
+            mp = snap.get("memory")
+            if isinstance(mp, dict):
+                mem_cur = copy.deepcopy(mp)
+            sp = snap.get("skill")
+            if isinstance(sp, dict):
+                sk_cur = copy.deepcopy(sp)
+        mems_out.append(copy.deepcopy(mem_cur))
+        sks_out.append(copy.deepcopy(sk_cur))
+    return mems_out, sks_out
+
+
 def _environment_for_norm_merge(norm: dict, default_env: dict) -> Tuple[dict, bool]:
     """Merge snapshot file list with workflow from snapshot or fallback."""
     snap = norm.get("state_snapshot")
@@ -737,12 +767,15 @@ def environment_for_norm(
     *,
     cwd: Optional[str] = None,
     workflow_override: Optional[list] = None,
+    memory: Optional[dict] = None,
+    skill: Optional[dict] = None,
 ) -> Tuple[dict, bool]:
     """Return (environment dict, True if persisted ``state_snapshot`` contributed file content).
 
-    Canonical shape is ``{"workflow": [...], "file": [...]}``.
+    Canonical shape is ``{"workflow": [...], "file": [...], "memory": {...}, "skill": {...}}``.
     ``workflow_override`` (per-message replayed tree) replaces the merged workflow so removed steps
     and their output files/verifiers do not appear in later steps. File rows are realigned to that tree.
+    ``memory`` / ``skill`` are filename→content maps for the step (from carried-forward snapshots).
     """
     base, took_snap = _environment_for_norm_merge(norm, default_env)
     wf_target: Optional[list] = workflow_override
@@ -750,6 +783,10 @@ def environment_for_norm(
         wf_target = base["workflow"]
     if isinstance(wf_target, list):
         base = _realign_env_to_workflow(base, wf_target, cwd)
+    mem = memory if isinstance(memory, dict) else {}
+    sk = skill if isinstance(skill, dict) else {}
+    base["memory"] = copy.deepcopy(mem)
+    base["skill"] = copy.deepcopy(sk)
     return base, took_snap
 
 
@@ -803,6 +840,11 @@ def build_full_session_trajectory(
     empty_env = empty_environment()
     msgs = _merge_partial_assistant_messages(msgs)
     wf_timeline = _build_workflow_timeline(msgs)
+    mem_timeline, sk_timeline = _build_memory_skill_timeline(msgs)
+    plan_mem = mem_timeline[0] if mem_timeline else {}
+    plan_sk = sk_timeline[0] if sk_timeline else {}
+    final_mem = mem_timeline[-1] if mem_timeline else {}
+    final_sk = sk_timeline[-1] if sk_timeline else {}
 
     plan_env = _build_plan_environment(
         msgs,
@@ -811,6 +853,8 @@ def build_full_session_trajectory(
         output_files,
         verification_criteria,
         verifier_marks,
+        memory=plan_mem,
+        skill=plan_sk,
     )
     final_env = build_environment_state(
         cwd_val,
@@ -820,6 +864,8 @@ def build_full_session_trajectory(
         verification_criteria,
         verifier_marks,
         include_files=True,
+        memory=final_mem,
+        skill=final_sk,
     )
 
     traj: List[dict] = [
@@ -856,8 +902,15 @@ def build_full_session_trajectory(
 
         if m.get("type") == "verifier_label":
             wo_v = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_v = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_v = sk_timeline[idx] if idx < len(sk_timeline) else {}
             step_env, _snap = environment_for_norm(
-                m, final_env, cwd=cwd_val, workflow_override=wo_v
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_v,
+                memory=m_v,
+                skill=s_v,
             )
             nid_raw = m.get("nodeId", "")
             nid = str(nid_raw) if nid_raw is not None else ""
@@ -868,16 +921,30 @@ def build_full_session_trajectory(
 
         if m.get("type") == "edit_workflow":
             wo_e = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_e = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_e = sk_timeline[idx] if idx < len(sk_timeline) else {}
             step_env, _snap = environment_for_norm(
-                m, final_env, cwd=cwd_val, workflow_override=wo_e
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_e,
+                memory=m_e,
+                skill=s_e,
             )
             traj.append(trajectory_row("user", "edit_workflow()", step_env))
             idx += 1
             continue
         if m.get("type") == "edit_verifier":
             wo_ev = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_ev = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_ev = sk_timeline[idx] if idx < len(sk_timeline) else {}
             step_env, _snap = environment_for_norm(
-                m, final_env, cwd=cwd_val, workflow_override=wo_ev
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_ev,
+                memory=m_ev,
+                skill=s_ev,
             )
             traj.append(trajectory_row("user", "edit_verifier()", step_env))
             idx += 1
@@ -885,8 +952,15 @@ def build_full_session_trajectory(
 
         if m.get("type") == "file_edit":
             wo_f = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_f = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_f = sk_timeline[idx] if idx < len(sk_timeline) else {}
             step_env, _snap = environment_for_norm(
-                m, final_env, cwd=cwd_val, workflow_override=wo_f
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_f,
+                memory=m_f,
+                skill=s_f,
             )
             p_raw = m.get("path", "")
             p = str(p_raw) if p_raw is not None else ""
@@ -897,8 +971,15 @@ def build_full_session_trajectory(
 
         if m.get("role") == "user":
             wo_u = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_u = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_u = sk_timeline[idx] if idx < len(sk_timeline) else {}
             u_env, _u_snap = environment_for_norm(
-                m, final_env, cwd=cwd_val, workflow_override=wo_u
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_u,
+                memory=m_u,
+                skill=s_u,
             )
             traj.append(trajectory_row("user", describe_human_action(m), u_env))
         elif m.get("role") == "agent":
@@ -925,8 +1006,15 @@ def build_full_session_trajectory(
                     merged_tool = "\n\n".join(p for p in tr_parts if p and p != "(empty)") or "(empty)"
             env_idx = min(idx + consume - 1, len(msgs) - 1) if (extra == 1 or merged_tool is not None) else idx
             wo_a = wf_timeline[env_idx] if env_idx < len(wf_timeline) else None
+            m_a = mem_timeline[env_idx] if env_idx < len(mem_timeline) else {}
+            s_a = sk_timeline[env_idx] if env_idx < len(sk_timeline) else {}
             step_env, _env_snap = environment_for_norm(
-                msgs[env_idx], final_env, cwd=cwd_val, workflow_override=wo_a
+                msgs[env_idx],
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_a,
+                memory=m_a,
+                skill=s_a,
             )
             traj.append(
                 trajectory_row(
@@ -940,8 +1028,15 @@ def build_full_session_trajectory(
             continue
         else:
             wo_x = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_x = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_x = sk_timeline[idx] if idx < len(sk_timeline) else {}
             x_env, _ = environment_for_norm(
-                {"role": "unknown"}, final_env, cwd=cwd_val, workflow_override=wo_x
+                {"role": "unknown"},
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_x,
+                memory=m_x,
+                skill=s_x,
             )
             traj.append(
                 trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], x_env)
@@ -1240,6 +1335,9 @@ def _build_plan_environment(
     output_files: list,
     verification_criteria: list,
     verifier_marks: list,
+    *,
+    memory: Optional[dict] = None,
+    skill: Optional[dict] = None,
 ) -> dict:
     """
     Environment for the synthetic ``plan(...)`` trajectory row: workflow as it was right after
@@ -1267,7 +1365,9 @@ def _build_plan_environment(
         )
     rel_paths = _ordered_output_paths_nested_export_wf(plan_wf)
     files = {p: None for p in rel_paths}
-    return {"workflow": plan_wf, "file": files}
+    mem = copy.deepcopy(memory) if isinstance(memory, dict) else {}
+    sk = copy.deepcopy(skill) if isinstance(skill, dict) else {}
+    return {"workflow": plan_wf, "file": files, "memory": mem, "skill": sk}
 
 
 def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:

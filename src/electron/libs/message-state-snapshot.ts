@@ -6,12 +6,18 @@ import { readFileSync, existsSync } from "fs";
 import { join, resolve, relative, isAbsolute } from "path";
 import type { Session } from "./session-store.js";
 import type { VerifierMark, WorkflowNode } from "../types.js";
+import { readAllMemorySections } from "./memory-store.js";
+import { readAllFlatSkillSections } from "./skill-store.js";
 
 const MAX_OUTPUT_FILE_BYTES = 500_000;
 
 export type ExportEnvironmentSnapshot = {
   workflow: ReturnType<typeof workflowNestedForExport>;
   file: ReturnType<typeof buildOutputFileEntries>;
+  /** Per memory .md file under userData/memories — file name → raw contents (truncated). */
+  memory: Record<string, string>;
+  /** Per top-level skill .md under userData/skills — file name → raw contents (truncated). */
+  skill: Record<string, string>;
 };
 
 function verifierStatusForExport(mark: VerifierMark | undefined): "success" | "failure" {
@@ -174,6 +180,25 @@ function isPathInsideDir(rootDir: string, candidatePath: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+function truncateUtf8ForExport(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  const chunk = buf.subarray(0, maxBytes);
+  return chunk.toString("utf8") + "\n[... export truncated: file larger than max bytes ...]";
+}
+
+function memorySkillMapsForExport(): Pick<ExportEnvironmentSnapshot, "memory" | "skill"> {
+  const memory: Record<string, string> = {};
+  const skill: Record<string, string> = {};
+  for (const { fileName, content } of readAllMemorySections()) {
+    memory[fileName] = truncateUtf8ForExport(content ?? "", MAX_OUTPUT_FILE_BYTES);
+  }
+  for (const { fileName, content } of readAllFlatSkillSections()) {
+    skill[fileName] = truncateUtf8ForExport(content ?? "", MAX_OUTPUT_FILE_BYTES);
+  }
+  return { memory, skill };
+}
+
 /**
  * Build snapshot from current in-memory session (workflow tree + on-disk output files under cwd).
  */
@@ -183,14 +208,8 @@ export function buildExportEnvironmentSnapshot(session: Session): ExportEnvironm
   const relPaths = orderedOutputRelPathsFromTree(tree);
   const originals = collectOriginalOutputsMap(tree);
   const files = buildOutputFileEntries(session.cwd, relPaths, originals);
-  return { workflow: wf, file: files };
-}
-
-function truncateUtf8ForExport(text: string, maxBytes: number): string {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  const chunk = buf.subarray(0, maxBytes);
-  return chunk.toString("utf8") + "\n[... export truncated: file larger than max bytes ...]";
+  const { memory, skill } = memorySkillMapsForExport();
+  return { workflow: wf, file: files, memory, skill };
 }
 
 /** Canonical path key for matching workflow output paths (absolute vs cwd-relative mix). */
@@ -234,7 +253,7 @@ export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
   } else {
     files.push(entry);
   }
-  return { workflow: base.workflow, file: files };
+  return { workflow: base.workflow, file: files, memory: base.memory, skill: base.skill };
 }
 
 /** Whether to persist a snapshot for this SDK message (per meaningful agent turn / tool outcome). */

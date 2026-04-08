@@ -283,10 +283,10 @@ export class SessionStore {
     return id;
   }
 
-  /** Attach per-step environment (workflow + files) for export; overwrites when set again. */
+  /** Attach per-step environment (workflow + files + brain memory/skill maps) for export; overwrites when set again. */
   writeMessageSnapshot(
     messageId: string,
-    snapshot: { workflow?: unknown; file?: unknown; verifier?: unknown }
+    snapshot: { workflow?: unknown; file?: unknown; verifier?: unknown; memory?: unknown; skill?: unknown }
   ): void {
     this.db
       .prepare(`update messages set state_snapshot = ? where id = ?`)
