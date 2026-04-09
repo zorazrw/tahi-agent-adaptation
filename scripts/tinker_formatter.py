@@ -397,6 +397,103 @@ class OPDSDFTDataset:
         )
 
 
+class ReinforceDataset:
+    """Supervised dataset that keeps per-trajectory reward metadata aligned with datums.
+
+    Implements the ``SupervisedDataset`` interface (``get_batch``, ``set_epoch``,
+    ``__len__``) and additionally exposes ``get_batch_rewards`` so the REINFORCE
+    training loop can retrieve rewards that stay aligned with datums through
+    epoch shuffling.
+    """
+
+    def __init__(self, datums: list, rewards: list[float], batch_size: int):
+        if len(datums) != len(rewards):
+            raise ValueError(
+                f"datums ({len(datums)}) and rewards ({len(rewards)}) must have the same length"
+            )
+        self._datums = datums
+        self._rewards = rewards
+        self._batch_size = batch_size
+        self._indices = list(range(len(datums)))
+
+    def __len__(self) -> int:
+        return max(1, (len(self._datums) + self._batch_size - 1) // self._batch_size)
+
+    def set_epoch(self, seed: int) -> None:
+        import random
+
+        rng = random.Random(seed)
+        self._indices = list(range(len(self._datums)))
+        rng.shuffle(self._indices)
+
+    def get_batch(self, index: int) -> list:
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        return [self._datums[self._indices[i]] for i in range(start, end)]
+
+    def get_batch_rewards(self, index: int) -> list[float]:
+        """Return the scalar rewards for the same trajectories as ``get_batch``."""
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        return [self._rewards[self._indices[i]] for i in range(start, end)]
+
+
+@chz.chz
+class ReinforceDataBuilder(ChatDatasetBuilder):
+    """Build tokenized Datums with per-trajectory rewards for REINFORCE training.
+
+    Reads a JSON file containing agent interaction data with reward signals
+    and converts each learning unit into a tokenized Datum paired with a scalar
+    reward.  Skips the first learning unit (index 0) following OPD convention.
+
+    Reward formula: ``reward = verifier - alpha * human`` where ``verifier`` is
+    the 0-1 success ratio and ``human`` penalizes trajectories requiring more
+    human corrections.
+
+    Supports both single-session format (top-level ``learning_units``) and
+    multi-session format (top-level ``sessions`` array, each containing
+    ``learning_units``).
+    """
+
+    train_path: str
+    test_path: str | None = None
+    reward_alpha: float = 0.05
+
+    def _load_units(self, path: str) -> list[dict]:
+        with open(path, "r") as f:
+            raw = json.load(f)
+        if "sessions" in raw:
+            units: list[dict] = []
+            for session in raw["sessions"]:
+                units.extend(session.get("learning_units", [])[1:])
+            return units
+        return raw["learning_units"][1:]
+
+    def _build_dataset(self, path: str, batch_size: int) -> ReinforceDataset:
+        units = self._load_units(path)
+        datums = []
+        rewards: list[float] = []
+        for unit in units:
+            prompt = [{"role": "user", "content": msg} for msg in unit["user_messages"]]
+            response = traj_to_chat(unit["agent_trajectory"])
+            conversation = _hydrate_tool_calls(prompt + response)
+            datum = conversation_to_datum(
+                conversation, self.renderer, self.common_config.max_length
+            )
+            reward_data = unit["reward"]
+            reward = reward_data["verifier"] - self.reward_alpha * reward_data["human"]
+            datums.append(datum)
+            rewards.append(reward)
+        return ReinforceDataset(datums=datums, rewards=rewards, batch_size=batch_size)
+
+    def __call__(self) -> tuple[ReinforceDataset, ReinforceDataset | None]:
+        train_dataset = self._build_dataset(self.train_path, self.common_config.batch_size)
+        test_dataset = None
+        if self.test_path is not None:
+            test_dataset = self._build_dataset(self.test_path, self.common_config.batch_size)
+        return train_dataset, test_dataset
+
+
 class _OPDEnvGroupBuilder(EnvGroupBuilder):
     """Minimal prompt-only ``EnvGroupBuilder`` for SDFT.
 
