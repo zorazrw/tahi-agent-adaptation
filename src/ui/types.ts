@@ -36,6 +36,8 @@ export type EditWorkflowMessage = { type: "edit_workflow" };
 
 export type EditVerifierMessage = { type: "edit_verifier" };
 
+export type UpdateVerifiersMessage = { type: "update_verifiers"; nodeId: string };
+
 export type FileEditMessage = { type: "file_edit"; path: string };
 
 export type BrainEditMessage = { type: "brain_edit" };
@@ -47,6 +49,7 @@ export type StreamMessage =
   | VerifierLabelMessage
   | EditWorkflowMessage
   | EditVerifierMessage
+  | UpdateVerifiersMessage
   | FileEditMessage
   | BrainEditMessage;
 

@@ -920,6 +920,25 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
+        if m.get("type") == "update_verifiers":
+            wo_uv = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_uv = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_uv = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_uv,
+                memory=m_uv,
+                skill=s_uv,
+            )
+            nid_raw = m.get("nodeId", "")
+            nid = str(nid_raw) if nid_raw is not None else ""
+            act = f"update_verifiers({json.dumps(nid, ensure_ascii=False)})"
+            traj.append(trajectory_row("agent", act, step_env))
+            idx += 1
+            continue
+
         if m.get("type") == "edit_workflow":
             wo_e = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_e = mem_timeline[idx] if idx < len(mem_timeline) else {}
@@ -1104,6 +1123,8 @@ def normalize_message(msg: dict) -> dict:
         return {"role": "user", "type": "edit_workflow"}
     if msg.get("type") == "edit_verifier":
         return {"role": "user", "type": "edit_verifier"}
+    if msg.get("type") == "update_verifiers":
+        return {"role": "agent", "type": "update_verifiers", "nodeId": msg.get("nodeId", ""), "raw": msg}
     if msg.get("type") == "file_edit":
         return {"role": "user", "type": "file_edit", "path": msg.get("path", "")}
     if msg.get("type") == "brain_edit":
@@ -1647,6 +1668,8 @@ def _slim_raw_message(raw: dict) -> dict:
 
     if t == "verifier_label":
         return {"type": "verifier_label", "nodeId": raw.get("nodeId", "")}
+    if t == "update_verifiers":
+        return {"type": "update_verifiers", "nodeId": raw.get("nodeId", "")}
 
     return raw
 
@@ -1909,7 +1932,7 @@ def build_weight_based_session(
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
 
-            elif t == "verifier_label":
+            elif t == "verifier_label" or t == "update_verifiers":
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
                 agent_traj_raw.append({"raw": raw_clean})
                 if m.get("state_snapshot"):

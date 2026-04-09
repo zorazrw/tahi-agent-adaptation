@@ -844,6 +844,16 @@ export function handleClientEvent(event: ClientEvent) {
                     type: "session.workflowTree",
                     payload: { sessionId: session.id, workflowTree: latest.workflowTree },
                   });
+                  const updatePayload = { type: "update_verifiers" as const, nodeId: vNode };
+                  const updateRowId = sessions.recordMessage(session.id, updatePayload);
+                  const sessAfterUpdate = sessions.getSession(session.id);
+                  if (sessAfterUpdate) {
+                    sessions.writeMessageSnapshot(updateRowId, buildExportEnvironmentSnapshot(sessAfterUpdate));
+                  }
+                  broadcast({
+                    type: "stream.message",
+                    payload: { sessionId: session.id, message: updatePayload },
+                  });
                 }
               } catch (e) {
                 console.error("[ipc] verifier generation failed:", e);
