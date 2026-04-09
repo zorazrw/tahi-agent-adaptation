@@ -134,8 +134,10 @@ export function HtmlRenderer({
   const [mode, setMode] = useViewToggle("preview");
   const codeRef = useRef<HTMLElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const iframeViewportRef = useRef<HTMLDivElement>(null);
   const previewCleanupRef = useRef<(() => void) | null>(null);
   const editContentRef = useRef(data.content);
+  const fitRafRef = useRef<number | null>(null);
 
   const canEdit = Boolean(filePath && onReload);
   const [editContent, setEditContent] = useState(data.content);
@@ -151,6 +153,7 @@ export function HtmlRenderer({
   const colorMenuRef = useRef<HTMLDivElement>(null);
   const previewTextColorCustomInputRef = useRef<HTMLInputElement>(null);
   const [previewTextColor, setPreviewTextColor] = useState(PREVIEW_DEFAULT_TEXT_COLOR);
+  const [fitScale, setFitScale] = useState(1);
 
   const visualDirtyRef = useRef(visualDirty);
   const visualSavingRef = useRef(visualSaving);
@@ -179,13 +182,59 @@ export function HtmlRenderer({
     previewCleanupRef.current = null;
   }, []);
 
+  /**
+   * Fit rendered HTML into the preview viewport so users don't need two-axis scrolling.
+   * Uses a contain-style scale against the iframe document's full scroll size.
+   */
+  const syncPreviewFitScale = useCallback(() => {
+    const frame = iframeRef.current;
+    const viewport = iframeViewportRef.current;
+    const doc = frame?.contentDocument;
+    if (!frame || !viewport || !doc?.documentElement || mode !== "preview") {
+      setFitScale(1);
+      return;
+    }
+    const vw = Math.max(1, viewport.clientWidth);
+    const vh = Math.max(1, viewport.clientHeight);
+    const root = doc.documentElement;
+    const body = doc.body;
+    const contentW = Math.max(
+      root.scrollWidth,
+      body?.scrollWidth ?? 0,
+      root.offsetWidth,
+      body?.offsetWidth ?? 0
+    );
+    const contentH = Math.max(
+      root.scrollHeight,
+      body?.scrollHeight ?? 0,
+      root.offsetHeight,
+      body?.offsetHeight ?? 0
+    );
+    const safeW = Math.max(1, contentW);
+    const safeH = Math.max(1, contentH);
+    const next = Math.min(1, vw / safeW, vh / safeH);
+    const rounded = Number.isFinite(next) ? Math.max(0.05, +next.toFixed(4)) : 1;
+    setFitScale(rounded);
+  }, [mode]);
+
+  const schedulePreviewFitScale = useCallback(() => {
+    if (fitRafRef.current != null) {
+      cancelAnimationFrame(fitRafRef.current);
+    }
+    fitRafRef.current = requestAnimationFrame(() => {
+      fitRafRef.current = null;
+      syncPreviewFitScale();
+    });
+  }, [syncPreviewFitScale]);
+
   const markVisualDirtyFromDoc = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc?.documentElement) return;
     const dirty = serializeIframeDocument(doc) !== editContentRef.current;
     visualDirtyRef.current = dirty;
     setVisualDirty(dirty);
-  }, []);
+    schedulePreviewFitScale();
+  }, [schedulePreviewFitScale]);
 
   /** Sync ref immediately on keystroke so ⌘/Ctrl+S works before React re-renders (hotkey reads the ref). */
   const markVisualLikelyDirty = useCallback(() => {
@@ -320,6 +369,33 @@ export function HtmlRenderer({
   }, [runPreviewCleanup]);
 
   useEffect(() => {
+    if (mode !== "preview") return;
+    const viewport = iframeViewportRef.current;
+    if (!viewport) return;
+    const ro = new ResizeObserver(() => {
+      schedulePreviewFitScale();
+    });
+    ro.observe(viewport);
+    return () => ro.disconnect();
+  }, [mode, schedulePreviewFitScale]);
+
+  useEffect(() => {
+    if (mode !== "preview") {
+      setFitScale(1);
+      return;
+    }
+    schedulePreviewFitScale();
+  }, [mode, displayContent, schedulePreviewFitScale]);
+
+  useEffect(() => {
+    return () => {
+      if (fitRafRef.current != null) {
+        cancelAnimationFrame(fitRafRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (mode !== "preview" || visualTool === "none" || !canEdit) {
       runPreviewCleanup();
       setVisualDirty(false);
@@ -332,13 +408,14 @@ export function HtmlRenderer({
   }, [mode, visualTool, canEdit, attachPreviewTool, runPreviewCleanup]);
 
   const handleIframeLoad = useCallback(() => {
+    schedulePreviewFitScale();
     if (mode !== "preview" || visualTool === "none" || !canEdit) {
       runPreviewCleanup();
       setVisualDirty(false);
       return;
     }
     attachPreviewTool(visualTool);
-  }, [mode, visualTool, canEdit, attachPreviewTool, runPreviewCleanup]);
+  }, [mode, visualTool, canEdit, attachPreviewTool, runPreviewCleanup, schedulePreviewFitScale]);
 
   useEffect(() => {
     if (visualTool === "none") setVisualSaveError(null);
@@ -653,16 +730,24 @@ export function HtmlRenderer({
         )}
       </div>
       {mode === "preview" ? (
-        <iframe
-          ref={iframeRef}
-          srcDoc={displayContent}
-          sandbox={previewSandbox}
-          onLoad={handleIframeLoad}
-          tabIndex={canEdit ? 0 : undefined}
-          className="flex-1 w-full min-h-0 border-0 rounded bg-white"
-          style={{ minHeight: 200 }}
-          title="HTML Preview"
-        />
+        <div ref={iframeViewportRef} className="flex-1 min-h-0 w-full overflow-hidden rounded bg-white">
+          <iframe
+            ref={iframeRef}
+            srcDoc={displayContent}
+            sandbox={previewSandbox}
+            onLoad={handleIframeLoad}
+            tabIndex={canEdit ? 0 : undefined}
+            className="border-0 bg-white"
+            style={{
+              minHeight: 200,
+              width: `${100 / fitScale}%`,
+              height: `${100 / fitScale}%`,
+              transform: `scale(${fitScale})`,
+              transformOrigin: "top left",
+            }}
+            title="HTML Preview"
+          />
+        </div>
       ) : canEdit ? (
         <EditableTextPanel
           content={editContent}
