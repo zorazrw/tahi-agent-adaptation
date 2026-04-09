@@ -266,6 +266,23 @@ class OPDDataBuilder:
     train_path: str
     test_path: str | None = None
 
+    def _load_units(self, raw: object) -> list[dict]:
+        """Support both single-session and multi-session OPD export shapes."""
+        if not isinstance(raw, dict):
+            return []
+        if isinstance(raw.get("learning_units"), list):
+            return [u for u in raw["learning_units"] if isinstance(u, dict)]
+        if isinstance(raw.get("sessions"), list):
+            units: list[dict] = []
+            for sess in raw["sessions"]:
+                if not isinstance(sess, dict):
+                    continue
+                lu = sess.get("learning_units")
+                if isinstance(lu, list):
+                    units.extend(u for u in lu if isinstance(u, dict))
+            return units
+        return []
+
     def _load(self, path: str) -> list[dict]:
         with open(path, "r") as f:
             raw = json.load(f)
@@ -276,7 +293,8 @@ class OPDDataBuilder:
         #         "content": raw["initial_message"]["steps"][0]["action"].strip("message(").strip(")"),
         #     }
         # ]
-        for unit in raw["learning_units"][1:]:
+        units = self._load_units(raw)
+        for unit in units[1:]:
             question = "\n".join(unit["user_messages"])
             golden_answer = chat_to_text(traj_to_chat(unit["human_trajectory"]))
             student_prompt = [{"role": "user", "content": msg} for msg in unit["user_messages"]]
@@ -347,6 +365,24 @@ class OPDSDFTDataset:
         self._group_size = group_size
 
     @classmethod
+    def _load_units(cls, raw: object) -> list[dict]:
+        """Support both single-session and multi-session OPD export shapes."""
+        if not isinstance(raw, dict):
+            return []
+        if isinstance(raw.get("learning_units"), list):
+            return [u for u in raw["learning_units"] if isinstance(u, dict)]
+        if isinstance(raw.get("sessions"), list):
+            units: list[dict] = []
+            for sess in raw["sessions"]:
+                if not isinstance(sess, dict):
+                    continue
+                lu = sess.get("learning_units")
+                if isinstance(lu, list):
+                    units.extend(u for u in lu if isinstance(u, dict))
+            return units
+        return []
+
+    @classmethod
     def from_json(
         cls,
         data_path: str,
@@ -365,7 +401,8 @@ class OPDSDFTDataset:
         questions: list[str] = []
         golden_answers: list[str] = []
 
-        for unit in raw["learning_units"][1:]:
+        units = cls._load_units(raw)
+        for unit in units[1:]:
             questions.append("\n".join(unit["user_messages"]))
             golden_answers.append(
                 chat_to_text(traj_to_chat(unit["human_trajectory"]))
@@ -481,12 +518,20 @@ class ReinforceDataBuilder(ChatDatasetBuilder):
     def _load_units(self, path: str) -> list[dict]:
         with open(path, "r") as f:
             raw = json.load(f)
-        if "sessions" in raw:
+        if not isinstance(raw, dict):
+            return []
+        if isinstance(raw.get("learning_units"), list):
+            return [u for u in raw["learning_units"] if isinstance(u, dict)]
+        if isinstance(raw.get("sessions"), list):
             units: list[dict] = []
             for session in raw["sessions"]:
-                units.extend(session.get("learning_units", []))
+                if not isinstance(session, dict):
+                    continue
+                lu = session.get("learning_units")
+                if isinstance(lu, list):
+                    units.extend(u for u in lu if isinstance(u, dict))
             return units
-        return raw["learning_units"]
+        return []
 
     def _build_dataset(self, path: str, batch_size: int) -> ReinforceDataset:
         units = self._load_units(path)
