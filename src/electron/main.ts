@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, globalShortcut, Menu, shell } from "electron"
 import { execSync } from "child_process";
 import { readFile, writeFile, mkdir, copyFile } from "fs/promises";
-import { resolve, isAbsolute, basename, join, relative } from "path";
+import { resolve, isAbsolute, basename, join } from "path";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import * as XLSX from "xlsx";
@@ -477,20 +477,9 @@ app.on("ready", () => {
                 await writeFile(resolved, content, "utf8");
                 const sid = typeof sessionId === "string" ? sessionId.trim() : "";
                 if (sid) {
-                    let relPath = filePath;
-                    if (!isAbsolute(filePath)) {
-                        relPath = filePath.replace(/\\/g, "/");
-                    } else if (base) {
-                        try {
-                            const r = relative(resolve(base), resolved);
-                            if (r && !r.startsWith("..") && !isAbsolute(r)) {
-                                relPath = r.replace(/\\/g, "/");
-                            }
-                        } catch {
-                            /* keep filePath */
-                        }
-                    }
-                    recordFileEditAfterPreviewSave(sid, relPath);
+                    /** Always record resolved path so DB/export matches workflow ``outputFiles`` (often absolute). */
+                    const pathForRecord = resolved.replace(/\\/g, "/");
+                    recordFileEditAfterPreviewSave(sid, pathForRecord, content);
                 }
                 return { success: true };
             } catch (err) {

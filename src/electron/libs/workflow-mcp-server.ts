@@ -34,7 +34,7 @@ export function createWorkflowMcpServer(
     tools: [
       tool(
         "WorkflowPlan",
-        "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level (no single wrapper root). Each main step must have a visually verifiable output: set outputFiles to a file path (e.g. .md or .txt) or describe in verifiers what the operator can check. Each node has description, outputFiles, verifiers, and optionally children. For control/detail mode: add children to a main step to break it into detailed sub-steps; the number of sub-steps can vary by complexity. Prefer .md for document-style output; use .txt when markdown does not apply.",
+        "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level (no single wrapper root). Each main step must have a visually verifiable output: set outputFiles to file **names only** (e.g. slide.html, report.md)—no directories or absolute paths—or describe in verifiers what the operator can check. Each node has description, outputFiles, verifiers, and optionally children. For control/detail mode: add children to a main step to break it into detailed sub-steps; the number of sub-steps can vary by complexity. Prefer .md for document-style output; use .txt when markdown does not apply. Step execution resolves these names under the user-selected working directory.",
         { tasks: z.array(workflowNodeSchema) },
         async ({ tasks }) => {
           const roots = normalizeRoots(tasks);

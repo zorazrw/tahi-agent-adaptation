@@ -283,10 +283,10 @@ export class SessionStore {
     return id;
   }
 
-  /** Attach per-step environment (workflow + files) for export; overwrites when set again. */
+  /** Attach per-step environment (workflow + files + brain memory/skill maps) for export; overwrites when set again. */
   writeMessageSnapshot(
     messageId: string,
-    snapshot: { workflow?: unknown; file?: unknown; verifier?: unknown }
+    snapshot: { workflow?: unknown; file?: unknown; verifier?: unknown; memory?: unknown; skill?: unknown }
   ): void {
     this.db
       .prepare(`update messages set state_snapshot = ? where id = ?`)
@@ -310,6 +310,15 @@ export class SessionStore {
     this.db
       .prepare(`update sessions set workflow_tree = ?, updated_at = ? where id = ?`)
       .run(json, Date.now(), id);
+  }
+
+  /** Last persisted workflow tree from the DB (for classifying user edits vs stale in-memory state). */
+  getPersistedWorkflowTree(id: string): WorkflowNode[] | undefined {
+    const row = this.db
+      .prepare(`select workflow_tree from sessions where id = ?`)
+      .get(id) as { workflow_tree: string | null } | undefined;
+    if (!row?.workflow_tree) return undefined;
+    return parseJsonColumn(row.workflow_tree, workflowTreeSchema);
   }
 
   /** Persist verification depth to DB. */

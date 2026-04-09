@@ -23,41 +23,62 @@ The first trajectory step is always the user ``message({initial query})``; like 
 are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
+``brain_edit()`` rows record Brain dialog saves (memory + skill files on disk).
 ``edit_workflow()``, ``edit_verifier()``, and preview ``file_edit("…")`` rows all persist the same
-``environment`` shape: ``workflow`` (nested steps + verifier criteria/status) and ``file`` (output paths + content).
+``environment`` shape: ``workflow`` (nested steps + verifier criteria/status), ``file`` (output paths + content),
+``memory`` and ``skill`` (each a map of ``file-name`` → file text as injected at snapshot time).
 
-Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, and output files)
+Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, output files, memory/skills)
 comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
 results; turn ``result``; and a synthetic ``verifier_label`` row after the verifier LM updates marks
 (exported as agent ``verify("…")`` with the workflow node id). Pure ``message("…")`` steps (user or agent) omit ``environment``.
-Older DBs without ``state_snapshot`` fall back to one end-of-session snapshot.
+The export reapplies a carried-forward workflow tree from snapshots so, after ``edit_workflow`` removes
+a step, later steps do not retain that step’s verifiers or output files (and ``file`` rows are aligned
+to the current tree). Older DBs without ``state_snapshot`` fall back to one end-of-session snapshot.
 
-The second is always the agent ``plan({initial query})``; its ``environment`` has the workflow tree
-(with every step ``status`` ``pending``, not DB completion state); each verifier is
-``{"criterion", "status": "failure"}``; ``file`` maps paths to ``null``.
+The second is always the agent ``plan({initial query})``; its ``environment`` uses the workflow tree
+as of the last persisted snapshot before the first ``edit_workflow`` (or WorkflowPlan tool input
+with ``normalizeRoots``), not necessarily ``sessions.workflow_tree`` after later edits. Every step
+``status`` is ``pending``; each verifier is ``{"criterion", "status": "failure"}``; ``file`` maps
+paths to ``null``.
 
 Database location (Electron userData):
 - macOS: ~/Library/Application Support/Agent Cowork/sessions.db
 - Windows: %APPDATA%\\Agent Cowork\\sessions.db
 - Linux: ~/.config/Agent Cowork/sessions.db
 
+Formats
+-------
+--format default (default)
+  Human-readable action trajectory. Each step has actor, action, tool_result, and environment.
+  Used by the existing context-export pipeline.
+
+--format weight
+  Raw SDK messages + human actions for training. Each session is split into task_units
+  (one planning unit + one per workflow node). Each unit has:
+    prompt_first_turn   : full prompt sent to the LM for the first turn (memoryPrefix included
+                          when effective_prompt is persisted; otherwise reconstructed)
+    agent_trajectory    : slimmed raw SDK messages (assistant/user/result/system/verifier_label)
+    human_trajectory    : follow_up, file_edit, brain_edit, edit_workflow, edit_verifier actions
+    verifiers           : final verifier criteria + pass/fail status
+  Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
+
 Usage:
   conda activate code   # optional: use "code" env
   python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
-    [--tasks-dir DIR [--task-unit-id NODE_UUID]] [--granularity {all,automation,control}]
-  # Per-task files: --tasks-dir requires --session-id. Each task unit is written as tasks/{unit-id}.json
-  # (unit id is the workflow node id, a UUID). With --task-unit-id, only that file is updated.
+    [--format {default,weight}]
   # Use AGENT_COWORK_DB to override DB path:
   AGENT_COWORK_DB=/path/to/sessions.db python export_task_sessions.py
 """
 
 import argparse
+import copy
 import json
 import os
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Cap per-file inlined content to keep exports bounded (bytes).
 MAX_OUTPUT_FILE_BYTES = 500_000
@@ -213,7 +234,23 @@ def _build_output_file_entries(
     for rel in rel_paths:
         item: dict = {"path": rel, "content": None, "content_source": None, "error": None}
         read_ok = False
-        if base is not None and rel and not str(rel).startswith(("/", "\\")):
+        rel_path = Path(str(rel).strip()).expanduser() if rel else None
+        if rel_path is not None and rel_path.is_absolute():
+            try:
+                abs_p = rel_path.resolve()
+                if abs_p.is_file():
+                    text, err = _read_text_limited(abs_p, max_bytes)
+                    if text is not None:
+                        item["content"] = text
+                        item["content_source"] = "filesystem"
+                        read_ok = True
+                    elif err:
+                        item["error"] = err
+                else:
+                    item["error"] = "not_a_file"
+            except (OSError, ValueError):
+                item["error"] = "resolve_or_read_failed"
+        elif base is not None and rel:
             try:
                 abs_p = (base / rel).resolve()
                 base_r = base.resolve()
@@ -238,7 +275,7 @@ def _build_output_file_entries(
 
 
 def empty_environment() -> dict:
-    return {"workflow": [], "file": []}
+    return {"workflow": [], "file": [], "memory": {}, "skill": {}}
 
 
 def _verifier_success_or_failure(mark: Optional[str], *, plan_snapshot: bool) -> str:
@@ -372,6 +409,8 @@ def build_environment_state(
     file_placeholder: bool = False,
     plan_snapshot: bool = False,
     max_file_bytes: int = MAX_OUTPUT_FILE_BYTES,
+    memory: Optional[dict] = None,
+    skill: Optional[dict] = None,
 ) -> dict:
     wf = workflow_nested_for_export(
         workflow_tree,
@@ -391,7 +430,9 @@ def build_environment_state(
         files = {p: None for p in rel_paths}
     else:
         files = []
-    return {"workflow": wf, "file": files}
+    mem = copy.deepcopy(memory) if isinstance(memory, dict) else {}
+    sk = copy.deepcopy(skill) if isinstance(skill, dict) else {}
+    return {"workflow": wf, "file": files, "memory": mem, "skill": sk}
 
 
 def raw_has_workflow_tool(raw: dict) -> bool:
@@ -494,6 +535,34 @@ def _assistant_message_has_tool_use(m: dict) -> bool:
     return False
 
 
+def _assistant_tool_use_ids(m: dict) -> set:
+    """Return the set of tool_use ids from an assistant message."""
+    raw = m.get("raw")
+    if not isinstance(raw, dict):
+        return set()
+    ids: set = set()
+    for block in (raw.get("message") or {}).get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            tid = block.get("id")
+            if tid:
+                ids.add(tid)
+    return ids
+
+
+def _tool_result_message_ids(norm: dict) -> set:
+    """Return the set of tool_use_ids referenced by tool_result blocks in a user message."""
+    raw = norm.get("raw")
+    if not isinstance(raw, dict) or raw.get("type") != "user":
+        return set()
+    ids: set = set()
+    for b in (raw.get("message") or {}).get("content") or []:
+        if isinstance(b, dict) and b.get("type") == "tool_result":
+            tid = b.get("tool_use_id")
+            if tid:
+                ids.add(tid)
+    return ids
+
+
 def _assistant_text_only_payload(m: dict) -> Optional[str]:
     """
     If this normalized agent message is an ``assistant`` SDK message with only text blocks (no
@@ -560,12 +629,124 @@ def _step_omits_environment(actor: str, action: str, tool_result: Optional[str])
     return action.startswith("message(") and " | " not in action
 
 
-def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
-    """Return (environment dict, True if taken from persisted ``state_snapshot`` on this message).
+def _path_variant_strings(cwd: Optional[str], p: str) -> set[str]:
+    """Path strings that may refer to the same file (for matching snapshot rows to workflow outputFiles)."""
+    s = str(p).strip()
+    out: set[str] = set()
+    if not s:
+        return out
+    out.add(s.replace("\\", "/"))
+    try:
+        raw = Path(s)
+        if raw.is_absolute():
+            out.add(str(raw.resolve()).replace("\\", "/"))
+        elif cwd:
+            out.add(str((Path(cwd).expanduser() / s).resolve()).replace("\\", "/"))
+    except (OSError, ValueError):
+        pass
+    return {x for x in out if x}
 
-    Canonical shape is always ``{"workflow": [...], "file": [...]}``. Legacy rows may store only
-    ``file`` or ``verifier`` + ``file``; those are merged with ``default_env["workflow"]``.
+
+def _ordered_output_paths_nested_export_wf(wf: Any) -> List[str]:
+    """Preorder merge of node ``outputFiles`` (same order as tree walk in TS export)."""
+    seen: set[str] = set()
+    ordered: List[str] = []
+
+    def walk(nodes: Any) -> None:
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            for f in (n.get("outputFiles") or []):
+                st = str(f).strip()
+                if st and st not in seen:
+                    seen.add(st)
+                    ordered.append(st)
+            walk(n.get("children"))
+
+    walk(wf)
+    return ordered
+
+
+def _files_realigned_to_workflow(prior_files: Any, target_wf: list, cwd: Optional[str]) -> List[dict]:
+    """Drop file rows not on ``target_wf``; order and path strings follow the workflow tree."""
+    by_variants: Dict[str, dict] = {}
+    if isinstance(prior_files, list):
+        for f in prior_files:
+            if not isinstance(f, dict):
+                continue
+            for k in _path_variant_strings(cwd, str(f.get("path", ""))):
+                by_variants[k] = f
+    out: List[dict] = []
+    for p in _ordered_output_paths_nested_export_wf(target_wf):
+        hit: Optional[dict] = None
+        for k in _path_variant_strings(cwd, p):
+            if k in by_variants:
+                hit = by_variants[k]
+                break
+        if hit is not None:
+            row = dict(hit)
+            row["path"] = p
+            out.append(row)
+        else:
+            out.append({"path": p, "content": None, "content_source": None, "error": None})
+    return out
+
+
+def _realign_env_to_workflow(base_env: dict, target_wf: list, cwd: Optional[str]) -> dict:
+    return {
+        "workflow": copy.deepcopy(target_wf),
+        "file": _files_realigned_to_workflow(base_env.get("file"), target_wf, cwd),
+    }
+
+
+def _build_workflow_timeline(msgs: List[dict]) -> List[Optional[list]]:
     """
+    Carry forward the latest nested ``workflow`` from each message's ``state_snapshot``.
+
+    After ``edit_workflow`` (or any row that refreshes the snapshot), removed steps no longer appear
+    in later indices; rows without a workflow in the snapshot keep the previous tree.
+    """
+    current: Optional[list] = None
+    out: List[Optional[list]] = []
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if isinstance(snap, dict):
+            wf = snap.get("workflow")
+            if isinstance(wf, list):
+                current = copy.deepcopy(wf)
+        out.append(copy.deepcopy(current) if current is not None else None)
+    return out
+
+
+def _build_memory_skill_timeline(msgs: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """
+    Carry forward ``memory`` / ``skill`` filename→content maps from each message's ``state_snapshot``.
+
+    Older snapshots without these keys keep the previous maps (or empty dict before the first snapshot
+    that defines them).
+    """
+    mem_cur: dict = {}
+    sk_cur: dict = {}
+    mems_out: List[dict] = []
+    sks_out: List[dict] = []
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if isinstance(snap, dict):
+            mp = snap.get("memory")
+            if isinstance(mp, dict):
+                mem_cur = copy.deepcopy(mp)
+            sp = snap.get("skill")
+            if isinstance(sp, dict):
+                sk_cur = copy.deepcopy(sp)
+        mems_out.append(copy.deepcopy(mem_cur))
+        sks_out.append(copy.deepcopy(sk_cur))
+    return mems_out, sks_out
+
+
+def _environment_for_norm_merge(norm: dict, default_env: dict) -> Tuple[dict, bool]:
+    """Merge snapshot file list with workflow from snapshot or fallback."""
     snap = norm.get("state_snapshot")
     if not isinstance(snap, dict):
         return default_env, False
@@ -574,11 +755,40 @@ def environment_for_norm(norm: dict, default_env: dict) -> Tuple[dict, bool]:
         return default_env, False
     wf = snap.get("workflow")
     if isinstance(wf, list):
-        return {"workflow": wf, "file": files}, True
+        return {"workflow": copy.deepcopy(wf), "file": copy.deepcopy(files)}, True
     wf_fb = default_env.get("workflow")
     if isinstance(wf_fb, list):
-        return {"workflow": wf_fb, "file": files}, True
+        return {"workflow": copy.deepcopy(wf_fb), "file": copy.deepcopy(files)}, True
     return default_env, False
+
+
+def environment_for_norm(
+    norm: dict,
+    default_env: dict,
+    *,
+    cwd: Optional[str] = None,
+    workflow_override: Optional[list] = None,
+    memory: Optional[dict] = None,
+    skill: Optional[dict] = None,
+) -> Tuple[dict, bool]:
+    """Return (environment dict, True if persisted ``state_snapshot`` contributed file content).
+
+    Canonical shape is ``{"workflow": [...], "file": [...], "memory": {...}, "skill": {...}}``.
+    ``workflow_override`` (per-message replayed tree) replaces the merged workflow so removed steps
+    and their output files/verifiers do not appear in later steps. File rows are realigned to that tree.
+    ``memory`` / ``skill`` are filename→content maps for the step (from carried-forward snapshots).
+    """
+    base, took_snap = _environment_for_norm_merge(norm, default_env)
+    wf_target: Optional[list] = workflow_override
+    if wf_target is None and isinstance(base.get("workflow"), list):
+        wf_target = base["workflow"]
+    if isinstance(wf_target, list):
+        base = _realign_env_to_workflow(base, wf_target, cwd)
+    mem = memory if isinstance(memory, dict) else {}
+    sk = skill if isinstance(skill, dict) else {}
+    base["memory"] = copy.deepcopy(mem)
+    base["skill"] = copy.deepcopy(sk)
+    return base, took_snap
 
 
 def trajectory_row(
@@ -587,17 +797,55 @@ def trajectory_row(
     environment: dict,
     *,
     tool_result: Optional[str] = None,
+    message: Optional[str] = None,
 ) -> dict:
     """
     Build one trajectory object. User or agent steps that are only ``message("…")`` (no `` | ``)
     omit ``environment`` (keeps JSON small; state is on neighboring tool / verify / result rows).
     """
     row: Dict[str, Any] = {"actor": actor, "action": action}
+    if isinstance(message, str):
+        row["message"] = message
     if tool_result is not None:
         row["tool_result"] = tool_result
     if not _step_omits_environment(actor, action, tool_result):
         row["environment"] = environment
     return row
+
+
+def _parse_action_message_payload(action: str) -> Optional[str]:
+    """Parse a leading ``message("...")`` segment and return decoded text."""
+    if not isinstance(action, str):
+        return None
+    s = action.strip()
+    if not (s.startswith("message(") and s.endswith(")")):
+        return None
+    inner = s[len("message("):-1].strip()
+    if len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+        try:
+            return str(json.loads(inner))
+        except json.JSONDecodeError:
+            return inner[1:-1]
+    return inner
+
+
+def split_agent_action_and_message(action: str) -> Tuple[str, Optional[str]]:
+    """
+    For mixed rows like ``message("...") | Bash({...})``, export:
+    - action: ``Bash({...})`` (tool-call chain)
+    - message: decoded text from ``message("...")``
+    """
+    if not isinstance(action, str):
+        return action, None
+    parts = [p.strip() for p in action.split(" | ")]
+    if len(parts) <= 1:
+        return action, None
+    head = parts[0]
+    msg = _parse_action_message_payload(head)
+    if msg is None:
+        return action, None
+    tool_action = " | ".join(p for p in parts[1:] if p)
+    return (tool_action or action), msg
 
 
 def _prompts_equal(a: str, b: str) -> bool:
@@ -629,6 +877,24 @@ def build_full_session_trajectory(
     verifier_marks: list,
 ) -> List[dict]:
     empty_env = empty_environment()
+    msgs = _merge_partial_assistant_messages(msgs)
+    wf_timeline = _build_workflow_timeline(msgs)
+    mem_timeline, sk_timeline = _build_memory_skill_timeline(msgs)
+    plan_mem = mem_timeline[0] if mem_timeline else {}
+    plan_sk = sk_timeline[0] if sk_timeline else {}
+    final_mem = mem_timeline[-1] if mem_timeline else {}
+    final_sk = sk_timeline[-1] if sk_timeline else {}
+
+    plan_env = _build_plan_environment(
+        msgs,
+        workflow_tree,
+        steps,
+        output_files,
+        verification_criteria,
+        verifier_marks,
+        memory=plan_mem,
+        skill=plan_sk,
+    )
     final_env = build_environment_state(
         cwd_val,
         workflow_tree,
@@ -637,17 +903,8 @@ def build_full_session_trajectory(
         verification_criteria,
         verifier_marks,
         include_files=True,
-    )
-    plan_env = build_environment_state(
-        cwd_val,
-        workflow_tree,
-        steps,
-        output_files,
-        verification_criteria,
-        verifier_marks,
-        include_files=False,
-        file_placeholder=True,
-        plan_snapshot=True,
+        memory=final_mem,
+        skill=final_sk,
     )
 
     traj: List[dict] = [
@@ -683,7 +940,17 @@ def build_full_session_trajectory(
         pending_skip_tool_result = False
 
         if m.get("type") == "verifier_label":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_v = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_v = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_v = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_v,
+                memory=m_v,
+                skill=s_v,
+            )
             nid_raw = m.get("nodeId", "")
             nid = str(nid_raw) if nid_raw is not None else ""
             act = f"verify({json.dumps(nid, ensure_ascii=False)})"
@@ -691,19 +958,68 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
+        if m.get("type") == "update_verifiers":
+            wo_uv = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_uv = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_uv = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_uv,
+                memory=m_uv,
+                skill=s_uv,
+            )
+            nid_raw = m.get("nodeId", "")
+            nid = str(nid_raw) if nid_raw is not None else ""
+            act = f"update_verifiers({json.dumps(nid, ensure_ascii=False)})"
+            traj.append(trajectory_row("agent", act, step_env))
+            idx += 1
+            continue
+
         if m.get("type") == "edit_workflow":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_e = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_e = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_e = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_e,
+                memory=m_e,
+                skill=s_e,
+            )
             traj.append(trajectory_row("user", "edit_workflow()", step_env))
             idx += 1
             continue
         if m.get("type") == "edit_verifier":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_ev = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_ev = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_ev = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_ev,
+                memory=m_ev,
+                skill=s_ev,
+            )
             traj.append(trajectory_row("user", "edit_verifier()", step_env))
             idx += 1
             continue
 
         if m.get("type") == "file_edit":
-            step_env, _snap = environment_for_norm(m, final_env)
+            wo_f = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_f = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_f = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_f,
+                memory=m_f,
+                skill=s_f,
+            )
             p_raw = m.get("path", "")
             p = str(p_raw) if p_raw is not None else ""
             act = f"file_edit({json.dumps(p, ensure_ascii=False)})"
@@ -711,125 +1027,101 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
-        if m.get("role") == "user":
-            u_env, _u_snap = environment_for_norm(m, final_env)
-            traj.append(trajectory_row("user", describe_human_action(m), u_env))
-        elif m.get("role") == "agent":
-            action, extra = agent_export_action(msgs, idx)
-            consume = 1 + extra
-            merged_tool: Optional[str] = None
-            if _assistant_message_has_tool_use(m):
-                tail_i = idx + consume
-                if tail_i < len(msgs) and is_tool_result_message(msgs[tail_i]):
-                    tr_raw = msgs[tail_i].get("raw")
-                    if isinstance(tr_raw, dict):
-                        merged_tool = _tool_result_blob(tr_raw)
-                    consume += 1
-            env_idx = idx + 1 if (extra == 1 or merged_tool is not None) else idx
-            step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
-            traj.append(
-                trajectory_row(
-                    "agent",
-                    action,
-                    step_env,
-                    tool_result=merged_tool,
-                )
+        if m.get("type") == "brain_edit":
+            wo_br = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_br = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_br = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            step_env, _snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_br,
+                memory=m_br,
+                skill=s_br,
             )
-            idx += consume
-            continue
-        else:
-            traj.append(
-                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], final_env)
-            )
-        idx += 1
-
-    return traj
-
-
-def build_slice_trajectory(
-    msgs: List[dict],
-    cwd_val: Optional[str],
-    workflow_tree: Any,
-    steps: list,
-    output_files: list,
-    verification_criteria: list,
-    verifier_marks: list,
-) -> List[dict]:
-    """Messages for one workflow node run, in order, with final session environment."""
-    final_env = build_environment_state(
-        cwd_val,
-        workflow_tree,
-        steps,
-        output_files,
-        verification_criteria,
-        verifier_marks,
-        include_files=True,
-    )
-    traj: List[dict] = []
-    idx = 0
-    while idx < len(msgs):
-        m = msgs[idx]
-        if m.get("type") == "verifier_label":
-            step_env, _snap = environment_for_norm(m, final_env)
-            nid_raw = m.get("nodeId", "")
-            nid = str(nid_raw) if nid_raw is not None else ""
-            act = f"verify({json.dumps(nid, ensure_ascii=False)})"
-            traj.append(trajectory_row("agent", act, step_env))
+            traj.append(trajectory_row("user", "brain_edit()", step_env))
             idx += 1
             continue
 
         if m.get("role") == "user":
-            if m.get("type") == "user_prompt" and is_backend_node_user_prompt(m.get("prompt")):
-                idx += 1
-                continue
-            if m.get("type") == "edit_workflow":
-                step_env, _snap = environment_for_norm(m, final_env)
-                traj.append(trajectory_row("user", "edit_workflow()", step_env))
-                idx += 1
-                continue
-            if m.get("type") == "edit_verifier":
-                step_env, _snap = environment_for_norm(m, final_env)
-                traj.append(trajectory_row("user", "edit_verifier()", step_env))
-                idx += 1
-                continue
-            if m.get("type") == "file_edit":
-                step_env, _snap = environment_for_norm(m, final_env)
-                p_raw = m.get("path", "")
-                p = str(p_raw) if p_raw is not None else ""
-                act = f"file_edit({json.dumps(p, ensure_ascii=False)})"
-                traj.append(trajectory_row("user", act, step_env))
-                idx += 1
-                continue
-            u_env, _u_snap = environment_for_norm(m, final_env)
+            wo_u = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_u = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_u = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            u_env, _u_snap = environment_for_norm(
+                m,
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_u,
+                memory=m_u,
+                skill=s_u,
+            )
             traj.append(trajectory_row("user", describe_human_action(m), u_env))
         elif m.get("role") == "agent":
             action, extra = agent_export_action(msgs, idx)
             consume = 1 + extra
             merged_tool: Optional[str] = None
             if _assistant_message_has_tool_use(m):
-                tail_i = idx + consume
-                if tail_i < len(msgs) and is_tool_result_message(msgs[tail_i]):
-                    tr_raw = msgs[tail_i].get("raw")
+                expected_ids = _assistant_tool_use_ids(m)
+                tr_parts: List[str] = []
+                scan = idx + consume
+                while scan < len(msgs) and expected_ids:
+                    if not is_tool_result_message(msgs[scan]):
+                        break
+                    rids = _tool_result_message_ids(msgs[scan])
+                    if not rids or not rids.issubset(expected_ids):
+                        break
+                    tr_raw = msgs[scan].get("raw")
                     if isinstance(tr_raw, dict):
-                        merged_tool = _tool_result_blob(tr_raw)
+                        tr_parts.append(_tool_result_blob(tr_raw))
+                    expected_ids -= rids
                     consume += 1
-            env_idx = idx + 1 if (extra == 1 or merged_tool is not None) else idx
-            step_env, _env_snap = environment_for_norm(msgs[env_idx], final_env)
+                    scan += 1
+                if tr_parts:
+                    merged_tool = "\n\n".join(p for p in tr_parts if p and p != "(empty)") or "(empty)"
+            env_idx = min(idx + consume - 1, len(msgs) - 1) if (extra == 1 or merged_tool is not None) else idx
+            wo_a = wf_timeline[env_idx] if env_idx < len(wf_timeline) else None
+            m_a = mem_timeline[env_idx] if env_idx < len(mem_timeline) else {}
+            s_a = sk_timeline[env_idx] if env_idx < len(sk_timeline) else {}
+            step_env, _env_snap = environment_for_norm(
+                msgs[env_idx],
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_a,
+                memory=m_a,
+                skill=s_a,
+            )
+            action_out = action
+            message_out: Optional[str] = None
+            if " | " in action:
+                action_out, message_out = split_agent_action_and_message(action)
             traj.append(
                 trajectory_row(
                     "agent",
-                    action,
+                    action_out,
                     step_env,
                     tool_result=merged_tool,
+                    message=message_out,
                 )
             )
             idx += consume
             continue
         else:
+            wo_x = wf_timeline[idx] if idx < len(wf_timeline) else None
+            m_x = mem_timeline[idx] if idx < len(mem_timeline) else {}
+            s_x = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            x_env, _ = environment_for_norm(
+                {"role": "unknown"},
+                final_env,
+                cwd=cwd_val,
+                workflow_override=wo_x,
+                memory=m_x,
+                skill=s_x,
+            )
             traj.append(
-                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], final_env)
+                trajectory_row("user", json.dumps(m, ensure_ascii=False, default=str)[:400], x_env)
             )
         idx += 1
+
     return traj
 
 
@@ -841,46 +1133,6 @@ def extract_initial_task_instruction(action_trajectory: List[dict], fallback: st
                 continue
             return (prompt if isinstance(prompt, str) else "") or fallback or ""
     return fallback or ""
-
-
-Granularity = Literal["all", "automation", "control"]
-
-
-def flatten_workflow_tree(tree: Any, granularity: Granularity) -> List[dict]:
-    """
-    Flatten stored workflow_tree (WorkflowNode[]) into a stable list.
-
-    Expected node shape (from UI):
-      { id, description, outputFiles, verifiers, verifierMarks, children, ... }
-    """
-    if not isinstance(tree, list):
-        return []
-
-    out: List[dict] = []
-
-    def include_node(node: dict) -> bool:
-        if granularity == "all":
-            return True
-        depth = node.get("depth")
-        if not isinstance(depth, int):
-            return False
-        if granularity == "automation":
-            return depth == 0
-        # control
-        return depth > 0
-
-    def walk(nodes: Any) -> None:
-        if not isinstance(nodes, list):
-            return
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            if include_node(n):
-                out.append(n)
-            walk(n.get("children"))
-
-    walk(tree)
-    return out
 
 
 def iter_workflow_nodes_with_path(tree: Any) -> List[tuple[str, dict]]:
@@ -906,92 +1158,6 @@ def iter_workflow_nodes_with_path(tree: Any) -> List[tuple[str, dict]]:
     return out
 
 
-def segment_trajectory_by_resume_points(action_trajectory: List[dict], workflow_tree: Any) -> dict[str, List[dict]]:
-    """
-    Segment the session message stream into per-node slices using each node's resumePoint.uuid.
-
-    In the app, node-solving prompts are broadcast to the UI but not persisted; however, each node
-    stores resumePoint.uuid as the last SDK assistant UUID before the node run starts. We can use
-    those UUIDs as stable boundaries in the persisted message log.
-
-    Returns mapping: node_id -> list of normalized trajectory messages (slice for that node run).
-    """
-    # Index assistant UUID -> trajectory index
-    uuid_to_index: dict[str, int] = {}
-    for i, m in enumerate(action_trajectory):
-        if m.get("role") != "agent":
-            continue
-        raw = m.get("raw")
-        if not isinstance(raw, dict):
-            continue
-        u = raw.get("uuid")
-        if isinstance(u, str):
-            uuid_to_index[u] = i
-
-    # Collect (start_index, node_id) for nodes with resumePoint.uuid
-    starts: List[tuple[int, str]] = []
-    for _, node in iter_workflow_nodes_with_path(workflow_tree):
-        node_id = node.get("id")
-        if not isinstance(node_id, str):
-            continue
-        rp = node.get("resumePoint")
-        if not isinstance(rp, dict):
-            continue
-        u = rp.get("uuid")
-        if not isinstance(u, str):
-            continue
-        idx = uuid_to_index.get(u)
-        if idx is None:
-            continue
-        starts.append((idx + 1, node_id))
-
-    # Order by occurrence in trajectory; build slices between boundaries
-    starts.sort(key=lambda x: x[0])
-    node_to_slice: dict[str, List[dict]] = {}
-    for i, (start_i, node_id) in enumerate(starts):
-        end_i = starts[i + 1][0] if i + 1 < len(starts) else len(action_trajectory)
-        node_to_slice[node_id] = action_trajectory[start_i:end_i]
-    return node_to_slice
-
-
-def segment_trajectory_by_persisted_node_prompts(action_trajectory: List[dict], workflow_tree: Any) -> dict[str, List[dict]]:
-    """
-    Segment by persisted node-solving prompts (preferred when available).
-
-    After a node solve starts, the app emits a `user_prompt` containing the nodePrompt built from:
-      buildPromptForNode(node.description, pathContext, ...)
-    We can recover the node by matching the pathContext, which is the first line: "Proceed with: {path}".
-    """
-    path_nodes = iter_workflow_nodes_with_path(workflow_tree)
-    path_to_node_id: dict[str, str] = {}
-    for path, node in path_nodes:
-        node_id = node.get("id")
-        if isinstance(node_id, str) and path:
-            path_to_node_id[path] = node_id
-
-    runs: List[tuple[int, str]] = []
-    for i, m in enumerate(action_trajectory):
-        if m.get("role") != "user" or m.get("type") != "user_prompt":
-            continue
-        prompt = m.get("prompt", "")
-        if not isinstance(prompt, str) or not prompt.startswith("Proceed with: "):
-            continue
-        first_line = prompt.splitlines()[0]
-        path = first_line.removeprefix("Proceed with: ").strip()
-        node_id = path_to_node_id.get(path)
-        if node_id:
-            runs.append((i, node_id))
-
-    if not runs:
-        return {}
-
-    node_to_slice: dict[str, List[dict]] = {}
-    for idx, (start_i, node_id) in enumerate(runs):
-        end_i = runs[idx + 1][0] if idx + 1 < len(runs) else len(action_trajectory)
-        node_to_slice[node_id] = action_trajectory[start_i:end_i]
-    return node_to_slice
-
-
 def normalize_message(msg: dict) -> dict:
     """Normalize a stored StreamMessage for JSON output (agent turn vs user message)."""
     if msg.get("type") == "user_prompt":
@@ -1000,8 +1166,12 @@ def normalize_message(msg: dict) -> dict:
         return {"role": "user", "type": "edit_workflow"}
     if msg.get("type") == "edit_verifier":
         return {"role": "user", "type": "edit_verifier"}
+    if msg.get("type") == "update_verifiers":
+        return {"role": "agent", "type": "update_verifiers", "nodeId": msg.get("nodeId", ""), "raw": msg}
     if msg.get("type") == "file_edit":
         return {"role": "user", "type": "file_edit", "path": msg.get("path", "")}
+    if msg.get("type") == "brain_edit":
+        return {"role": "user", "type": "brain_edit"}
     if msg.get("type") == "verifier_label":
         return {
             "role": "agent",
@@ -1036,9 +1206,7 @@ def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:
     return [msg for msg in trajectory if not _is_export_noise_message(msg)]
 
 
-def extract_session(
-    cursor: sqlite3.Cursor, session_id: str, granularity: Granularity
-) -> Optional[Tuple[dict, List[dict]]]:
+def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
     row = cursor.execute(
         """SELECT id, title, last_prompt, workflow_tree, steps, output_files, verification_criteria, verifier_marks,
                   completed_step_indices, status, cwd, created_at, updated_at
@@ -1085,9 +1253,6 @@ def extract_session(
     action_trajectory = filter_out_stream_events(action_trajectory)
 
     initial_task_instruction = extract_initial_task_instruction(action_trajectory, last_prompt or "")
-    node_id_to_segment = segment_trajectory_by_persisted_node_prompts(action_trajectory, workflow_tree)
-    if not node_id_to_segment:
-        node_id_to_segment = segment_trajectory_by_resume_points(action_trajectory, workflow_tree)
 
     cwd_val = cwd if isinstance(cwd, str) and cwd.strip() else None
     full_traj = build_full_session_trajectory(
@@ -1101,104 +1266,830 @@ def extract_session(
         verifier_marks,
     )
 
-    public: dict = {
+    return {
         "uuid": sid,
         "name": title or "",
         "trajectory": full_traj,
     }
 
-    unit_payloads: List[dict] = []
-    tree_nodes = flatten_workflow_tree(workflow_tree, granularity)
-    if tree_nodes:
-        for node in tree_nodes:
-            node_id = node.get("id") if isinstance(node.get("id"), str) else None
-            if not node_id:
+
+# ────────────────────────────────────────────────────────────────────
+# Weight-based export format
+# ────────────────────────────────────────────────────────────────────
+
+
+def _sdk_message_type(msg: dict) -> Optional[str]:
+    """Return the SDK message type (system/assistant/user/result) or None for non-SDK."""
+    raw = msg.get("raw") if msg.get("role") == "agent" else None
+    if isinstance(raw, dict):
+        return raw.get("type")
+    return None
+
+
+def _extract_workflow_tree_from_tool_use(agent_traj: List[dict]) -> List[dict]:
+    """Extract the WorkflowPlan tool_use input.tasks from the planning trajectory."""
+    for entry in agent_traj:
+        raw = entry.get("raw", {})
+        if raw.get("type") != "assistant":
+            continue
+        for block in (raw.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
-            segment = node_id_to_segment.get(node_id, [])
-            intent = str(node.get("description") or "")
-            ut = build_slice_trajectory(
-                segment,
-                cwd_val,
-                workflow_tree,
-                steps,
-                output_files,
-                verification_criteria,
-                verifier_marks,
-            )
-            display_name = f"{title} — {intent}" if title else intent
-            unit_payloads.append({"uuid": node_id, "name": display_name, "trajectory": ut})
-    else:
-        # Legacy fallback: flat steps grid columns
-        if granularity in ("all", "automation"):
-            workflow_steps = build_workflow_steps(steps, output_files, verification_criteria, verifier_marks)
-            for i, step in enumerate(workflow_steps):
-                step_idx = step.get("step_index", i)
-                unit_id = f"{sid}-step-{step_idx}"
-                intent = step.get("step_description", "")
-                display_name = f"{title} — {intent}" if title else str(intent)
-                unit_payloads.append({"uuid": unit_id, "name": display_name, "trajectory": []})
-
-    return public, unit_payloads
+            name = block.get("name", "")
+            if "WorkflowPlan" in name or ("workflow" in name.lower() and "plan" in name.lower()):
+                tasks = block.get("input", {}).get("tasks", [])
+                if tasks:
+                    return tasks
+    return []
 
 
-def write_session_to_tasks_dir(
-    unit_payloads: List[dict],
-    tasks_dir: Path,
+def normalize_workflow_plan_tasks(tasks: Any) -> List[dict]:
+    """Match electron ``normalizeRoots``: unwrap a single wrapper root that only has children."""
+    if not isinstance(tasks, list) or not tasks:
+        return []
+    roots: List[Any] = list(tasks)
+    while len(roots) == 1:
+        n = roots[0]
+        if not isinstance(n, dict):
+            break
+        ch = n.get("children")
+        if not isinstance(ch, list) or len(ch) == 0:
+            break
+        roots = ch
+    return [x for x in roots if isinstance(x, dict)]
+
+
+def _apply_plan_snapshot_visual(wf: Any) -> List[dict]:
+    """Force plan-row semantics: every node ``pending``, every verifier ``failure``."""
+    if not isinstance(wf, list):
+        return []
+    out: List[dict] = []
+    for n in wf:
+        if not isinstance(n, dict):
+            continue
+        ch = _apply_plan_snapshot_visual(n.get("children"))
+        verifiers: List[dict] = []
+        for v in (n.get("verifiers") or []):
+            if isinstance(v, dict):
+                c = str(v.get("criterion", ""))
+                if c:
+                    verifiers.append({"criterion": c, "status": "failure"})
+            elif isinstance(v, str) and v.strip():
+                verifiers.append({"criterion": v.strip(), "status": "failure"})
+        out.append({
+            "id": n.get("id"),
+            "description": str(n.get("description") or ""),
+            "outputFiles": [str(x) for x in (n.get("outputFiles") or [])],
+            "verifiers": verifiers,
+            "status": "pending",
+            "children": ch,
+        })
+    return out
+
+
+def _tool_tasks_to_export_nested_plan(tasks: Any) -> List[dict]:
+    """Turn raw WorkflowPlan ``tasks`` (after ``normalize_workflow_plan_tasks``) into export workflow JSON."""
+    id_counter = [0]
+
+    def walk(nodes: Any) -> List[dict]:
+        if not isinstance(nodes, list):
+            return []
+        out_local: List[dict] = []
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            nid = f"plan-tool-{id_counter[0]}"
+            id_counter[0] += 1
+            crits = n.get("verifiers") or []
+            verifiers: List[dict] = []
+            for c in crits:
+                if isinstance(c, dict):
+                    s = str(c.get("criterion", ""))
+                else:
+                    s = str(c) if c else ""
+                if s:
+                    verifiers.append({"criterion": s, "status": "failure"})
+            ch_in = n.get("children")
+            ch = walk(ch_in) if isinstance(ch_in, list) else []
+            ofs = [str(x) for x in (n.get("outputFiles") or [])]
+            out_local.append({
+                "id": nid,
+                "description": str(n.get("description") or ""),
+                "outputFiles": ofs,
+                "verifiers": verifiers,
+                "status": "pending",
+                "children": ch,
+            })
+        return out_local
+
+    return walk(tasks)
+
+
+def _snapshot_workflow_for_plan_row(msgs: List[dict]) -> Optional[list]:
+    """Workflow for the synthetic ``plan(...)`` row: pre-edit snapshot or earliest post-plan snapshot."""
+    first_edit_idx: Optional[int] = None
+    for i, m in enumerate(msgs):
+        if m.get("type") == "edit_workflow":
+            first_edit_idx = i
+            break
+    if first_edit_idx is not None:
+        for i in range(first_edit_idx - 1, -1, -1):
+            snap = msgs[i].get("state_snapshot")
+            if not isinstance(snap, dict):
+                continue
+            wf = snap.get("workflow")
+            if isinstance(wf, list) and len(wf) > 0:
+                return copy.deepcopy(wf)
+        return None
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if not isinstance(snap, dict):
+            continue
+        wf = snap.get("workflow")
+        if isinstance(wf, list) and len(wf) > 0:
+            return copy.deepcopy(wf)
+    return None
+
+
+def _build_plan_environment(
+    msgs_merged: List[dict],
+    workflow_tree: Any,
+    steps: list,
+    output_files: list,
+    verification_criteria: list,
+    verifier_marks: list,
     *,
-    only_unit_id: Optional[str] = None,
-    pretty: bool = False,
-) -> int:
-    """Write each unit payload to ``tasks_dir / f\"{uuid}.json\"``."""
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    written = 0
-    for payload in unit_payloads:
-        uid = payload.get("uuid")
-        if not isinstance(uid, str) or not uid:
-            continue
-        if only_unit_id is not None and uid != only_unit_id:
-            continue
-        path = tasks_dir / f"{uid}.json"
-        body = json.dumps(payload, indent=2 if pretty else None, ensure_ascii=False)
-        if not body.endswith("\n"):
-            body += "\n"
-        path.write_text(body, encoding="utf-8")
-        written += 1
-    return written
+    memory: Optional[dict] = None,
+    skill: Optional[dict] = None,
+) -> dict:
+    """
+    Environment for the synthetic ``plan(...)`` trajectory row: workflow as it was right after
+    planning (from the last message snapshot before the first ``edit_workflow``, else the earliest
+    snapshot with a workflow), not ``sessions.workflow_tree`` which may reflect later edits.
+    Falls back to WorkflowPlan tool tasks (with ``normalize_workflow_plan_tasks``), then DB tree.
+    """
+    plan_wf: Any = None
+    snap_wf = _snapshot_workflow_for_plan_row(msgs_merged)
+    if snap_wf is not None:
+        plan_wf = _apply_plan_snapshot_visual(snap_wf)
+    else:
+        raw_tasks = _extract_workflow_tree_from_tool_use(msgs_merged)
+        normalized = normalize_workflow_plan_tasks(raw_tasks)
+        if normalized:
+            plan_wf = _tool_tasks_to_export_nested_plan(normalized)
+    if plan_wf is None or (isinstance(plan_wf, list) and len(plan_wf) == 0):
+        plan_wf = workflow_nested_for_export(
+            workflow_tree,
+            steps,
+            output_files,
+            verification_criteria,
+            verifier_marks,
+            plan_snapshot=True,
+        )
+    rel_paths = _ordered_output_paths_nested_export_wf(plan_wf)
+    files = {p: None for p in rel_paths}
+    mem = copy.deepcopy(memory) if isinstance(memory, dict) else {}
+    sk = copy.deepcopy(skill) if isinstance(skill, dict) else {}
+    return {"workflow": plan_wf, "file": files, "memory": mem, "skill": sk}
 
 
-def extract_all_sessions(cursor: sqlite3.Cursor, granularity: Granularity) -> List[dict]:
+def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:
+    """Extract workflow tree from a message's state_snapshot."""
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return None
+    wf = snap.get("workflow")
+    return wf if isinstance(wf, list) else None
+
+
+def _brain_edit_human_entry(m: dict) -> dict:
+    """Weight-format row for Brain dialog save; includes memory/skill maps from the step snapshot."""
+    snap = m.get("state_snapshot")
+    mem: dict = {}
+    sk: dict = {}
+    if isinstance(snap, dict):
+        mp = snap.get("memory")
+        if isinstance(mp, dict):
+            mem = copy.deepcopy(mp)
+        sp = snap.get("skill")
+        if isinstance(sp, dict):
+            sk = copy.deepcopy(sp)
+    return {"type": "brain_edit", "round_index": None, "memory": mem, "skill": sk}
+
+
+def _snapshot_file_content(
+    norm: dict, path: str, cwd: Optional[str] = None
+) -> Optional[str]:
+    """Get file content from a message's state_snapshot.
+
+    ``path`` is the stored ``file_edit`` path (often cwd-relative after preview save); snapshot rows
+    may use workflow basenames or absolute paths — match with path variants and basename fallback.
+    """
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return None
+    files = snap.get("file")
+    if not isinstance(files, list):
+        return None
+    path_s = str(path).strip() if path is not None else ""
+    if not path_s:
+        return None
+    cwd_opt = str(cwd).strip() if cwd else None
+    wanted = _path_variant_strings(cwd_opt, path_s)
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        fp = str(f.get("path", "")).strip()
+        if not fp:
+            continue
+        if fp == path_s:
+            return f.get("content") if isinstance(f.get("content"), str) else None
+        if wanted & _path_variant_strings(cwd_opt, fp):
+            c = f.get("content")
+            return c if isinstance(c, str) else None
+    base_want = os.path.basename(path_s.replace("\\", "/"))
+    if base_want:
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            fp = str(f.get("path", "")).strip()
+            if not fp:
+                continue
+            if os.path.basename(fp.replace("\\", "/")) == base_want:
+                c = f.get("content")
+                return c if isinstance(c, str) else None
+    return None
+
+
+def _extract_verifier_criteria(tree_nodes: list) -> List[str]:
+    """Extract verifier criterion strings from workflow tree nodes."""
+    out = []
+    for n in tree_nodes if isinstance(tree_nodes, list) else []:
+        if not isinstance(n, dict):
+            continue
+        for v in n.get("verifiers") or []:
+            if isinstance(v, dict):
+                out.append(v.get("criterion", ""))
+            elif isinstance(v, str):
+                out.append(v)
+    return out
+
+
+def _extract_verifier_marks(tree_nodes: list) -> List[Optional[str]]:
+    """Extract verifierMarks from workflow tree nodes."""
+    out: List[Optional[str]] = []
+    for n in tree_nodes if isinstance(tree_nodes, list) else []:
+        if not isinstance(n, dict):
+            continue
+        for m in n.get("verifierMarks") or []:
+            out.append(m)
+    return out
+
+
+def _find_node_in_tree(tree: Any, node_id: str) -> Optional[dict]:
+    """Recursively find a node by id in a workflow tree."""
+    if not isinstance(tree, list):
+        return None
+    for n in tree:
+        if not isinstance(n, dict):
+            continue
+        if n.get("id") == node_id:
+            return n
+        found = _find_node_in_tree(n.get("children"), node_id)
+        if found is not None:
+            return found
+    return None
+
+
+def _flush_partial_group(partials: List[dict]) -> dict:
+    """Merge a group of consecutive assistant partials into one entry."""
+    if len(partials) == 1:
+        return partials[0]
+    merged_content: List[dict] = []
+    for p in partials:
+        for block in (p.get("raw", {}).get("message", {}).get("content") or []):
+            merged_content.append(block)
+    result = dict(partials[-1])
+    final_raw = dict(result.get("raw", {}))
+    final_msg = dict(final_raw.get("message", {}))
+    final_msg["content"] = merged_content
+    final_raw["message"] = final_msg
+    result["raw"] = final_raw
+    return result
+
+
+def _merge_partial_assistant_messages(agent_traj: List[dict]) -> List[dict]:
+    """Merge consecutive assistant messages that belong to one API call.
+
+    Grouping rules (from design doc risk-5):
+    - stop_reason=None  → partial message (includePartialMessages: true)
+    - stop_reason="tool_use"/"end_turn" → final message of an API call
+
+    Consecutive assistant messages are accumulated until either:
+    1. A non-None stop_reason is seen (flush including it), or
+    2. A non-assistant message arrives (flush all pending partials as one group).
+    """
+    out: List[dict] = []
+    pending: List[dict] = []
+
+    for entry in agent_traj:
+        raw = entry.get("raw", {})
+        if raw.get("type") != "assistant":
+            if pending:
+                out.append(_flush_partial_group(pending))
+                pending = []
+            out.append(entry)
+            continue
+
+        pending.append(entry)
+        stop = raw.get("message", {}).get("stop_reason")
+        if stop is not None:
+            out.append(_flush_partial_group(pending))
+            pending = []
+
+    if pending:
+        out.append(_flush_partial_group(pending))
+    return out
+
+
+def _to_llm_native_tree(tree: Any) -> List[dict]:
+    """Convert an Electron-hydrated workflow tree to LLM native format.
+
+    Electron hydrate adds: id, status, verifierMarks, children, and converts
+    verifiers from strings to [{criterion, status}] objects.
+    This function strips all of that back to the raw task format the LLM
+    produced via the WorkflowPlan tool_use:
+      {description, outputFiles, verifiers: [str], children?: [...]}
+    Children are recursively converted and included only if non-empty.
+    """
+    if not isinstance(tree, list):
+        return []
+    out = []
+    for n in tree:
+        if not isinstance(n, dict):
+            continue
+        description = str(n.get("description") or "")
+        output_files = [str(f) for f in (n.get("outputFiles") or [])]
+        raw_verifiers = n.get("verifiers") or []
+        verifiers: List[str] = []
+        for v in raw_verifiers:
+            if isinstance(v, dict):
+                c = v.get("criterion", "")
+                if c:
+                    verifiers.append(str(c))
+            elif isinstance(v, str) and v:
+                verifiers.append(v)
+        children = _to_llm_native_tree(n.get("children"))
+        node: Dict[str, Any] = {
+            "description": description,
+            "outputFiles": output_files,
+            "verifiers": verifiers,
+        }
+        if children:
+            node["children"] = children
+        out.append(node)
+    return out
+
+
+def _slim_tool_use_block(block: dict) -> dict:
+    return {"type": "tool_use", "id": block.get("id", ""), "name": block.get("name", ""), "input": block.get("input", {})}
+
+
+def _slim_tool_result_block(block: dict) -> dict:
+    out: Dict[str, Any] = {"type": "tool_result", "tool_use_id": block.get("tool_use_id", "")}
+    c = block.get("content")
+    if isinstance(c, str):
+        out["content"] = c
+    elif isinstance(c, list):
+        out["content"] = c
+    return out
+
+
+def _slim_content_block(block: dict) -> dict:
+    t = block.get("type")
+    if t == "tool_use":
+        return _slim_tool_use_block(block)
+    if t == "tool_result":
+        return _slim_tool_result_block(block)
+    if t == "text":
+        return {"type": "text", "text": block.get("text", "")}
+    return block
+
+
+def _slim_raw_message(raw: dict) -> dict:
+    """Strip infrastructure metadata from a raw SDK message, keeping only
+    what LLM produced (assistant) or what LLM sees (user/tool_result)."""
+    t = raw.get("type")
+
+    if t == "assistant":
+        msg = raw.get("message", {})
+        content = [_slim_content_block(b) for b in (msg.get("content") or []) if isinstance(b, dict)]
+        out: Dict[str, Any] = {"type": "assistant", "content": content}
+        sr = msg.get("stop_reason")
+        if sr is not None:
+            out["stop_reason"] = sr
+        return out
+
+    if t == "user":
+        msg = raw.get("message", {})
+        raw_content = msg.get("content") or raw.get("content") or []
+        content = [_slim_content_block(b) for b in raw_content if isinstance(b, dict)]
+        return {"type": "user", "content": content}
+
+    if t == "system":
+        out = {"type": "system", "subtype": raw.get("subtype", "")}
+        if raw.get("model"):
+            out["model"] = raw["model"]
+        return out
+
+    if t == "result":
+        out = {"type": "result", "subtype": raw.get("subtype", "")}
+        r = raw.get("result")
+        if r is not None:
+            out["result"] = r
+        return out
+
+    if t == "verifier_label":
+        return {"type": "verifier_label", "nodeId": raw.get("nodeId", "")}
+    if t == "update_verifiers":
+        return {"type": "update_verifiers", "nodeId": raw.get("nodeId", "")}
+
+    return raw
+
+
+def _merge_parallel_tool_results(agent_traj: List[dict]) -> List[dict]:
+    """Merge consecutive user/tool_result messages whose tool_use_ids all
+    belong to the preceding assistant message's tool_use blocks."""
+    out: List[dict] = []
+    for entry in agent_traj:
+        raw = entry.get("raw", {})
+        if raw.get("type") != "user":
+            out.append(entry)
+            continue
+        content = raw.get("content") or raw.get("message", {}).get("content") or []
+        is_tool_result = all(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in content
+        ) and len(content) > 0
+        if not is_tool_result or not out:
+            out.append(entry)
+            continue
+        prev = out[-1]
+        prev_raw = prev.get("raw", {})
+        prev_type = prev_raw.get("type")
+        if prev_type == "user":
+            prev_content = prev_raw.get("content") or prev_raw.get("message", {}).get("content") or []
+            prev_is_tool_result = all(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in prev_content
+            ) and len(prev_content) > 0
+            if prev_is_tool_result:
+                merged_raw = dict(prev_raw)
+                merged_raw["content"] = list(prev_content) + list(content)
+                if "message" in merged_raw:
+                    del merged_raw["message"]
+                out[-1] = {"raw": merged_raw}
+                continue
+        out.append(entry)
+    return out
+
+
+WORKFLOW_PLAN_INSTRUCTION = "\n".join([
+    "",
+    "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
+    "Do NOT write out steps as text. Use the tool with structured JSON input.",
+    "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
+    "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to file **names only** (e.g. position_slide.html, report.md, summary.txt)—no folders, no absolute paths, no ../ segments—or use verifiers to describe what the operator can check.",
+    "For control mode (detailed view): add optional children to any main step to break it into detailed sub-steps; the number of sub-steps can depend on that step's complexity.",
+    "Do NOT add separate validation/verification/testing steps — our system handles verification via verifier criteria on each node.",
+    "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
+    "For outputFiles: use a single basename per entry (e.g. deliverable.md). Prefer .md for document-style output; use .txt when markdown does not apply.",
+    "After calling the tool, STOP. Do NOT execute any steps yourself.",
+    "The human operator will trigger each step individually.",
+    "",
+    "Task instruction:",
+])
+
+
+def build_weight_based_session(
+    cursor: sqlite3.Cursor, session_id: str
+) -> Optional[dict]:
+    """Build the weight-based export for a single session."""
+    row = cursor.execute(
+        """SELECT id, title, workflow_tree, last_prompt, cwd
+           FROM sessions WHERE id = ?""",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        return None
+    sid, title, workflow_tree_raw, last_prompt, cwd = row
+    workflow_tree = parse_json_column(workflow_tree_raw, [])
+    export_cwd: Optional[str] = None
+    if cwd is not None:
+        cs = str(cwd).strip()
+        if cs:
+            export_cwd = cs
+
+    try:
+        messages_rows = cursor.execute(
+            """SELECT data, state_snapshot, created_at FROM messages
+               WHERE session_id = ? ORDER BY created_at ASC""",
+            (session_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        messages_rows = [
+            (r[0], None, r[1])
+            for r in cursor.execute(
+                "SELECT data, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+                (session_id,),
+            ).fetchall()
+        ]
+
+    all_msgs: List[dict] = []
+    for data_str, snapshot_raw, ts in messages_rows:
+        try:
+            msg = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        t = msg.get("type")
+        if t == "stream_event":
+            continue
+        norm = dict(msg)
+        norm["_ts"] = ts
+        if snapshot_raw:
+            try:
+                norm["state_snapshot"] = json.loads(snapshot_raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        all_msgs.append(norm)
+
+    initial_task_instruction = ""
+    for m in all_msgs:
+        if m.get("type") == "user_prompt":
+            p = m.get("prompt", "")
+            if isinstance(p, str) and not is_backend_node_user_prompt(p):
+                initial_task_instruction = p
+                break
+    if not initial_task_instruction:
+        initial_task_instruction = last_prompt or ""
+
+    # ── Segment messages into phases ──
+    # Find boundaries: "Proceed with:" prompts mark node execution starts
+    node_starts: List[Tuple[int, str]] = []  # (msg_index, node_description)
+    path_nodes = iter_workflow_nodes_with_path(workflow_tree)
+    path_to_node: Dict[str, dict] = {}
+    for path, node in path_nodes:
+        if isinstance(node.get("id"), str) and path:
+            path_to_node[path] = node
+
+    for i, m in enumerate(all_msgs):
+        if m.get("type") != "user_prompt":
+            continue
+        p = m.get("prompt", "")
+        if not isinstance(p, str) or not p.startswith("Proceed with: "):
+            continue
+        first_line = p.splitlines()[0]
+        path = first_line.removeprefix("Proceed with: ").strip()
+        if path in path_to_node:
+            node_starts.append((i, path))
+
+    # ── Build planning task_unit ──
+    planning_end = node_starts[0][0] if node_starts else len(all_msgs)
+    planning_msgs = all_msgs[:planning_end]
+
+    planning_agent_traj_raw: List[dict] = []
+    planning_human_traj: List[dict] = []
+    prev_workflow_snapshot: Optional[List[dict]] = None
+
+    for m in planning_msgs:
+        t = m.get("type")
+        if t in ("system", "assistant", "user", "result"):
+            planning_agent_traj_raw.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
+
+        elif t == "edit_workflow":
+            wf_after = _snapshot_workflow_tree(m)
+            entry: Dict[str, Any] = {
+                "type": "edit_workflow",
+                "round_index": None,
+            }
+            if prev_workflow_snapshot is not None:
+                entry["workflow_tree_before"] = prev_workflow_snapshot
+            if wf_after is not None:
+                entry["workflow_tree_after"] = wf_after
+                prev_workflow_snapshot = wf_after
+            planning_human_traj.append(entry)
+
+        elif t == "edit_verifier":
+            wf_after = _snapshot_workflow_tree(m)
+            entry = {
+                "type": "edit_verifier",
+                "round_index": None,
+            }
+            if prev_workflow_snapshot is not None:
+                entry["verifiers_before"] = _extract_verifier_criteria(prev_workflow_snapshot)
+            if wf_after is not None:
+                entry["verifiers_after"] = _extract_verifier_criteria(wf_after)
+                prev_workflow_snapshot = wf_after
+            planning_human_traj.append(entry)
+
+        elif t == "brain_edit":
+            planning_human_traj.append(_brain_edit_human_entry(m))
+
+    planning_agent_traj_merged = _merge_partial_assistant_messages(planning_agent_traj_raw)
+    workflow_tree_generated = _extract_workflow_tree_from_tool_use(planning_agent_traj_merged)
+    workflow_tree_after_planning = prev_workflow_snapshot or workflow_tree
+    planning_agent_traj_final = _merge_parallel_tool_results(planning_agent_traj_merged)
+    planning_agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in planning_agent_traj_final]
+
+    # Normalize planning human_trajectory workflow snapshots to LLM native format
+    for h in planning_human_traj:
+        if h.get("type") == "edit_workflow":
+            if "workflow_tree_before" in h:
+                h["workflow_tree_before"] = _to_llm_native_tree(h["workflow_tree_before"])
+            if "workflow_tree_after" in h:
+                h["workflow_tree_after"] = _to_llm_native_tree(h["workflow_tree_after"])
+
+    # Reconstruct the planning first-turn prompt:
+    # WORKFLOW_PLAN_INSTRUCTION + user's initial task instruction
+    # NOTE: memoryPrefix is not available from DB; will be accurate once
+    # effective_prompt is persisted (TODO: modify src/electron).
+    planning_prompt = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
+
+    planning_unit: Dict[str, Any] = {
+        "intent": "planning",
+        "prompt_first_turn": planning_prompt,
+        "agent_trajectory": planning_agent_traj,
+        "human_trajectory": planning_human_traj,
+        "verifiers": [],
+        "workflow_tree_generated": workflow_tree_generated,
+        "workflow_tree_final": _to_llm_native_tree(workflow_tree_after_planning),
+    }
+
+    # ── Build execution task_units ──
+    task_units: List[dict] = [planning_unit]
+
+    for seg_idx, (start_i, path) in enumerate(node_starts):
+        end_i = node_starts[seg_idx + 1][0] if seg_idx + 1 < len(node_starts) else len(all_msgs)
+        node_msgs = all_msgs[start_i:end_i]
+        node = path_to_node[path]
+        node_id = node.get("id", "")
+        node_desc = node.get("description", "")
+
+        agent_traj_raw: List[dict] = []
+        human_traj: List[dict] = []
+        round_counter = 0
+        node_prompt_consumed = False
+        node_first_turn_prompt: Optional[str] = None
+        last_snapshot_msg: Optional[dict] = None
+
+        for m in node_msgs:
+            t = m.get("type")
+
+            if t == "user_prompt":
+                p = m.get("prompt", "")
+                if isinstance(p, str) and is_backend_node_user_prompt(p):
+                    if not node_prompt_consumed:
+                        node_prompt_consumed = True
+                        # Capture buildPromptForNode prompt as first-turn prompt.
+                        # NOTE: memoryPrefix not included (TODO: persist effective_prompt).
+                        node_first_turn_prompt = p
+                        continue
+                    human_traj.append({
+                        "type": "follow_up",
+                        "round_index": max(round_counter - 1, 0),
+                        "prompt": p,
+                    })
+                    continue
+                human_traj.append({
+                    "type": "follow_up",
+                    "round_index": max(round_counter - 1, 0),
+                    "prompt": p if isinstance(p, str) else "",
+                })
+                continue
+
+            if t in ("system", "assistant", "user", "result"):
+                raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
+                agent_traj_raw.append({"raw": raw_clean})
+                if t == "system" and m.get("subtype") == "init":
+                    round_counter += 1
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+            elif t == "verifier_label" or t == "update_verifiers":
+                raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
+                agent_traj_raw.append({"raw": raw_clean})
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+            elif t == "file_edit":
+                fe_path = m.get("path", "")
+                edited_content = _snapshot_file_content(m, fe_path, export_cwd)
+                original_content = None
+                if last_snapshot_msg is not None:
+                    original_content = _snapshot_file_content(last_snapshot_msg, fe_path, export_cwd)
+                human_traj.append({
+                    "type": "file_edit",
+                    "round_index": None,
+                    "path": fe_path,
+                    "original": original_content,
+                    "edited": edited_content,
+                })
+
+            elif t == "edit_workflow":
+                wf_after = _snapshot_workflow_tree(m)
+                entry = {"type": "edit_workflow", "round_index": None}
+                if wf_after is not None:
+                    entry["workflow_tree_after"] = wf_after
+                human_traj.append(entry)
+
+            elif t == "edit_verifier":
+                wf_before = _snapshot_workflow_tree(last_snapshot_msg) if last_snapshot_msg else None
+                wf_after = _snapshot_workflow_tree(m)
+                entry: Dict[str, Any] = {"type": "edit_verifier", "round_index": None}
+                if wf_before is not None:
+                    before_node = _find_node_in_tree(wf_before, node_id)
+                    if before_node:
+                        entry["verifiers_before"] = before_node.get("verifiers", [])
+                if wf_after is not None:
+                    after_node = _find_node_in_tree(wf_after, node_id)
+                    if after_node:
+                        entry["verifiers_after"] = after_node.get("verifiers", [])
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+                human_traj.append(entry)
+
+            elif t == "brain_edit":
+                human_traj.append(_brain_edit_human_entry(m))
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+        # Build verifiers from final workflow tree
+        final_node = _find_node_in_tree(workflow_tree, node_id)
+        verifiers: List[dict] = []
+        if final_node:
+            criteria = final_node.get("verifiers", [])
+            marks = final_node.get("verifierMarks", [])
+            for j, c in enumerate(criteria):
+                crit = c.get("criterion", "") if isinstance(c, dict) else str(c)
+                mark = marks[j] if j < len(marks) else None
+                verifiers.append({
+                    "criterion": crit,
+                    "status": mark == "check",
+                })
+
+        agent_traj_merged = _merge_partial_assistant_messages(agent_traj_raw)
+        agent_traj_with_results = _merge_parallel_tool_results(agent_traj_merged)
+        agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in agent_traj_with_results]
+
+        unit: Dict[str, Any] = {
+            "intent": node_desc,
+            "prompt_first_turn": node_first_turn_prompt or "",
+            "agent_trajectory": agent_traj,
+            "human_trajectory": human_traj,
+            "verifiers": verifiers,
+        }
+        task_units.append(unit)
+
+    return {
+        "uuid": sid,
+        "name": title or "",
+        "initial_task_instruction": initial_task_instruction,
+        "task_units": task_units,
+    }
+
+
+def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> List[dict]:
+    rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
+    sessions = []
+    for (session_id,) in rows:
+        sess = build_weight_based_session(cursor, session_id)
+        if sess:
+            sessions.append(sess)
+    return sessions
+
+
+def extract_all_sessions(cursor: sqlite3.Cursor) -> List[dict]:
     rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
     out = []
     for (session_id,) in rows:
-        sess = extract_session(cursor, session_id, granularity)
+        sess = extract_session(cursor, session_id)
         if sess:
-            out.append(sess[0])
+            out.append(sess)
     return out
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export Agent Cowork task sessions to JSON")
     parser.add_argument("--db", type=Path, help="Path to sessions.db (default: Electron userData location)")
-    parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout). Ignored if --tasks-dir is set.")
-    parser.add_argument(
-        "--tasks-dir",
-        type=Path,
-        help="Write one file per task unit: {unit-id}.json (requires --session-id). Use --task-unit-id to update only one file.",
-    )
-    parser.add_argument(
-        "--task-unit-id",
-        type=str,
-        help="With --tasks-dir, only write/update this task unit's JSON (workflow node id / unit id).",
-    )
+    parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout)")
     parser.add_argument("--session-id", type=str, help="Export only this session ID")
     parser.add_argument(
-        "--granularity",
+        "--format",
         type=str,
-        choices=["all", "automation", "control"],
-        default="automation",
-        help='Which workflow level to export from workflow_tree: "automation" (depth=0), "control" (depth>0), or "all".',
+        choices=["default", "weight"],
+        default="default",
+        help='Export format: "default" (human-readable trajectory) or "weight" (raw SDK messages + human_trajectory for training).',
     )
-    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     args = parser.parse_args()
 
     db_path = args.db or get_default_db_path()
@@ -1215,48 +2106,38 @@ def main() -> int:
     cursor = conn.cursor()
 
     try:
-        if args.tasks_dir:
-            if not args.session_id:
-                print("Error: --tasks-dir requires --session-id", file=sys.stderr)
-                return 1
-            packed = extract_session(cursor, args.session_id, args.granularity)
-            if not packed:
-                print(f"Error: session not found: {args.session_id}", file=sys.stderr)
-                return 1
-            _public, unit_payloads = packed
-            n = write_session_to_tasks_dir(
-                unit_payloads,
-                args.tasks_dir,
-                only_unit_id=args.task_unit_id,
-                pretty=args.pretty,
-            )
-            if args.task_unit_id and n == 0:
-                print(
-                    f"Error: no task unit with id {args.task_unit_id!r} in this session export",
-                    file=sys.stderr,
-                )
-                return 1
-            print(f"Wrote {n} task file(s) under {args.tasks_dir}", file=sys.stderr)
-        elif args.session_id:
-            packed = extract_session(cursor, args.session_id, args.granularity)
-            if not packed:
-                print(f"Error: session not found: {args.session_id}", file=sys.stderr)
-                return 1
-            payload, _units = packed
-            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
+        if args.format == "weight":
+            if args.session_id:
+                sess = build_weight_based_session(cursor, args.session_id)
+                if not sess:
+                    print(f"Error: session not found: {args.session_id}", file=sys.stderr)
+                    return 1
+                payload = [sess]
+            else:
+                payload = extract_all_sessions_weight_based(cursor)
+            json_str = json.dumps(payload, indent=2, ensure_ascii=False)
             if args.output:
-                args.output.write_text(json_str, encoding="utf-8")
-                print(f"Wrote {args.output}", file=sys.stderr)
+                args.output.write_text(json_str + "\n", encoding="utf-8")
+                n_units = sum(len(s.get("task_units", [])) for s in payload)
+                print(f"Wrote {args.output} ({len(payload)} sessions, {n_units} task_units)", file=sys.stderr)
             else:
                 print(json_str)
+            return 0
+
+        if args.session_id:
+            payload = extract_session(cursor, args.session_id)
+            if not payload:
+                print(f"Error: session not found: {args.session_id}", file=sys.stderr)
+                return 1
         else:
-            payload = {"sessions": extract_all_sessions(cursor, args.granularity)}
-            json_str = json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False)
-            if args.output:
-                args.output.write_text(json_str, encoding="utf-8")
-                print(f"Wrote {args.output}", file=sys.stderr)
-            else:
-                print(json_str)
+            payload = extract_all_sessions(cursor)
+
+        json_str = json.dumps(payload, indent=2, ensure_ascii=False)
+        if args.output:
+            args.output.write_text(json_str + "\n", encoding="utf-8")
+            print(f"Wrote {args.output}", file=sys.stderr)
+        else:
+            print(json_str)
     finally:
         conn.close()
 

@@ -31,7 +31,7 @@ function verifierPayload(tree: WorkflowNode[]): unknown {
 /**
  * Classify a user-driven workflow tree update from the renderer (sidebar Progress region).
  *
- * - ``workflow``: structure / descriptions / output files / child order changed.
+ * - ``workflow``: structure / descriptions / output file paths / child order changed (sidebar renames included).
  * - ``verifier``: only verifier lines or marks changed (same skeleton).
  *
  * IPC records ``edit_workflow`` (full workflow + files) when ``workflow`` is true, or ``edit_verifier``

@@ -618,7 +618,8 @@ export function MessageCard({
   if (
     message.type === "edit_workflow" ||
     message.type === "edit_verifier" ||
-    message.type === "file_edit"
+    message.type === "file_edit" ||
+    message.type === "brain_edit"
   ) {
     return null;
   }

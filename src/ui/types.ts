@@ -36,7 +36,11 @@ export type EditWorkflowMessage = { type: "edit_workflow" };
 
 export type EditVerifierMessage = { type: "edit_verifier" };
 
+export type UpdateVerifiersMessage = { type: "update_verifiers"; nodeId: string };
+
 export type FileEditMessage = { type: "file_edit"; path: string };
+
+export type BrainEditMessage = { type: "brain_edit" };
 
 export type StreamMessage =
   | SDKMessage
@@ -45,7 +49,9 @@ export type StreamMessage =
   | VerifierLabelMessage
   | EditWorkflowMessage
   | EditVerifierMessage
-  | FileEditMessage;
+  | UpdateVerifiersMessage
+  | FileEditMessage
+  | BrainEditMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 
@@ -116,6 +122,7 @@ export type ClientEvent =
   | { type: "session.history"; payload: { sessionId: string } }
   | { type: "session.solveNode"; payload: { sessionId: string; nodeId: string } }
   | { type: "session.regenerateWorkflow"; payload: { sessionId: string } }
+  | { type: "session.recordBrainEdit"; payload: { sessionId: string } }
   | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: PermissionResult } }
   | { type: "memory.read"; payload: { requestId: string } }
   | {

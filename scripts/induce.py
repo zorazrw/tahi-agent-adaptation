@@ -1,7 +1,7 @@
 """
 Extract memories and skills from session JSON (e.g. ``out.json``).
 
-Accepts export shape ``{ uuid, name, trajectory }`` or ``{ sessions: [...] }``.
+Accepts export shape ``{ uuid, name, trajectory }``, a JSON array of those objects, or legacy ``{ sessions: [...] }``.
 Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 
 Requires: anthropic, python-dotenv. API key resolution matches the Electron app (see below).
@@ -158,12 +158,12 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
         rows.append({"name": name_str, "actions": actions, "source": source})
     return rows
 
-MEMORY_SYSTEM = """From the task and numbered action log, write up to 6 lines the assistant should remember later.
-Each line: Fact: ... or Preference: ... One sentence; no long paths or raw dumps. If nothing fits: NONE"""
+MEMORY_SYSTEM = """From the task and numbered action log, write up to 6 facts or user preferences that should remembered later.
+Each line: {text} (one sentence; no long paths or raw dumps). If nothing fits: NONE"""
 
 SKILL_SYSTEM = """From the task and numbered log, describe the workflow the agent used: ordered steps, generalized (no long paths).
 Reply with:
-Title: <short name>
+Title: <short task name>
 1. <step>
 2. <step>
 ...

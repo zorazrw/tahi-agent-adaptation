@@ -6,12 +6,18 @@ import { readFileSync, existsSync } from "fs";
 import { join, resolve, relative, isAbsolute } from "path";
 import type { Session } from "./session-store.js";
 import type { VerifierMark, WorkflowNode } from "../types.js";
+import { readAllMemorySections } from "./memory-store.js";
+import { readAllFlatSkillSections } from "./skill-store.js";
 
 const MAX_OUTPUT_FILE_BYTES = 500_000;
 
 export type ExportEnvironmentSnapshot = {
   workflow: ReturnType<typeof workflowNestedForExport>;
   file: ReturnType<typeof buildOutputFileEntries>;
+  /** Per memory .md file under userData/memories — file name → raw contents (truncated). */
+  memory: Record<string, string>;
+  /** Per top-level skill .md under userData/skills — file name → raw contents (truncated). */
+  skill: Record<string, string>;
 };
 
 function verifierStatusForExport(mark: VerifierMark | undefined): "success" | "failure" {
@@ -124,10 +130,26 @@ function buildOutputFileEntries(
       error: null,
     };
     let readOk = false;
-    if (base && rel && !rel.startsWith("/") && !rel.startsWith("\\")) {
+    if (rel && isAbsolute(rel)) {
+      try {
+        const absP = resolve(rel);
+        if (existsSync(absP)) {
+          const { text, err } = readTextLimited(absP, MAX_OUTPUT_FILE_BYTES);
+          if (text != null) {
+            item.content = text;
+            item.content_source = "filesystem";
+            readOk = true;
+          } else if (err) item.error = err;
+        } else {
+          item.error = "not_a_file";
+        }
+      } catch {
+        item.error = "resolve_or_read_failed";
+      }
+    } else if (base && rel) {
       try {
         const absP = resolve(join(base, rel));
-        if (base && isPathInsideDir(base, absP)) {
+        if (isPathInsideDir(base, absP)) {
           const { text, err } = readTextLimited(absP, MAX_OUTPUT_FILE_BYTES);
           if (text != null) {
             item.content = text;
@@ -158,6 +180,25 @@ function isPathInsideDir(rootDir: string, candidatePath: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+function truncateUtf8ForExport(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  const chunk = buf.subarray(0, maxBytes);
+  return chunk.toString("utf8") + "\n[... export truncated: file larger than max bytes ...]";
+}
+
+function memorySkillMapsForExport(): Pick<ExportEnvironmentSnapshot, "memory" | "skill"> {
+  const memory: Record<string, string> = {};
+  const skill: Record<string, string> = {};
+  for (const { fileName, content } of readAllMemorySections()) {
+    memory[fileName] = truncateUtf8ForExport(content ?? "", MAX_OUTPUT_FILE_BYTES);
+  }
+  for (const { fileName, content } of readAllFlatSkillSections()) {
+    skill[fileName] = truncateUtf8ForExport(content ?? "", MAX_OUTPUT_FILE_BYTES);
+  }
+  return { memory, skill };
+}
+
 /**
  * Build snapshot from current in-memory session (workflow tree + on-disk output files under cwd).
  */
@@ -167,7 +208,52 @@ export function buildExportEnvironmentSnapshot(session: Session): ExportEnvironm
   const relPaths = orderedOutputRelPathsFromTree(tree);
   const originals = collectOriginalOutputsMap(tree);
   const files = buildOutputFileEntries(session.cwd, relPaths, originals);
-  return { workflow: wf, file: files };
+  const { memory, skill } = memorySkillMapsForExport();
+  return { workflow: wf, file: files, memory, skill };
+}
+
+/** Canonical path key for matching workflow output paths (absolute vs cwd-relative mix). */
+function resolvedFileKey(cwd: string | undefined, filePath: string): string {
+  const p = String(filePath ?? "").trim();
+  if (!p) return "";
+  try {
+    if (isAbsolute(p)) return resolve(p).replace(/\\/g, "/");
+    if (cwd?.trim()) return resolve(cwd.trim(), p).replace(/\\/g, "/");
+    return resolve(p).replace(/\\/g, "/");
+  } catch {
+    return p.replace(/\\/g, "/");
+  }
+}
+
+/**
+ * Same as ``buildExportEnvironmentSnapshot``, but guarantees ``editedRelPath`` appears in ``file``
+ * with the exact post-write ``editedContent`` (preview Text / Move save). Paths only in the workflow
+ * tree are otherwise included; this upserts or appends so HTML edits are visible in export DB rows.
+ */
+export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
+  session: Session,
+  editedRelPath: string,
+  editedContent: string
+): ExportEnvironmentSnapshot {
+  const base = buildExportEnvironmentSnapshot(session);
+  const cwd = session.cwd;
+  const editedKey = resolvedFileKey(cwd, editedRelPath);
+  const content = truncateUtf8ForExport(editedContent, MAX_OUTPUT_FILE_BYTES);
+  const files = base.file.map((f) => ({ ...f }));
+  const idx = files.findIndex((f) => resolvedFileKey(cwd, String(f.path)) === editedKey);
+  const displayPath = idx >= 0 ? String(files[idx].path) : editedRelPath.replace(/\\/g, "/");
+  const entry: (typeof base.file)[number] = {
+    path: displayPath,
+    content,
+    content_source: "preview_write",
+    error: null,
+  };
+  if (idx >= 0) {
+    files[idx] = { ...files[idx], ...entry };
+  } else {
+    files.push(entry);
+  }
+  return { workflow: base.workflow, file: files, memory: base.memory, skill: base.skill };
 }
 
 /** Whether to persist a snapshot for this SDK message (per meaningful agent turn / tool outcome). */

@@ -71,15 +71,6 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
     }
   }, [ensureCwd, setAttachedFiles, setGlobalError]);
 
-  const handleFilePickerClick = useCallback(async () => {
-    try {
-      const paths = await window.electron.selectFiles();
-      if (paths.length > 0) handleAttachFiles(paths);
-    } catch (err) {
-      console.error("File picker failed:", err);
-    }
-  }, [handleAttachFiles]);
-
   const handleSelectDirectory = useCallback(async () => {
     const result = await window.electron.selectDirectory();
     if (result) {
@@ -234,12 +225,12 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
         )}
 
         {/* Textarea */}
-        <div className="px-4 pt-4 pb-2">
+        <div className="px-4 pt-4 pb-1">
           <textarea
             ref={textareaRef}
             rows={2}
             className="w-full resize-none bg-transparent text-sm text-ink-800 placeholder:text-muted-foreground focus:outline-none"
-            placeholder="How can I help you today?"
+            placeholder="Ask anything"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -249,25 +240,27 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
         </div>
 
         {/* Toolbar */}
-        <div className="flex items-center gap-2 px-3 pb-3 pt-1 border-t border-ink-900/5">
+        <div className="flex items-center gap-2 px-3 py-1 border-t border-ink-900/5">
           {/* Folder picker */}
           <button
-            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
+            type="button"
+            className="inline-flex h-8 min-h-8 items-center gap-1 rounded-lg px-2 text-sm leading-none text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
             onClick={handleSelectDirectory}
             title="Select working folder"
           >
-            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
             {cwd ? (
-              <span className="flex items-center gap-1 max-w-[180px]">
+              <span className="flex items-center gap-1 max-w-[180px] min-w-0">
                 <span className="truncate">{cwd.split("/").filter(Boolean).slice(-2).join("/")}</span>
                 <button
-                  className="rounded-full p-0.5 hover:bg-ink-900/10"
+                  type="button"
+                  className="shrink-0 rounded-full p-0 hover:bg-ink-900/10"
                   onClick={(e) => { e.stopPropagation(); handleClearCwd(); }}
                   aria-label="Clear folder"
                 >
-                  <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M18 6L6 18M6 6l12 12" />
                   </svg>
                 </button>
@@ -275,44 +268,32 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
             ) : (
               <>
                 <span>Work in a folder</span>
-                <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="m6 9 6 6 6-6" />
                 </svg>
               </>
             )}
           </button>
 
-          {/* Attach button */}
-          <button
-            className="flex items-center justify-center rounded-lg p-1.5 text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5 transition-colors"
-            onClick={handleFilePickerClick}
-            title="Attach files"
-          >
-            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
-
           <div className="flex-1" />
 
           {/* Send button */}
           <button
-            className="flex items-center gap-1.5 rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            type="button"
+            className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-primary px-2.5 text-white shadow-soft hover:bg-primary-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             onClick={handleSend}
             disabled={!prompt.trim() || pendingStart}
+            aria-label={pendingStart ? "Starting…" : "Start task"}
           >
             {pendingStart ? (
-              <svg viewBox="0 0 24 24" className="h-4 w-4 animate-spin" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg viewBox="0 0 24 24" className="h-[1.125rem] w-[1.125rem] animate-spin" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
                 <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
               </svg>
             ) : (
-              <>
-                Let's go
-                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M5 12h14M12 5l7 7-7 7" />
-                </svg>
-              </>
+              <svg viewBox="0 0 24 24" className="h-[1.125rem] w-[1.125rem]" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M5 12h14M12 5l7 7-7 7" />
+              </svg>
             )}
           </button>
         </div>

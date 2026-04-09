@@ -50,11 +50,11 @@ const WORKFLOW_PLAN_INSTRUCTION = [
   "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
   "Do NOT write out steps as text. Use the tool with structured JSON input.",
   "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
-  "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to a path (e.g. report.md, summary.txt) or use verifiers to describe what the operator can check (e.g. file exists, content contains X).",
+  "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to file **names only** (e.g. position_slide.html, report.md, summary.txt)—no folders, no absolute paths, no ../ segments—or use verifiers to describe what the operator can check.",
   "For control mode (detailed view): add optional children to any main step to break it into detailed sub-steps; the number of sub-steps can depend on that step's complexity.",
   "Do NOT add separate validation/verification/testing steps — our system handles verification via verifier criteria on each node.",
   "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
-  "For outputFiles: prefer .md for document-style output so the UI shows markdown preview; use .txt when markdown does not apply.",
+  "For outputFiles: use a single basename per entry (e.g. deliverable.md). Prefer .md for document-style output; use .txt when markdown does not apply.",
   "After calling the tool, STOP. Do NOT execute any steps yourself.",
   "The human operator will trigger each step individually.",
   "",
@@ -83,19 +83,26 @@ export function buildPromptForNode(
   nodeDescription: string,
   pathContext: string,
   outputFiles: string[] = [],
-  humanEdits?: string
+  humanEdits?: string,
+  /** Session cwd; Read/Write/Edit are resolved under this directory. */
+  sessionCwd?: string
 ): string {
+  const cwd = (sessionCwd ?? "").trim();
+  const cwdNote = cwd
+    ? "\n\nWorking directory for this session (the agent runs with this as cwd). For Read, Write, Edit, and any file paths, use each output file as a path **relative to this directory** (e.g. the basename `report.md` means read/write under this folder). Do not place outputs outside this directory unless the task explicitly requires it.\n" +
+      `Working directory: ${cwd}`
+    : "\n\nUse paths relative to the session working directory for all Read, Write, and Edit calls.";
   const hasMd = outputFiles.some((f) => f.toLowerCase().endsWith(".md"));
   const formatNote = hasMd
     ? "\n\nWhen writing output to .md files, use markdown format (headers, lists, code blocks, etc.) so the file preview shows formatted content."
     : "";
   const filesNote =
     outputFiles.length > 0
-      ? "\n\nRelevant output files for this step (these should be treated as the source of truth when refining your work):\n" +
+      ? "\n\nRelevant output files for this step (basenames only; resolve under the working directory above when reading or writing):\n" +
         outputFiles.map((f) => `- ${f}`).join("\n")
       : "";
   const refinementNote =
-    "\n\nWhen refining or updating existing outputs, you MUST first call the Read tool to load the latest on-disk contents of any relevant output files, " +
+    "\n\nWhen refining or updating existing outputs, you MUST first call the Read tool to load the latest on-disk contents of any relevant output files (using the path relative to the working directory), " +
     "then apply edits on top of that version using Edit or Write. Do NOT recreate files from memory or discard existing content, and do NOT revert to older model-only drafts.";
   const editsNote = humanEdits
     ? "\n\nThe human has manually edited your previous outputs. For each file below you will see:\n" +
@@ -106,7 +113,7 @@ export function buildPromptForNode(
       "Human-edited files (showing original vs current):\n" +
       humanEdits
     : "";
-  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${filesNote}${formatNote}${refinementNote}${editsNote}`;
+  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${cwdNote}${filesNote}${formatNote}${refinementNote}${editsNote}`;
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
@@ -200,6 +207,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         options: {
           cwd: session.cwd ?? DEFAULT_CWD,
           settingSources: ["user", "project"],
+          maxThinkingTokens: 0,
           resume: resumeSessionId,
           resumeSessionAt,
           abortController,

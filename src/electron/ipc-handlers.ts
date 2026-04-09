@@ -1,7 +1,7 @@
 import { BrowserWindow } from "electron";
 import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
 import { runClaude, buildPromptForNode, buildRegenerateWorkflowPrompt, type RunnerHandle } from "./libs/runner.js";
-import { SessionStore } from "./libs/session-store.js";
+import { SessionStore, type Session } from "./libs/session-store.js";
 import {
   findNodeById,
   findParentNode,
@@ -13,7 +13,7 @@ import {
   completeNodeAndDescendants,
 } from "./libs/workflow-tree-utils.js";
 import { app } from "electron";
-import { join } from "path";
+import { join, relative, resolve, isAbsolute as pathIsAbsolute } from "path";
 import { readFileSync } from "fs";
 import { ensureMemoriesDir, readAllMemorySections, writeMemorySections, getMemoriesDir } from "./libs/memory-store.js";
 import {
@@ -23,13 +23,14 @@ import {
   syncAppSkills,
   isValidFlatSkillMdFileName,
 } from "./libs/skill-store.js";
-import {
-  runExportAndExtractContext,
-  runFullSessionExportAndExtract,
-  setContextInductionNotifier,
-} from "./libs/context-export.js";
+import { runFullSessionExportAndExtract, setContextInductionNotifier } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
-import { buildExportEnvironmentSnapshot, shouldWriteSnapshotForSdkMessage } from "./libs/message-state-snapshot.js";
+import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
+import {
+  buildExportEnvironmentSnapshot,
+  buildExportEnvironmentSnapshotWithPreviewWrittenFile,
+  shouldWriteSnapshotForSdkMessage,
+} from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
@@ -123,6 +124,60 @@ const sessionContinueVerificationNodeId = new Map<string, string>();
 
 /** Last workflow node the session was driving (solve or explicit selection); used to verify on continue when UI omits verificationNodeId. */
 const sessionLastVerificationNodeId = new Map<string, string>();
+type VerifierExampleState = { removed: string[]; added: string[] };
+const sessionVerifierExamplesByNodeId = new Map<string, Map<string, VerifierExampleState>>();
+
+function normalizeVerifierText(v: string): string {
+  return v.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function uniqueByNormalized(values: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const cleaned = String(raw ?? "").trim();
+    if (!cleaned) continue;
+    const key = normalizeVerifierText(cleaned);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
+function indexNodesById(tree: WorkflowNode[]): Map<string, WorkflowNode> {
+  const map = new Map<string, WorkflowNode>();
+  const stack = [...tree];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    map.set(node.id, node);
+    for (const child of node.children ?? []) stack.push(child);
+  }
+  return map;
+}
+
+function collectVerifierExampleUpdates(
+  oldTree: WorkflowNode[],
+  newTree: WorkflowNode[]
+): Map<string, VerifierExampleState> {
+  const out = new Map<string, VerifierExampleState>();
+  const oldIdx = indexNodesById(oldTree);
+  const newIdx = indexNodesById(newTree);
+  for (const [nodeId, beforeNode] of oldIdx.entries()) {
+    const afterNode = newIdx.get(nodeId);
+    if (!afterNode) continue;
+    const before = uniqueByNormalized([...(beforeNode.verifiers ?? [])]);
+    const after = uniqueByNormalized([...(afterNode.verifiers ?? [])]);
+    const beforeKeys = new Set(before.map(normalizeVerifierText));
+    const afterKeys = new Set(after.map(normalizeVerifierText));
+    const removed = before.filter((v) => !afterKeys.has(normalizeVerifierText(v)));
+    const added = after.filter((v) => !beforeKeys.has(normalizeVerifierText(v)));
+    if (removed.length > 0 || added.length > 0) {
+      out.set(nodeId, { removed, added });
+    }
+  }
+  return out;
+}
 
 function initializeSessions() {
   if (!sessions) {
@@ -156,6 +211,19 @@ setContextInductionNotifier((ev) => {
 
 function hasLiveSession(sessionId: string): boolean {
   return Boolean(initializeSessions().getSession(sessionId));
+}
+
+/** After Brain dialog saves memory + skills: persist a user action + env snapshot on the active task session. */
+function recordBrainEditAction(sessionId: string): void {
+  const store = initializeSessions();
+  const sess = store.getSession(sessionId);
+  if (!sess) return;
+  const rowId = store.recordMessage(sessionId, { type: "brain_edit" });
+  store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sess));
+  broadcast({
+    type: "stream.message",
+    payload: { sessionId, message: { type: "brain_edit" } },
+  });
 }
 
 /** SDK result message: treat as success for post-step finalization (verifiers, nodeCompleted, status). */
@@ -215,7 +283,7 @@ async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Pr
   }
 }
 
-function runPostSolverExport(sessionId: string, nodeId: string): void {
+function runPostSolverExport(sessionId: string, _nodeId: string): void {
   const store = initializeSessions();
   const session = store.getSession(sessionId);
   if (!session) return;
@@ -224,8 +292,6 @@ function runPostSolverExport(sessionId: string, nodeId: string): void {
   const planFullyDone = Boolean(treeAfter?.length && treeAfter.every(isNodeFullyComplete));
   if (planFullyDone) {
     runFullSessionExportAndExtract(sessionId);
-  } else {
-    runExportAndExtractContext(sessionId, nodeId);
   }
 }
 
@@ -529,7 +595,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   sessionLastVerificationNodeId.set(sessionId, nodeId);
   sessionContinueVerificationNodeId.delete(sessionId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
-  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits);
+  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",
@@ -616,6 +682,14 @@ export function handleClientEvent(event: ClientEvent) {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       broadcast({ type: "skills.writeResult", payload: { requestId, success: false, error: message } });
+    }
+    return;
+  }
+
+  if (event.type === "session.recordBrainEdit") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid) {
+      recordBrainEditAction(sid);
     }
     return;
   }
@@ -740,19 +814,65 @@ export function handleClientEvent(event: ClientEvent) {
       sessionContinueVerificationNodeId.delete(session.id);
     }
 
-    runClaude({
-      prompt: event.payload.prompt,
-      session,
-      resumeSessionId: session.claudeSessionId,
-      onEvent: emit,
-      onSessionUpdate: (updates) => {
-        sessions.updateSession(session.id, updates);
-      }
-    })
-      .then((handle) => {
+    void (async () => {
+      try {
+        if (vNode) {
+          const latest = sessions.getSession(session.id);
+          if (latest?.workflowTree) {
+            const target = findNodeById(latest.workflowTree, vNode);
+            if (target) {
+              const priorUserPrompts = sessions
+                .getMessages(session.id)
+                .filter((m): m is { type: "user_prompt"; prompt: string } => m.type === "user_prompt")
+                .map((m) => m.prompt.trim())
+                .filter(Boolean);
+              const userMessages = [...priorUserPrompts, event.payload.prompt.trim()].filter(Boolean);
+              try {
+                const updatedVerifiers = await generateUpdatedVerifiersForNode(
+                  latest,
+                  latest.workflowTree,
+                  target,
+                  userMessages,
+                  sessionVerifierExamplesByNodeId.get(session.id)?.get(vNode)?.removed ?? [],
+                  sessionVerifierExamplesByNodeId.get(session.id)?.get(vNode)?.added ?? []
+                );
+                if (updatedVerifiers && updatedVerifiers.length > 0) {
+                  target.verifiers = updatedVerifiers;
+                  target.verifierMarks = updatedVerifiers.map(() => undefined);
+                  sessions.updateSession(session.id, { workflowTree: latest.workflowTree });
+                  broadcast({
+                    type: "session.workflowTree",
+                    payload: { sessionId: session.id, workflowTree: latest.workflowTree },
+                  });
+                  const updatePayload = { type: "update_verifiers" as const, nodeId: vNode };
+                  const updateRowId = sessions.recordMessage(session.id, updatePayload);
+                  const sessAfterUpdate = sessions.getSession(session.id);
+                  if (sessAfterUpdate) {
+                    sessions.writeMessageSnapshot(updateRowId, buildExportEnvironmentSnapshot(sessAfterUpdate));
+                  }
+                  broadcast({
+                    type: "stream.message",
+                    payload: { sessionId: session.id, message: updatePayload },
+                  });
+                }
+              } catch (e) {
+                console.error("[ipc] verifier generation failed:", e);
+              }
+            }
+          }
+        }
+
+        const handle = await runClaude({
+          prompt: event.payload.prompt,
+          session,
+          resumeSessionId: session.claudeSessionId,
+          onEvent: emit,
+          onSessionUpdate: (updates) => {
+            sessions.updateSession(session.id, updates);
+          }
+        });
         runnerHandles.set(session.id, handle);
-      })
-      .catch((error) => {
+      } catch (error) {
         sessions.updateSession(session.id, { status: "error" });
         emit({
           type: "session.status",
@@ -764,7 +884,8 @@ export function handleClientEvent(event: ClientEvent) {
             error: String(error)
           }
         });
-      });
+      }
+    })();
 
     return;
   }
@@ -798,15 +919,31 @@ export function handleClientEvent(event: ClientEvent) {
   if (event.type === "session.updateWorkflowTree") {
     const { sessionId, workflowTree } = event.payload;
     const sessBefore = sessions.getSession(sessionId);
-    const oldTree = sessBefore?.workflowTree
-      ? (JSON.parse(JSON.stringify(sessBefore.workflowTree)) as WorkflowNode[])
-      : [];
+    const persistedTree = sessions.getPersistedWorkflowTree(sessionId);
+    const oldTree =
+      persistedTree !== undefined
+        ? (JSON.parse(JSON.stringify(persistedTree)) as WorkflowNode[])
+        : sessBefore?.workflowTree
+          ? (JSON.parse(JSON.stringify(sessBefore.workflowTree)) as WorkflowNode[])
+          : [];
     sessions.persistWorkflowTree(sessionId, workflowTree);
     if (hasLiveSession(sessionId)) {
       sessions.updateSession(sessionId, { workflowTree });
       broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree } });
     }
     const { workflow: wfEdit, verifier: verEdit } = classifyUserWorkflowTreeEdit(oldTree, workflowTree);
+    const nodeExampleUpdates = collectVerifierExampleUpdates(oldTree, workflowTree);
+    if (nodeExampleUpdates.size > 0) {
+      const existing = sessionVerifierExamplesByNodeId.get(sessionId) ?? new Map<string, VerifierExampleState>();
+      for (const [nodeId, delta] of nodeExampleUpdates.entries()) {
+        const prev = existing.get(nodeId) ?? { removed: [], added: [] };
+        existing.set(nodeId, {
+          removed: uniqueByNormalized([...prev.removed, ...delta.removed]),
+          added: uniqueByNormalized([...prev.added, ...delta.added]),
+        });
+      }
+      sessionVerifierExamplesByNodeId.set(sessionId, existing);
+    }
     const sessAfter = sessions.getSession(sessionId);
     if (sessAfter && wfEdit) {
       const rowId = sessions.recordMessage(sessionId, { type: "edit_workflow" });
@@ -900,6 +1037,7 @@ export function handleClientEvent(event: ClientEvent) {
     sessionCurrentNodeId.delete(sessionId);
     sessionContinueVerificationNodeId.delete(sessionId);
     sessionLastVerificationNodeId.delete(sessionId);
+    sessionVerifierExamplesByNodeId.delete(sessionId);
 
     sessions.deleteSession(sessionId);
     emit({
@@ -921,17 +1059,43 @@ export function handleClientEvent(event: ClientEvent) {
   }
 }
 
-/** Called from main after a successful preview-panel ``write-file`` (full workflow+file snapshot, same as other env rows). */
-export function recordFileEditAfterPreviewSave(sessionId: string, editedRelPath: string): void {
+/** If ``absNorm`` lies under session cwd, return posix relative path for storage/export; else absolute. */
+function fileEditPathForMessage(sess: Session, absNorm: string): string {
+  const cwd = sess.cwd?.trim();
+  if (!cwd) return absNorm;
+  try {
+    const abs = resolve(absNorm);
+    const root = resolve(cwd);
+    const relPath = relative(root, abs);
+    if (relPath && !relPath.startsWith("..") && !pathIsAbsolute(relPath)) {
+      return relPath.replace(/\\/g, "/");
+    }
+  } catch {
+    /* keep absolute */
+  }
+  return absNorm;
+}
+
+/** Called from main after a successful preview-panel ``write-file`` (``file_edit`` row + env snapshot including written HTML/text). */
+export function recordFileEditAfterPreviewSave(
+  sessionId: string,
+  editedAbsPath: string,
+  editedContent?: string
+): void {
   const store = initializeSessions();
   const sess = store.getSession(sessionId);
   if (!sess) return;
-  const pathNorm = editedRelPath.replace(/\\/g, "/");
-  const rowId = store.recordMessage(sessionId, { type: "file_edit", path: pathNorm });
-  store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sess));
+  const pathNormAbs = editedAbsPath.replace(/\\/g, "/");
+  const pathForMessage = fileEditPathForMessage(sess, pathNormAbs);
+  const rowId = store.recordMessage(sessionId, { type: "file_edit", path: pathForMessage });
+  const snapshot =
+    typeof editedContent === "string"
+      ? buildExportEnvironmentSnapshotWithPreviewWrittenFile(sess, pathNormAbs, editedContent)
+      : buildExportEnvironmentSnapshot(sess);
+  store.writeMessageSnapshot(rowId, snapshot);
   broadcast({
     type: "stream.message",
-    payload: { sessionId, message: { type: "file_edit", path: pathNorm } },
+    payload: { sessionId, message: { type: "file_edit", path: pathForMessage } },
   });
 }
 

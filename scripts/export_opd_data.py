@@ -15,6 +15,15 @@ if str(_scripts) not in sys.path:
 import session_export_common as s  # noqa: E402
 
 
+def _is_message_action(step: dict) -> bool:
+    action = step.get("action")
+    return isinstance(action, str) and action.startswith("message(") and action.endswith(")")
+
+
+def _user_messages_only(steps: list[dict]) -> list[str]:
+    return [s.user_text(x) for x in steps if isinstance(x, dict) and _is_message_action(x)]
+
+
 def _opd_units(traj: list) -> tuple[dict | None, list[dict]]:
     initial, pairs = s.pair_segments(traj)
     if not pairs:
@@ -25,7 +34,7 @@ def _opd_units(traj: list) -> tuple[dict | None, list[dict]]:
         units.append(
             {
                 "index": j,
-                "user_messages": [s.user_text(x) for x in prefix],
+                "user_messages": _user_messages_only(prefix),
                 "agent_trajectory": list(ag),
                 "human_trajectory": list(hm),
             }
@@ -38,10 +47,16 @@ def _session(blob: dict) -> dict:
     meta = {"uuid": blob.get("uuid"), "name": blob.get("name")}
     traj = blob.get("trajectory")
     if not isinstance(traj, list):
-        out = {**meta, "initial_message": None, "learning_units": [], "error": "bad_trajectory"}
+        out = {**meta, "initial_message": "", "learning_units": [], "error": "bad_trajectory"}
     else:
         initial, units = _opd_units(traj)
-        out = {**meta, "initial_message": initial, "learning_units": units}
+        initial_text = ""
+        if isinstance(initial, dict):
+            steps = initial.get("steps")
+            if isinstance(steps, list):
+                texts = [s.user_text(x) for x in steps if isinstance(x, dict)]
+                initial_text = "\n\n".join(t for t in texts if t)
+        out = {**meta, "initial_message": initial_text, "learning_units": units}
     return s.strip_actor(out)
 
 

@@ -12,6 +12,8 @@ import type { ClientEvent, ServerEvent } from "../types";
 
 interface MemoryModalProps {
   onClose: () => void;
+  /** Active task session; used to append a ``brain_edit`` timeline row after a successful save. */
+  taskSessionId: string | null;
 }
 
 type MemorySection = {
@@ -217,7 +219,15 @@ function writeSkillToMain(payload: {
   });
 }
 
-export function MemoryModal({ onClose }: MemoryModalProps) {
+function notifyBrainEditRecorded(taskSessionId: string | null | undefined) {
+  const sid = taskSessionId?.trim();
+  if (!sid) return;
+  if (typeof window.electron?.sendClientEvent === "function") {
+    window.electron.sendClientEvent({ type: "session.recordBrainEdit", payload: { sessionId: sid } });
+  }
+}
+
+export function MemoryModal({ onClose, taskSessionId }: MemoryModalProps) {
   const [memoriesDir, setMemoriesDir] = useState<string | null>(null);
   const [skillsDir, setSkillsDir] = useState<string | null>(null);
   const [sections, setSections] = useState<MemorySection[]>([]);
@@ -385,6 +395,7 @@ export function MemoryModal({ onClose }: MemoryModalProps) {
         setSaveError(skillResult.error ?? "Failed to save skills");
         return;
       }
+      notifyBrainEditRecorded(taskSessionId);
       setPendingDeletes([]);
       setSkillPendingDeletes([]);
       setSaveOk(true);

@@ -387,6 +387,10 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const editingNodeInputRef = useRef<HTMLInputElement | null>(null);
   const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
   const [dropTargetNodeId, setDropTargetNodeId] = useState<string | null>(null);
+  const [editingOutputFileIndex, setEditingOutputFileIndex] = useState<number | null>(null);
+  const [editingOutputFileDraft, setEditingOutputFileDraft] = useState("");
+  const editingOutputFileInputRef = useRef<HTMLInputElement | null>(null);
+  const skipNextOutputFileBlurSave = useRef(false);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const workflowTree = activeSession?.workflowTree ?? [];
@@ -445,7 +449,18 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
   useEffect(() => { if (editingNodeId) editingNodeInputRef.current?.focus(); }, [editingNodeId]);
   useEffect(() => { if (editingTitle) titleInputRef.current?.focus(); }, [editingTitle]);
+  useEffect(() => {
+    if (editingOutputFileIndex !== null) {
+      const el = editingOutputFileInputRef.current;
+      el?.focus({ preventScroll: true });
+      el?.select();
+    }
+  }, [editingOutputFileIndex]);
   useEffect(() => { setEditingTitle(false); setTitleDraft(""); }, [activeSessionId]);
+  useEffect(() => {
+    setEditingOutputFileIndex(null);
+    setEditingOutputFileDraft("");
+  }, [selectedNodeId, activeSessionId]);
 
   const startEditTitle = () => {
     if (!activeSessionId || !sessions[activeSessionId]) return;
@@ -604,6 +619,40 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     setNewVerifierDraft("");
   };
 
+  const startEditOutputFile = (index: number) => {
+    if (!selectedNode) return;
+    const path = selectedNode.outputFiles[index];
+    if (path === undefined) return;
+    skipNextOutputFileBlurSave.current = false;
+    setEditingOutputFileIndex(index);
+    setEditingOutputFileDraft(path);
+  };
+
+  const saveOutputFileEdit = () => {
+    if (skipNextOutputFileBlurSave.current) {
+      skipNextOutputFileBlurSave.current = false;
+      return;
+    }
+    if (editingOutputFileIndex === null || !activeSessionId || !selectedNodeId) return;
+    const idx = editingOutputFileIndex;
+    const trimmed = editingOutputFileDraft.trim();
+    setEditingOutputFileIndex(null);
+    setEditingOutputFileDraft("");
+    if (!trimmed) return;
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, selectedNodeId);
+    if (!node || idx < 0 || idx >= node.outputFiles.length) return;
+    node.outputFiles[idx] = trimmed;
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+  };
+
+  const cancelOutputFileEdit = () => {
+    skipNextOutputFileBlurSave.current = true;
+    setEditingOutputFileIndex(null);
+    setEditingOutputFileDraft("");
+  };
+
   const formatCwd = (cwd?: string) => {
     if (!cwd) return "Working dir unavailable";
     const parts = cwd.split(/[\\/]+/).filter(Boolean);
@@ -622,9 +671,9 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
       {/* New Task + Settings */}
       <div className="flex shrink-0 gap-2 mt-4">
-        <button className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-4 py-2.5 text-sm font-medium text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors" onClick={onNewSession}>+ New Task</button>
-        <button className="rounded-xl border border-ink-900/10 bg-surface px-4 py-3 text-sm text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors" onClick={() => useAppStore.getState().setShowSettingsModal(true)} aria-label="Settings">
-          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+        <button className="flex-1 rounded-xl border border-ink-900/10 bg-surface px-3 py-2 text-[15px] font-medium leading-tight text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors" onClick={onNewSession}>+ New Task</button>
+        <button type="button" className="inline-flex shrink-0 items-center justify-center rounded-xl border border-ink-900/10 bg-surface px-3 py-2 text-ink-700 hover:bg-surface-tertiary hover:border-ink-900/20 transition-colors" onClick={() => useAppStore.getState().setShowSettingsModal(true)} aria-label="Settings">
+          <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
         </button>
       </div>
 
@@ -680,8 +729,8 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
         )}
       </div>
 
-      {/* Progress: tree + slider + run button — takes all remaining space */}
-      {sessionList.length > 0 && (
+      {/* Progress: tree + slider + run button — only when a task is selected (hidden on new-task home) */}
+      {activeSessionId && (
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5">
           <div className="flex items-center gap-2 mb-2.5 shrink-0 min-w-0">
             <span className="text-base font-semibold text-ink-900 truncate tracking-tight shrink-0">Progress</span>
@@ -761,9 +810,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
             </TooltipProvider>
           </div>
 
-          {workflowTree.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-0.5 leading-snug">No steps yet — send a message to plan.</p>
-          ) : (
+          {workflowTree.length > 0 ? (
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5">
               {workflowTree.map((root) => (
                 <TreeNode
@@ -803,7 +850,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                 <span>Add step</span>
               </button>
             </div>
-          )}
+          ) : null}
 
           {/* Run button */}
           {workflowTree.length > 0 && activeSessionId && selectedNode && (() => {
@@ -841,10 +888,48 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
           <div className="mb-2.5">
             <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Files</span>
           </div>
-          <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
-            {selectedNode.outputFiles.map((f, i) => (
-              <span key={i} className="block text-sm leading-snug text-ink-600 break-words">{f}</span>
-            ))}
+          <div
+            className={
+              editingOutputFileIndex !== null
+                ? "flex flex-col gap-0.5 min-w-0 overflow-visible"
+                : "flex flex-col gap-0.5 min-w-0 max-h-24 overflow-y-auto"
+            }
+          >
+            {selectedNode.outputFiles.map((f, i) =>
+              editingOutputFileIndex === i ? (
+                <input
+                  key={`${selectedNode.id}-outfile-${i}`}
+                  ref={editingOutputFileInputRef}
+                  type="text"
+                  className="w-full min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-sm text-ink-800 overflow-x-hidden focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
+                  value={editingOutputFileDraft}
+                  onChange={(e) => setEditingOutputFileDraft(e.target.value)}
+                  onBlur={saveOutputFileEdit}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      saveOutputFileEdit();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      cancelOutputFileEdit();
+                    }
+                  }}
+                />
+              ) : (
+                <span
+                  key={`${selectedNode.id}-outfile-${i}`}
+                  className="block text-sm leading-snug text-ink-600 break-words cursor-text rounded px-0.5 -mx-0.5 hover:text-ink-800"
+                  title="Double-click to edit"
+                  onDoubleClick={(e) => {
+                    e.preventDefault();
+                    startEditOutputFile(i);
+                  }}
+                >
+                  {f}
+                </span>
+              )
+            )}
           </div>
         </div>
       )}

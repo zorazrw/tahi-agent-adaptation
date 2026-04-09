@@ -347,16 +347,16 @@ function App() {
       />
 
       <main className="flex flex-1 flex-col ml-[var(--sidebar-width)] min-h-0 overflow-hidden bg-surface-cream">
-        <div
-          className="relative flex shrink-0 items-center justify-end px-4 pt-3 pb-2 border-b border-ink-900/10 bg-surface-cream select-none"
-          style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
-        >
-          <div className="absolute inset-x-0 flex justify-center pointer-events-none px-28 min-w-0 -translate-x-10">
-            <span className="min-w-0 max-w-full text-center text-base font-semibold text-ink-900 tracking-tight truncate">
-              {activeSession?.title || "Agent Cowork"}
-            </span>
-          </div>
-          {activeSession && (
+        {activeSession && (
+          <div
+            className="relative flex shrink-0 items-center justify-end px-4 pt-3 pb-2 border-b border-ink-900/10 bg-surface-cream select-none"
+            style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+          >
+            <div className="absolute inset-x-0 flex justify-center pointer-events-none px-28 min-w-0 -translate-x-10">
+              <span className="min-w-0 max-w-full text-center text-base font-semibold text-ink-900 tracking-tight truncate">
+                {activeSession.title}
+              </span>
+            </div>
             <div className="relative z-10 flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <button
                 type="button"
@@ -394,20 +394,14 @@ function App() {
                 Chat
               </button>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {!activeSession ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-4 px-8 text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
-              <svg viewBox="0 0 24 24" className="h-8 w-8 text-primary" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
-              </svg>
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-ink-800">Agent Cowork</h2>
-              <p className="mt-1 text-sm text-muted-foreground max-w-md">Create a new task to start working with an AI agent. Select a folder or upload files to get started.</p>
-            </div>
+          <div className="flex flex-1 flex-col items-center justify-center gap-6 px-8 text-center min-h-0">
+            <p className="text-3xl sm:text-4xl font-semibold text-ink-900 tracking-tight max-w-2xl leading-snug">
+              What&apos;s on your mind?
+            </p>
             <HomePromptInput sendEvent={sendEvent} />
           </div>
         ) : (
@@ -608,7 +602,7 @@ function App() {
       )}
 
       {showMemoryModal && (
-        <MemoryModal onClose={() => setShowMemoryModal(false)} />
+        <MemoryModal onClose={() => setShowMemoryModal(false)} taskSessionId={activeSessionId} />
       )}
 
       {globalError && (

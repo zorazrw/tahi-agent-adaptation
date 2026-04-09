@@ -26,8 +26,11 @@ dist-electron
 
 .env
 
+*.pyc
+
 # Local test DB for scripts
 scripts/test_sessions.db
 
-**/__pycache__/
-**/__pycache__/**
+# Local test files
+trash/*
+**/__pycache__
