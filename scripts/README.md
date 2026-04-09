@@ -39,6 +39,33 @@ python scripts/export_task_sessions.py --format weight -o out_weight.json
 ```
 
 
+## Session file snapshots → GIF
+
+`session_file_versions_to_gif.py` walks one exported session’s trajectory, collects **unique** non-null contents for a given workspace file key (e.g. `webarena_trend.html` from `environment.file`), writes them as `0.html`, `1.html`, …, then renders frames with Playwright and builds a palette-optimized GIF with **ffmpeg**.
+
+**Dependencies:** `pip install playwright`, `playwright install chromium`, and `ffmpeg` on your PATH.
+
+**Usage:**
+
+```bash
+# From repo root (default JSON: scripts/out.json)
+python scripts/session_file_versions_to_gif.py \
+  --session <uuid> \
+  --file webarena_trend.html
+
+# Custom export path and output directory
+python scripts/session_file_versions_to_gif.py \
+  -j path/to/sessions.json \
+  -s <uuid> \
+  -f chart.html \
+  -o ./my-output
+
+# Only extract numbered HTML files (no Playwright / ffmpeg)
+python scripts/session_file_versions_to_gif.py -s <uuid> -f chart.html --html-only
+```
+
+See `python scripts/session_file_versions_to_gif.py --help` for viewport, FPS, step label, and scaling options.
+
 ## Context-Based Update
 
 `induce.py` is a standalone Python 3 script (stdlib only) to extract memories and skills from session JSON (e.g. ``memories/{task-name}.md`` and ``skills/{task-name}.md``).
