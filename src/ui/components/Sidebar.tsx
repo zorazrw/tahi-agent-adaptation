@@ -57,6 +57,15 @@ function createEmptyNode(depth: number): WorkflowNode {
   };
 }
 
+/** Basename only, aligned with plan output file rules (no directories in stored names). */
+function normalizeOutputFileName(raw: string): string | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  const norm = s.replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
+  if (!norm) return null;
+  return norm;
+}
+
 /** Whether nodeId is the same as or a descendant of ancestorId. */
 function isDescendant(tree: WorkflowNode[], nodeId: string, ancestorId: string): boolean {
   if (nodeId === ancestorId) return true;
@@ -390,6 +399,9 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const [editingOutputFileIndex, setEditingOutputFileIndex] = useState<number | null>(null);
   const [editingOutputFileDraft, setEditingOutputFileDraft] = useState("");
   const editingOutputFileInputRef = useRef<HTMLInputElement | null>(null);
+  const newOutputFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [newOutputFileDraft, setNewOutputFileDraft] = useState("");
+  const [addingOutputFile, setAddingOutputFile] = useState(false);
   const skipNextOutputFileBlurSave = useRef(false);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
@@ -460,7 +472,15 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   useEffect(() => {
     setEditingOutputFileIndex(null);
     setEditingOutputFileDraft("");
+    setAddingOutputFile(false);
+    setNewOutputFileDraft("");
   }, [selectedNodeId, activeSessionId]);
+
+  useEffect(() => {
+    if (addingOutputFile) {
+      newOutputFileInputRef.current?.focus({ preventScroll: true });
+    }
+  }, [addingOutputFile]);
 
   const startEditTitle = () => {
     if (!activeSessionId || !sessions[activeSessionId]) return;
@@ -639,10 +659,51 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     setEditingOutputFileIndex(null);
     setEditingOutputFileDraft("");
     if (!trimmed) return;
+    const nextName = normalizeOutputFileName(trimmed) ?? trimmed;
+    if (!nextName) return;
     const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
     const node = findNode(newTree, selectedNodeId);
     if (!node || idx < 0 || idx >= node.outputFiles.length) return;
-    node.outputFiles[idx] = trimmed;
+    node.outputFiles[idx] = nextName;
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+  };
+
+  const handleAddOutputFile = () => {
+    if (!activeSessionId || !selectedNodeId) return;
+    const trimmed = newOutputFileDraft.trim();
+    if (!trimmed) {
+      setAddingOutputFile(false);
+      setNewOutputFileDraft("");
+      return;
+    }
+    const name = normalizeOutputFileName(trimmed);
+    if (!name) {
+      setAddingOutputFile(false);
+      setNewOutputFileDraft("");
+      return;
+    }
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, selectedNodeId);
+    if (!node) return;
+    if (node.outputFiles.includes(name)) {
+      setAddingOutputFile(false);
+      setNewOutputFileDraft("");
+      return;
+    }
+    node.outputFiles.push(name);
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+    setAddingOutputFile(false);
+    setNewOutputFileDraft("");
+  };
+
+  const handleDeleteOutputFile = (index: number) => {
+    if (!activeSessionId || !selectedNodeId) return;
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, selectedNodeId);
+    if (!node || index < 0 || index >= node.outputFiles.length) return;
+    node.outputFiles.splice(index, 1);
     updateWorkflowTree(activeSessionId, newTree);
     sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
   };
@@ -883,10 +944,26 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
       )}
 
       {/* Files (compact) */}
-      {selectedNode && (selectedNode.outputFiles.length > 0) && (
+      {selectedNode && (
         <div className="shrink-0 border-t border-ink-900/10 pt-2.5 pb-3">
-          <div className="mb-2.5">
+          <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
             <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Files</span>
+            <button
+              type="button"
+              disabled={!activeSessionId}
+              onClick={() => {
+                setAddingOutputFile(true);
+                setNewOutputFileDraft("");
+                setEditingOutputFileIndex(null);
+                setEditingOutputFileDraft("");
+              }}
+              className="shrink-0 p-0.5 rounded text-ink-300 hover:text-primary hover:bg-ink-900/5 transition-colors disabled:opacity-40"
+              aria-label="Add output file"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M8 3v10M3 8h10" />
+              </svg>
+            </button>
           </div>
           <div
             className={
@@ -895,39 +972,78 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                 : "flex flex-col gap-0.5 min-w-0 max-h-24 overflow-y-auto"
             }
           >
-            {selectedNode.outputFiles.map((f, i) =>
-              editingOutputFileIndex === i ? (
+            {addingOutputFile && (
+              <div className="flex items-center gap-1.5 min-w-0">
                 <input
-                  key={`${selectedNode.id}-outfile-${i}`}
-                  ref={editingOutputFileInputRef}
+                  ref={newOutputFileInputRef}
                   type="text"
-                  className="w-full min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-sm text-ink-800 overflow-x-hidden focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
-                  value={editingOutputFileDraft}
-                  onChange={(e) => setEditingOutputFileDraft(e.target.value)}
-                  onBlur={saveOutputFileEdit}
+                  value={newOutputFileDraft}
+                  onChange={(e) => setNewOutputFileDraft(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault();
-                      saveOutputFileEdit();
+                      handleAddOutputFile();
                     }
                     if (e.key === "Escape") {
                       e.preventDefault();
-                      cancelOutputFileEdit();
+                      setAddingOutputFile(false);
+                      setNewOutputFileDraft("");
                     }
                   }}
+                  onBlur={handleAddOutputFile}
+                  placeholder="e.g. report.md"
+                  className="flex-1 min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-sm text-ink-800 placeholder:text-ink-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
                 />
-              ) : (
-                <span
-                  key={`${selectedNode.id}-outfile-${i}`}
-                  className="block text-sm leading-snug text-ink-600 break-words cursor-text rounded px-0.5 -mx-0.5 hover:text-ink-800"
-                  title="Double-click to edit"
-                  onDoubleClick={(e) => {
-                    e.preventDefault();
-                    startEditOutputFile(i);
-                  }}
-                >
-                  {f}
-                </span>
+              </div>
+            )}
+            {selectedNode.outputFiles.length === 0 && !addingOutputFile ? (
+              <p className="text-sm text-muted-foreground leading-snug">No output files listed for this step.</p>
+            ) : (
+              selectedNode.outputFiles.map((f, i) =>
+                editingOutputFileIndex === i ? (
+                  <input
+                    key={`${selectedNode.id}-outfile-${i}`}
+                    ref={editingOutputFileInputRef}
+                    type="text"
+                    className="w-full min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-sm text-ink-800 overflow-x-hidden focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
+                    value={editingOutputFileDraft}
+                    onChange={(e) => setEditingOutputFileDraft(e.target.value)}
+                    onBlur={saveOutputFileEdit}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        saveOutputFileEdit();
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelOutputFileEdit();
+                      }
+                    }}
+                  />
+                ) : (
+                  <div key={`${selectedNode.id}-outfile-${i}`} className="flex items-start gap-1.5 min-w-0">
+                    <span
+                      className="min-w-0 flex-1 text-sm leading-snug text-ink-600 break-words cursor-text rounded px-0.5 -mx-0.5 hover:text-ink-800"
+                      title="Double-click to edit"
+                      onDoubleClick={(e) => {
+                        e.preventDefault();
+                        startEditOutputFile(i);
+                      }}
+                    >
+                      {f}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteOutputFile(i)}
+                      className="shrink-0 p-0.5 rounded text-ink-300 hover:text-error hover:bg-ink-900/5 transition-colors mt-0.5"
+                      aria-label={`Remove ${f}`}
+                    >
+                      <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <path d="M12 4L4 12M4 4l8 8" />
+                      </svg>
+                    </button>
+                  </div>
+                )
               )
             )}
           </div>
@@ -935,7 +1051,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
       )}
 
       {/* Verifiers (compact) */}
-      {selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
+      {selectedNode && (
         <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5 pb-3">
           <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
             <div className="flex items-center gap-2 min-w-0">
