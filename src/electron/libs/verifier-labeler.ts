@@ -1,10 +1,9 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import type { VerifierMark } from "../types.js";
-import type { WorkflowNode } from "./workflow-tree-utils.js";
+import type { VerifierMark, WorkflowNode } from "../types.js";
 import type { Session } from "./session-store.js";
 import { getNodePath } from "./workflow-tree-utils.js";
-import { getCurrentApiConfig } from "./claude-settings.js";
+import { loadApiConfig } from "./config-store.js";
 
 function messagesApiUrl(baseURL: string): string {
   const base = baseURL.replace(/\/*$/, "");
@@ -33,7 +32,7 @@ export async function labelVerifiersForNode(
   const n = node.verifiers.length;
   if (n === 0) return [];
 
-  const config = getCurrentApiConfig();
+  const config = loadApiConfig();
   if (!config) {
     return node.verifiers.map(() => undefined);
   }
@@ -59,7 +58,7 @@ export async function labelVerifiersForNode(
 
   const pathCtx = getNodePath(workflowTree, node.id);
   const numbered = node.verifiers
-    .map((c, i) => `${i}. ${c}`)
+    .map((c: string, i: number) => `${i}. ${c}`)
     .join("\n");
 
   const systemContext = [

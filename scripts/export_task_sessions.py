@@ -1306,14 +1306,14 @@ def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:
 def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
     row = cursor.execute(
         """SELECT id, title, engine, last_prompt, workflow_tree, steps, output_files, verification_criteria, verifier_marks,
-                  completed_step_indices, status, cwd, created_at, updated_at
+                  completed_step_indices, status, cwd, created_at, updated_at, interaction_mode, primary_interface, include_verifiers
            FROM sessions WHERE id = ?""",
         (session_id,),
     ).fetchone()
     if not row:
         return None
     (sid, title, engine, last_prompt, workflow_tree_raw, steps_raw, output_files_raw, verification_criteria_raw, verifier_marks_raw,
-     completed_indices_raw, status, cwd, created_at, updated_at) = row
+     completed_indices_raw, status, cwd, created_at, updated_at, interaction_mode, primary_interface, include_verifiers) = row
     _ = parse_json_column(completed_indices_raw, [])
     engine = engine or "legacy-claude"
     workflow_tree = parse_json_column(workflow_tree_raw, [])
@@ -1371,6 +1371,9 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
     return {
         "uuid": sid,
         "name": title or "",
+        "interaction_mode": interaction_mode or "workflow",
+        "primary_interface": primary_interface or "files",
+        "include_verifiers": bool(include_verifiers) if include_verifiers is not None else True,
         "trajectory": full_traj,
     }
 
@@ -1878,13 +1881,13 @@ def build_weight_based_session(
 ) -> Optional[dict]:
     """Build the weight-based export for a single session."""
     row = cursor.execute(
-        """SELECT id, title, workflow_tree, last_prompt, cwd
+        """SELECT id, title, workflow_tree, last_prompt, cwd, interaction_mode, primary_interface, include_verifiers
            FROM sessions WHERE id = ?""",
         (session_id,),
     ).fetchone()
     if not row:
         return None
-    sid, title, workflow_tree_raw, last_prompt, cwd = row
+    sid, title, workflow_tree_raw, last_prompt, cwd, interaction_mode, primary_interface, include_verifiers = row
     workflow_tree = parse_json_column(workflow_tree_raw, [])
     export_cwd: Optional[str] = None
     if cwd is not None:
@@ -2155,6 +2158,9 @@ def build_weight_based_session(
     return {
         "uuid": sid,
         "name": title or "",
+        "interaction_mode": interaction_mode or "workflow",
+        "primary_interface": primary_interface or "files",
+        "include_verifiers": bool(include_verifiers) if include_verifiers is not None else True,
         "initial_task_instruction": initial_task_instruction,
         "task_units": task_units,
     }

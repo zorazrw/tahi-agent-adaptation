@@ -16,6 +16,7 @@ export type {
   NodeStatus,
   PiAssistantBlock,
   PiAssistantMessage,
+  PrimaryInterface,
   PiLlmDebugMessage,
   OpenAICompatibleApiFormat,
   OpenAICompatibleProviderConfig,

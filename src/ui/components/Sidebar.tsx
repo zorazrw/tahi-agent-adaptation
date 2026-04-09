@@ -729,63 +729,6 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
         )}
       </div>
 
-      {/* Mode-aware content area */}
-      {sessionList.length > 0 && activeSession && activeSession.interactionMode === "plan" && (
-        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-          <div className="flex items-center gap-2 mb-1.5 shrink-0">
-            <div className="h-3 w-0.5 shrink-0 rounded-full bg-amber-500" />
-            <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Plan Mode</span>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 px-1">
-            <p className="text-xs text-muted-foreground">
-              The agent is researching and writing a markdown plan. You can review and edit the plan file, then approve it to begin implementation.
-            </p>
-            {activeSession.planFilePath && (
-              <div className="rounded-lg border border-ink-900/10 bg-surface px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-ink-500 font-semibold mb-1">Plan File</div>
-                <span className="font-mono text-[11px] text-ink-600 break-all">{activeSession.planFilePath}</span>
-              </div>
-            )}
-            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-              <div className="text-[11px] text-amber-700">
-                {activeSession.status === "running"
-                  ? "Agent is working on the plan..."
-                  : activeSession.status === "idle"
-                    ? "Waiting for your input. You can continue the conversation or edit the plan file directly."
-                    : activeSession.status === "completed"
-                      ? "Plan session completed."
-                      : "An error occurred."}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {sessionList.length > 0 && activeSession && activeSession.interactionMode === "chat" && (
-        <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
-          <div className="flex items-center gap-2 mb-1.5 shrink-0">
-            <div className="h-3 w-0.5 shrink-0 rounded-full bg-blue-500" />
-            <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Chat Mode</span>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 px-1">
-            <p className="text-xs text-muted-foreground">
-              Free-form coding chat. The agent will respond directly without a structured workflow.
-            </p>
-            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
-              <div className="text-[11px] text-blue-700">
-                {activeSession.status === "running"
-                  ? "Agent is working..."
-                  : activeSession.status === "idle"
-                    ? "Ready for your next message."
-                    : activeSession.status === "completed"
-                      ? "Chat session completed."
-                      : "An error occurred."}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Progress: tree + slider + run button — workflow mode only */}
       {sessionList.length > 0 && (!activeSession || activeSession.interactionMode === "workflow") && (
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-ink-900/10 pt-2">
@@ -794,7 +737,7 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
               <div className="h-3 w-0.5 shrink-0 rounded-full bg-primary" />
               <span className="text-sm font-semibold uppercase tracking-wide text-ink-800">Progress</span>
             </div>
-            {workflowTree.length > 0 && maxDepth > 0 && (
+            {workflowTree.length > 0 && maxDepth > 0 && activeSession?.includeVerifiers !== false && (
               <div className="flex items-center gap-1 rounded-lg border border-ink-900/10 bg-surface p-0.5 shrink-0">
                 <TooltipProvider delayDuration={300}>
                   <Tooltip>
@@ -995,8 +938,8 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
         </div>
       )}
 
-      {/* Verifiers (compact) — workflow mode only */}
-      {activeSession?.interactionMode === "workflow" && selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
+      {/* Verifiers (compact) — workflow mode only, when verifiers enabled */}
+      {activeSession?.interactionMode === "workflow" && activeSession?.includeVerifiers !== false && selectedNode && (currentVerifiers.length > 0 || addingVerifier) && (
         <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-1.5">
           <div className="flex items-center justify-between gap-1.5 mb-1 shrink-0">
             <div className="flex items-center gap-1.5">

@@ -513,6 +513,9 @@ const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AnyAssist
 
   const setToolMeta = useAppStore((s) => s.setToolMeta);
   const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const sessions = useAppStore((s) => s.sessions);
+  const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
 
   const input = messageContent.input as { tasks?: Array<{ description: string; outputFiles: string[]; verifiers: string[]; children?: unknown[] }> } | null;
   const tasks = input?.tasks ?? [];
@@ -533,6 +536,7 @@ const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AnyAssist
         steps={tasks.map((s) => s.description)}
         outputFiles={tasks.map((s) => s.outputFiles)}
         verifiers={tasks.map((s) => s.verifiers)}
+        includeVerifiers={activeSession?.includeVerifiers}
       />
     </div>
   );
@@ -598,18 +602,12 @@ const AskUserQuestionCard = ({
 }) => {
   if (messageContent.type !== "tool_use") return null;
 
-  const isPlanApprove = messageContent.name === "plan_approve";
   const input = messageContent.input as AskUserQuestionInput | null;
   const questions = input?.questions ?? [];
 
-  let isActiveRequest = false;
-  if (isPlanApprove) {
-    isActiveRequest = !!(permissionRequest && permissionRequest.toolName === "plan_approve");
-  } else {
-    const currentSignature = getAskUserQuestionSignature(input);
-    const requestSignature = getAskUserQuestionSignature(permissionRequest?.input as AskUserQuestionInput | undefined);
-    isActiveRequest = !!(permissionRequest && currentSignature === requestSignature);
-  }
+  const currentSignature = getAskUserQuestionSignature(input);
+  const requestSignature = getAskUserQuestionSignature(permissionRequest?.input as AskUserQuestionInput | undefined);
+  const isActiveRequest = !!(permissionRequest && currentSignature === requestSignature);
 
   if (isActiveRequest && permissionRequest && onPermissionResult) {
     return (
@@ -618,17 +616,6 @@ const AskUserQuestionCard = ({
           request={permissionRequest}
           onSubmit={(result) => onPermissionResult(permissionRequest.toolUseId, result)}
         />
-      </div>
-    );
-  }
-
-  if (isPlanApprove) {
-    return (
-      <div className="flex flex-col gap-2 rounded-[1rem] bg-amber-50 border border-amber-200 px-3 py-2 mt-4">
-        <div className="flex flex-row items-center gap-2">
-          <span className="inline-flex items-center rounded-md text-amber-700 py-0.5 text-sm font-medium">Plan Approval</span>
-        </div>
-        <div className="text-sm text-ink-600">Plan has been submitted for approval.</div>
       </div>
     );
   }
@@ -810,7 +797,7 @@ export function MessageCard({
             return <AssistantTextBlock key={idx} text={content.text} showIndicator={isLastContent && showIndicator} />;
           }
           if (content.type === "tool_use") {
-            if (content.name === "ask_user_question" || content.name === "plan_approve") {
+            if (content.name === "ask_user_question") {
               return <AskUserQuestionCard key={idx} messageContent={content} permissionRequest={permissionRequest} onPermissionResult={onPermissionResult} />;
             }
             if (content.name === "workflow_plan") {

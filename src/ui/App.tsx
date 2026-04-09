@@ -150,11 +150,9 @@ function App() {
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
 
-  const isWorkflowMode = !activeSession || activeSession.interactionMode === "workflow";
-  const isPlanMode = activeSession?.interactionMode === "plan";
-  const isChatMode = activeSession?.interactionMode === "chat";
-  const showChatPanel = isChatMode || isPlanMode ? true : previewPanelOpen;
-  const showFilePreview = isWorkflowMode || isPlanMode;
+  const primaryInterface = activeSession?.primaryInterface ?? "files";
+  const showFilePreview = primaryInterface === "files" || (primaryInterface === "chat" && previewPanelOpen);
+  const showChatPanel = primaryInterface === "chat" || (primaryInterface === "files" && previewPanelOpen);
 
   const {
     visibleMessages,
@@ -364,17 +362,15 @@ function App() {
             {activeSession?.title || "Agent Cowork"}
             {activeSession && (
               <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                activeSession.interactionMode === "plan"
-                  ? "bg-amber-100 text-amber-700"
-                  : activeSession.interactionMode === "chat"
-                    ? "bg-blue-100 text-blue-700"
-                    : "bg-primary/10 text-primary"
+                activeSession.interactionMode === "chat"
+                  ? "bg-blue-100 text-blue-700"
+                  : "bg-primary/10 text-primary"
               }`}>
                 {activeSession.interactionMode}
               </span>
             )}
           </span>
-          {activeSession && !isChatMode && (
+          {activeSession && (
             <div className="relative z-10 flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <button
                 type="button"
@@ -400,7 +396,9 @@ function App() {
                 type="button"
                 onClick={() => setPreviewPanelOpen(!previewPanelOpen)}
                 className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-ink-800 px-2.5 py-1 rounded-md hover:bg-ink-900/5 transition-colors"
-                title={previewPanelOpen ? "Close chat" : "Open chat"}
+                title={previewPanelOpen
+                  ? `Close ${primaryInterface === "files" ? "chat" : "files"}`
+                  : `Open ${primaryInterface === "files" ? "chat" : "files"}`}
               >
                 <span className="flex h-4 w-4 shrink-0 items-center justify-center" aria-hidden>
                   {previewPanelOpen ? (
@@ -409,11 +407,11 @@ function App() {
                     <MessagesSquare className="size-full stroke-[1.5]" />
                   )}
                 </span>
-                Chat
+                {primaryInterface === "files" ? "Chat" : "Files"}
               </button>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {!activeSession ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-6 px-8 text-center min-h-0">
@@ -432,44 +430,35 @@ function App() {
             <div className="flex-1 min-h-0 overflow-hidden p-4">
               <div className="flex flex-col h-full">
                 <ErrorBoundary>
-                  {isPlanMode ? (
-                    <FilePreview
-                      filePath={activeSession?.planFilePath ?? null}
-                      cwd={activeSession?.cwd}
-                      stepCompleted={activeSession?.status !== "running"}
-                      key={`plan-${activeSession?.messages.filter((m) => m.type === "tool_result").length ?? 0}`}
-                    />
-                  ) : (
-                    <FilePreview
-                      filePath={(() => {
-                        if (!selectedNodeId || !activeSession?.workflowTree) return null;
-                        const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
-                          for (const n of tree) {
-                            if (n.id === id) return n;
-                            const f = findNode(n.children, id);
-                            if (f) return f;
-                          }
-                          return undefined;
-                        };
-                        const node = findNode(activeSession.workflowTree, selectedNodeId);
-                        return getPreviewFileForNode(node?.outputFiles);
-                      })()}
-                      cwd={activeSession?.cwd}
-                      stepCompleted={(() => {
-                        if (!selectedNodeId || !activeSession?.workflowTree) return false;
-                        const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
-                          for (const n of tree) {
-                            if (n.id === id) return n;
-                            const f = findNode(n.children, id);
-                            if (f) return f;
-                          }
-                          return undefined;
-                        };
-                        const node = findNode(activeSession.workflowTree, selectedNodeId);
-                        return node?.status === "completed";
-                      })()}
-                    />
-                  )}
+                  <FilePreview
+                    filePath={(() => {
+                      if (!selectedNodeId || !activeSession?.workflowTree) return null;
+                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                        for (const n of tree) {
+                          if (n.id === id) return n;
+                          const f = findNode(n.children, id);
+                          if (f) return f;
+                        }
+                        return undefined;
+                      };
+                      const node = findNode(activeSession.workflowTree, selectedNodeId);
+                      return getPreviewFileForNode(node?.outputFiles);
+                    })()}
+                    cwd={activeSession?.cwd}
+                    stepCompleted={(() => {
+                      if (!selectedNodeId || !activeSession?.workflowTree) return false;
+                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
+                        for (const n of tree) {
+                          if (n.id === id) return n;
+                          const f = findNode(n.children, id);
+                          if (f) return f;
+                        }
+                        return undefined;
+                      };
+                      const node = findNode(activeSession.workflowTree, selectedNodeId);
+                      return node?.status === "completed";
+                    })()}
+                  />
                 </ErrorBoundary>
               </div>
             </div>
