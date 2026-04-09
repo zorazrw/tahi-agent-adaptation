@@ -198,11 +198,28 @@ class DPODataBuilder(ChatDatasetBuilder):
     train_path: str
     test_path: str | None = None
 
+    def _load_units(self, raw: object) -> list[dict]:
+        """Support both single-session and multi-session DPO export shapes."""
+        if not isinstance(raw, dict):
+            return []
+        if isinstance(raw.get("learning_units"), list):
+            return [u for u in raw["learning_units"] if isinstance(u, dict)]
+        if isinstance(raw.get("sessions"), list):
+            units: list[dict] = []
+            for sess in raw["sessions"]:
+                if not isinstance(sess, dict):
+                    continue
+                lu = sess.get("learning_units")
+                if isinstance(lu, list):
+                    units.extend(u for u in lu if isinstance(u, dict))
+            return units
+        return []
+
     def _load(self, path: str) -> list[dict]:
         with open(path, "r") as f:
             raw = json.load(f)
         rows = []
-        for unit in raw["learning_units"]:
+        for unit in self._load_units(raw):
             prompt = [{"role": "user", "content": msg} for msg in unit["user_messages"]]
             rows.append(
                 {
