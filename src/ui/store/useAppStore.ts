@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { InteractionMode, NodeCompletedMessage, ServerEvent, SessionEngine, SessionStatus, StreamMessage, WorkflowNode } from "../types";
+import type { InteractionMode, NodeCompletedMessage, PrimaryInterface, ServerEvent, SessionEngine, SessionStatus, StreamMessage, WorkflowNode } from "../types";
 import {
   clearAllPendingWorkflowAutoAdvance,
   clearPendingWorkflowAutoAdvance,
@@ -34,10 +34,11 @@ export type SessionView = {
   status: SessionStatus;
   engine?: SessionEngine;
   interactionMode: InteractionMode;
+  primaryInterface: PrimaryInterface;
+  includeVerifiers: boolean;
   cwd?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
-  planFilePath?: string;
   messages: StreamMessage[];
   permissionRequests: PermissionRequest[];
   lastPrompt?: string;
@@ -74,6 +75,8 @@ interface AppState {
   verifierCheckSessionId: string | null;
   verifierCheckNodeId: string | null;
   selectedMode: InteractionMode;
+  selectedPrimaryInterface: PrimaryInterface;
+  selectedIncludeVerifiers: boolean;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -91,6 +94,8 @@ interface AppState {
   setHighlightDepth: (depth: number | null) => void;
   setPreviewPanelOpen: (open: boolean) => void;
   setSelectedMode: (mode: InteractionMode) => void;
+  setSelectedPrimaryInterface: (pi: PrimaryInterface) => void;
+  setSelectedIncludeVerifiers: (v: boolean) => void;
   setApiConfigChecked: (checked: boolean) => void;
   setWorkflowRunMode: (mode: WorkflowRunMode) => void;
   markHistoryRequested: (sessionId: string) => void;
@@ -108,7 +113,7 @@ interface AppState {
 }
 
 function createSession(id: string): SessionView {
-  return { id, title: "", status: "idle", interactionMode: "workflow", messages: [], permissionRequests: [], hydrated: false };
+  return { id, title: "", status: "idle", interactionMode: "workflow", primaryInterface: "files", includeVerifiers: true, messages: [], permissionRequests: [], hydrated: false };
 }
 
 /** Find a node by id in a workflow tree. */
@@ -145,6 +150,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   verifierCheckSessionId: null,
   verifierCheckNodeId: null,
   selectedMode: "workflow" as InteractionMode,
+  selectedPrimaryInterface: "files" as PrimaryInterface,
+  selectedIncludeVerifiers: true,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
@@ -173,6 +180,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setHighlightDepth: (highlightDepth) => set({ highlightDepth }),
   setPreviewPanelOpen: (previewPanelOpen) => set({ previewPanelOpen }),
   setSelectedMode: (selectedMode) => set({ selectedMode }),
+  setSelectedPrimaryInterface: (selectedPrimaryInterface) => set({ selectedPrimaryInterface }),
+  setSelectedIncludeVerifiers: (selectedIncludeVerifiers) => set({ selectedIncludeVerifiers }),
   setApiConfigChecked: (apiConfigChecked) => set({ apiConfigChecked }),
 
   setWorkflowRunMode: (workflowRunMode) => {
@@ -274,10 +283,11 @@ export const useAppStore = create<AppState>((set, get) => ({
             title: session.title ?? existing.title,
             engine: session.engine,
             interactionMode: session.interactionMode ?? existing.interactionMode,
+            primaryInterface: session.primaryInterface ?? existing.primaryInterface,
+            includeVerifiers: session.includeVerifiers ?? existing.includeVerifiers,
             cwd: session.cwd,
             workflowTree: session.workflowTree ?? existing.workflowTree,
             verificationDepth: session.verificationDepth ?? existing.verificationDepth,
-            planFilePath: session.planFilePath ?? existing.planFilePath,
             createdAt: session.createdAt,
             updatedAt: session.updatedAt
           };
@@ -328,7 +338,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
 
       case "session.history": {
-        const { sessionId, messages, status, workflowTree, verificationDepth, title, engine, interactionMode, planFilePath } = event.payload;
+        const { sessionId, messages, status, workflowTree, verificationDepth, title, engine, interactionMode, primaryInterface, includeVerifiers } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
           return {
@@ -339,10 +349,11 @@ export const useAppStore = create<AppState>((set, get) => ({
                 status,
                 engine: engine ?? existing.engine,
                 interactionMode: interactionMode ?? existing.interactionMode,
+                ...(primaryInterface !== undefined && { primaryInterface }),
+                ...(includeVerifiers !== undefined && { includeVerifiers }),
                 messages,
                 ...(workflowTree !== undefined && { workflowTree }),
                 ...(verificationDepth !== undefined && { verificationDepth }),
-                ...(planFilePath !== undefined && { planFilePath }),
                 ...(title !== undefined && { title }),
                 hydrated: true
               }
@@ -595,19 +606,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         break;
       }
 
-      case "session.modeChanged": {
-        const { sessionId, interactionMode } = event.payload;
-        set((state) => {
-          const existing = state.sessions[sessionId] ?? createSession(sessionId);
-          return {
-            sessions: {
-              ...state.sessions,
-              [sessionId]: { ...existing, interactionMode }
-            }
-          };
-        });
-        break;
-      }
       case "memory.readResult":
       case "memory.writeResult":
       case "skills.writeResult":

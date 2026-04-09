@@ -17,7 +17,6 @@ import { runWithLlmDebugContext } from "./llm-debug.js";
 import { createPiManagers, createPiResourceLoader, createPiSessionManager } from "./pi-config.js";
 import type { Session } from "./session-store.js";
 import { hydrateWorkflowTree, type RawWorkflowNode } from "./workflow-tree-utils.js";
-import { resolvePlanFilePath, planFileExists, buildPlanModeSystemPrompt, PLAN_APPROVE_TOOL_DESCRIPTION } from "./plan-config.js";
 
 export type RunnerOptions = {
   prompt: string;
@@ -32,18 +31,33 @@ export type RunnerHandle = {
   abort: () => void;
 };
 
-const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
-  "IMPORTANT: You MUST call the workflow_plan tool as your very first action to register a structured plan.",
-  "Do NOT write out steps as text. Use the tool with structured JSON input.",
-  "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
-  "Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
-  "You may add children to break a main step into detailed sub-steps when useful.",
-  "Do NOT add separate validation/testing steps. Express checks inside each step's verifiers.",
-  "Keep descriptions short but complete. Each node needs description, outputFiles, verifiers, and optional children.",
-  "Prefer .md for document-style outputs when markdown preview is useful.",
-  "After calling workflow_plan, STOP. Do not execute any steps yourself.",
-  "The human operator will trigger each step individually.",
-].join("\n");
+function buildWorkflowPlanSystemPrompt(includeVerifiers: boolean): string {
+  const lines = [
+    "IMPORTANT: You MUST call the workflow_plan tool as your very first action to register a structured plan.",
+    "Do NOT write out steps as text. Use the tool with structured JSON input.",
+    "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
+  ];
+  if (includeVerifiers) {
+    lines.push(
+      "Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
+      "You may add children to break a main step into detailed sub-steps when useful.",
+      "Do NOT add separate validation/testing steps. Express checks inside each step's verifiers.",
+      "Keep descriptions short but complete. Each node needs description, outputFiles, verifiers, and optional children.",
+    );
+  } else {
+    lines.push(
+      "Each main step should have clear outputFiles.",
+      "You may add children to break a main step into detailed sub-steps when useful.",
+      "Keep descriptions short but complete. Each node needs description, outputFiles, and optional children.",
+    );
+  }
+  lines.push(
+    "Prefer .md for document-style outputs when markdown preview is useful.",
+    "After calling workflow_plan, STOP. Do not execute any steps yourself.",
+    "The human operator will trigger each step individually.",
+  );
+  return lines.join("\n");
+}
 
 function normalizeRoots(tasks: RawWorkflowNode[]): RawWorkflowNode[] {
   let roots = tasks;
@@ -254,25 +268,37 @@ function resolveRunStatus(
   mode: InteractionMode = "workflow"
 ): "idle" | "completed" {
   if (mode === "workflow" && (planRegistered || regenerateWorkflow)) return "idle";
-  if (mode === "plan") return "idle";
   return "completed";
 }
 
 function createWorkflowPlanTool(session: Session, onEvent: (event: ServerEvent) => void): ToolDefinition {
-  const workflowNodeSchema = Type.Recursive((Self) =>
-    Type.Object({
-      description: Type.String(),
-      outputFiles: Type.Array(Type.String()),
-      verifiers: Type.Array(Type.String()),
-      children: Type.Optional(Type.Array(Self)),
-    })
-  );
+  const includeVerifiers = session.includeVerifiers;
+
+  const workflowNodeSchema = includeVerifiers
+    ? Type.Recursive((Self) =>
+        Type.Object({
+          description: Type.String(),
+          outputFiles: Type.Array(Type.String()),
+          verifiers: Type.Array(Type.String()),
+          children: Type.Optional(Type.Array(Self)),
+        })
+      )
+    : Type.Recursive((Self) =>
+        Type.Object({
+          description: Type.String(),
+          outputFiles: Type.Array(Type.String()),
+          children: Type.Optional(Type.Array(Self)),
+        })
+      );
+
+  const desc = includeVerifiers
+    ? "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level with description, outputFiles, verifiers, and optional children."
+    : "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level with description, outputFiles, and optional children.";
 
   return {
     name: "workflow_plan",
     label: "Workflow Plan",
-    description:
-      "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level with description, outputFiles, verifiers, and optional children.",
+    description: desc,
     promptSnippet: "workflow_plan: register a hierarchical task plan before doing any work",
     parameters: Type.Object({
       tasks: Type.Array(workflowNodeSchema),
@@ -370,79 +396,6 @@ function createAskUserQuestionTool(session: Session, onEvent: (event: ServerEven
   };
 }
 
-function createPlanApproveTool(
-  session: Session,
-  onEvent: (event: ServerEvent) => void,
-  onSessionUpdate?: (updates: Partial<Session>) => void,
-): ToolDefinition {
-  return {
-    name: "plan_approve",
-    label: "Approve Plan",
-    description: PLAN_APPROVE_TOOL_DESCRIPTION,
-    parameters: Type.Object({}),
-    execute: async (_toolCallId, _params, signal) => {
-      const toolUseId = crypto.randomUUID();
-      const planPath = session.planFilePath ?? resolvePlanFilePath(session);
-
-      onEvent({
-        type: "permission.request",
-        payload: {
-          sessionId: session.id,
-          toolUseId,
-          toolName: "plan_approve",
-          input: {
-            questions: [
-              {
-                question: `Plan at ${planPath} is complete. Would you like to approve and switch to implementation mode?`,
-                header: "Approve Plan",
-                options: [
-                  { label: "Yes", description: "Approve the plan and switch to chat mode for implementation" },
-                  { label: "No", description: "Stay in plan mode to continue refining the plan" },
-                ],
-              },
-            ],
-          },
-        },
-      });
-
-      const result = await new Promise<AppPermissionResult>((resolve) => {
-        session.pendingPermissions.set(toolUseId, {
-          toolUseId,
-          toolName: "plan_approve",
-          input: {},
-          resolve: (permissionResult) => {
-            session.pendingPermissions.delete(toolUseId);
-            resolve(permissionResult);
-          },
-        });
-        signal?.addEventListener("abort", () => {
-          session.pendingPermissions.delete(toolUseId);
-          resolve({ behavior: "deny", message: "Session aborted" });
-        });
-      });
-
-      if (result.behavior === "deny") {
-        return {
-          content: [{ type: "text", text: "User chose to stay in plan mode. Continue refining the plan." }],
-          details: { approved: false },
-        };
-      }
-
-      session.interactionMode = "chat";
-      onSessionUpdate?.({ interactionMode: "chat" });
-      onEvent({
-        type: "session.modeChanged",
-        payload: { sessionId: session.id, interactionMode: "chat" },
-      });
-
-      return {
-        content: [{ type: "text", text: `Plan approved. Session switched to chat mode. The plan at ${planPath} is approved. You can now implement it.` }],
-        details: { approved: true },
-      };
-    },
-  };
-}
-
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
   const { prompt, session, regenerateWorkflow, branchEntryId, onEvent, onSessionUpdate } = options;
   let disposed = false;
@@ -462,14 +415,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
 
     let appendSystemPrompt: string | undefined;
     if (mode === "workflow" && (isFirstMessage || regenerateWorkflow)) {
-      appendSystemPrompt = WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT;
-    } else if (mode === "plan") {
-      const planPath = session.planFilePath ?? resolvePlanFilePath(session);
-      if (!session.planFilePath) {
-        session.planFilePath = planPath;
-        onSessionUpdate?.({ planFilePath: planPath });
-      }
-      appendSystemPrompt = buildPlanModeSystemPrompt(planPath, planFileExists(planPath));
+      appendSystemPrompt = buildWorkflowPlanSystemPrompt(session.includeVerifiers);
     }
 
     const resourceLoader = await createPiResourceLoader(cwd, {
@@ -497,8 +443,6 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
 
     if (mode === "workflow") {
       customTools = [createWorkflowPlanTool(session, onEvent), createAskUserQuestionTool(session, onEvent)];
-    } else if (mode === "plan") {
-      customTools = [createPlanApproveTool(session, onEvent, onSessionUpdate), createAskUserQuestionTool(session, onEvent)];
     } else {
       customTools = [createAskUserQuestionTool(session, onEvent)];
     }

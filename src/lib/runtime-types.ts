@@ -2,7 +2,9 @@ export type NodeStatus = "pending" | "running" | "completed" | "error";
 
 export type SessionEngine = "legacy-claude" | "pi";
 
-export type InteractionMode = "workflow" | "plan" | "chat";
+export type InteractionMode = "workflow" | "chat";
+
+export type PrimaryInterface = "chat" | "files";
 
 export type VerifierMark = "check" | "cross" | undefined;
 
@@ -214,6 +216,12 @@ export type LegacyMessage =
   | LegacyResultMessage
   | LegacyStreamEventMessage;
 
+/** Synthetic messages recorded in DB but not from the SDK. */
+export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string };
+export type EditWorkflowMessage = { type: "edit_workflow" };
+export type EditVerifierMessage = { type: "edit_verifier" };
+export type FileEditMessage = { type: "file_edit"; path: string };
+
 export type StreamMessage =
   | UserPromptMessage
   | NodeCompletedMessage
@@ -222,6 +230,10 @@ export type StreamMessage =
   | PiToolResultMessage
   | PiRunResultMessage
   | PiLlmDebugMessage
+  | VerifierLabelMessage
+  | EditWorkflowMessage
+  | EditVerifierMessage
+  | FileEditMessage
   | LegacyMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
@@ -232,12 +244,13 @@ export type SessionInfo = {
   status: SessionStatus;
   engine: SessionEngine;
   interactionMode: InteractionMode;
+  primaryInterface: PrimaryInterface;
+  includeVerifiers: boolean;
   claudeSessionId?: string;
   piSessionFile?: string;
   cwd?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
-  planFilePath?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -314,7 +327,7 @@ export type ServerEvent =
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
   | { type: "session.status"; payload: { sessionId: string; status: SessionStatus; title?: string; cwd?: string; error?: string } }
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
-  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; workflowTree?: WorkflowNode[]; verificationDepth?: number; title?: string; engine?: SessionEngine; interactionMode?: InteractionMode; planFilePath?: string } }
+  | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; workflowTree?: WorkflowNode[]; verificationDepth?: number; title?: string; engine?: SessionEngine; interactionMode?: InteractionMode; primaryInterface?: PrimaryInterface; includeVerifiers?: boolean } }
   | { type: "session.workflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
   | { type: "session.verificationDepth"; payload: { sessionId: string; verificationDepth: number } }
   | { type: "session.title"; payload: { sessionId: string; title: string } }
@@ -325,11 +338,15 @@ export type ServerEvent =
   | { type: "workflow.plan"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
   | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[] } }
   | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } }
-  | { type: "session.modeChanged"; payload: { sessionId: string; interactionMode: InteractionMode } };
+  | { type: "session.contextInduction"; payload: { sessionId: string; phase: "started" | "finished"; ok?: boolean } }
+  | { type: "session.verifierCheck"; payload: { sessionId: string; nodeId: string; phase: "started" | "finished" } }
+  | { type: "memory.readResult"; payload: { requestId: string; dir: string; sections: Array<{ fileName: string; content: string }>; skillsDir: string; skillSections: Array<{ fileName: string; content: string }> } }
+  | { type: "memory.writeResult"; payload: { requestId: string; success: boolean; error?: string } }
+  | { type: "skills.writeResult"; payload: { requestId: string; success: boolean; error?: string } };
 
 export type ClientEvent =
-  | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string; interactionMode?: InteractionMode } }
-  | { type: "session.continue"; payload: { sessionId: string; prompt: string } }
+  | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string; interactionMode?: InteractionMode; primaryInterface?: PrimaryInterface; includeVerifiers?: boolean } }
+  | { type: "session.continue"; payload: { sessionId: string; prompt: string; verificationNodeId?: string } }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }
   | { type: "session.updateWorkflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
@@ -339,4 +356,7 @@ export type ClientEvent =
   | { type: "session.history"; payload: { sessionId: string } }
   | { type: "session.solveNode"; payload: { sessionId: string; nodeId: string } }
   | { type: "session.regenerateWorkflow"; payload: { sessionId: string } }
-  | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: AppPermissionResult } };
+  | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: AppPermissionResult } }
+  | { type: "memory.read"; payload: { requestId: string } }
+  | { type: "memory.write"; payload: { requestId: string; sections: Array<{ fileName: string; content: string }>; deletedFileNames?: string[] } }
+  | { type: "skills.write"; payload: { requestId: string; sections: Array<{ fileName: string; content: string }>; deletedFileNames?: string[] } };

@@ -19,7 +19,6 @@ interface HomePromptInputProps {
 
 const MODE_OPTIONS: { value: InteractionMode; label: string; description: string }[] = [
   { value: "workflow", label: "Workflow", description: "Structured step-by-step plan" },
-  { value: "plan", label: "Plan", description: "Markdown plan with approval" },
   { value: "chat", label: "Chat", description: "Free-form coding chat" },
 ];
 
@@ -37,6 +36,10 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
   const setTempCwd = useAppStore((s) => s.setTempCwd);
   const selectedMode = useAppStore((s) => s.selectedMode);
   const setSelectedMode = useAppStore((s) => s.setSelectedMode);
+  const selectedPrimaryInterface = useAppStore((s) => s.selectedPrimaryInterface);
+  const setSelectedPrimaryInterface = useAppStore((s) => s.setSelectedPrimaryInterface);
+  const selectedIncludeVerifiers = useAppStore((s) => s.selectedIncludeVerifiers);
+  const setSelectedIncludeVerifiers = useAppStore((s) => s.setSelectedIncludeVerifiers);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -78,6 +81,11 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
       setIsCopying(false);
     }
   }, [ensureCwd, setAttachedFiles, setGlobalError]);
+
+  const handleFilePickerClick = useCallback(async () => {
+    const result = await window.electron.selectFiles?.();
+    if (result?.length) handleAttachFiles(result);
+  }, [handleAttachFiles]);
 
   const handleSelectDirectory = useCallback(async () => {
     const result = await window.electron.selectDirectory();
@@ -121,12 +129,14 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
         cwd: sessionCwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         interactionMode: selectedMode,
+        primaryInterface: selectedPrimaryInterface,
+        includeVerifiers: selectedIncludeVerifiers,
       },
     });
     setPrompt("");
     setAttachedFiles([]);
     setTempCwd(null);
-  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, selectedMode, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd]);
+  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, selectedMode, selectedPrimaryInterface, selectedIncludeVerifiers, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;
@@ -301,7 +311,10 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
               <button
                 key={opt.value}
                 type="button"
-                onClick={() => setSelectedMode(opt.value)}
+                onClick={() => {
+                  setSelectedMode(opt.value);
+                  setSelectedPrimaryInterface(opt.value === "chat" ? "chat" : "files");
+                }}
                 title={opt.description}
                 className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
                   selectedMode === opt.value
@@ -313,6 +326,41 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
               </button>
             ))}
           </div>
+
+          {/* Primary interface selector */}
+          <div className="flex items-center rounded-lg border border-ink-900/10 bg-surface-secondary p-0.5">
+            {(["files", "chat"] as const).map((pi) => (
+              <button
+                key={pi}
+                type="button"
+                onClick={() => setSelectedPrimaryInterface(pi)}
+                title={pi === "files" ? "Files as primary view" : "Chat as primary view"}
+                className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  selectedPrimaryInterface === pi
+                    ? "bg-ink-700 text-white shadow-sm"
+                    : "text-ink-500 hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+              >
+                {pi === "files" ? "Files" : "Chat"}
+              </button>
+            ))}
+          </div>
+
+          {/* Verifiers toggle (workflow only) */}
+          {selectedMode === "workflow" && (
+            <button
+              type="button"
+              onClick={() => setSelectedIncludeVerifiers(!selectedIncludeVerifiers)}
+              title={selectedIncludeVerifiers ? "Verifiers enabled — click to disable" : "Verifiers disabled — click to enable"}
+              className={`rounded-md px-2.5 py-1 text-[11px] font-medium border transition-colors ${
+                selectedIncludeVerifiers
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                  : "border-ink-900/10 bg-surface-secondary text-ink-400"
+              }`}
+            >
+              Verifiers {selectedIncludeVerifiers ? "on" : "off"}
+            </button>
+          )}
 
           <div className="flex-1" />
 

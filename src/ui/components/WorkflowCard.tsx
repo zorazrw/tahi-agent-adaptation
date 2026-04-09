@@ -2,9 +2,10 @@ type WorkflowCardProps = {
   steps: string[];
   outputFiles: string[][];
   verifiers: string[][];
+  includeVerifiers?: boolean;
 };
 
-export function WorkflowCard({ steps, outputFiles, verifiers }: WorkflowCardProps) {
+export function WorkflowCard({ steps, outputFiles, verifiers, includeVerifiers = true }: WorkflowCardProps) {
   if (!steps.length) return null;
 
   return (
@@ -27,7 +28,7 @@ export function WorkflowCard({ steps, outputFiles, verifiers }: WorkflowCardProp
                   </span>
                 </div>
               ))}
-              {criteria.map((c, ci) => (
+              {includeVerifiers && criteria.map((c, ci) => (
                 <div key={ci} className="ml-5 flex items-start gap-1.5 text-xs text-ink-600">
                   <span className="mt-0.5 shrink-0">○</span>
                   <span>{c}</span>

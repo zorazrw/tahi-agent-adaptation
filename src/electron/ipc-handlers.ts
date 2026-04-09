@@ -124,8 +124,6 @@ const sessionContinueVerificationNodeId = new Map<string, string>();
 
 /** Last workflow node the session was driving (solve or explicit selection); used to verify on continue when UI omits verificationNodeId. */
 const sessionLastVerificationNodeId = new Map<string, string>();
-/** Sessions where plan_approve switched mode from plan→chat during a run; auto-continue when the run finishes. */
-const pendingPlanContinuation = new Map<string, string>();
 
 function initializeSessions() {
   if (!sessions) {
@@ -231,11 +229,13 @@ function runPostSolverExport(sessionId: string, _nodeId: string): void {
 }
 
 async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: string) {
-  await runVerifierLabelingForNode(sessionId, nodeId);
-
   const store = initializeSessions();
   const session = store.getSession(sessionId);
   if (!session) return;
+
+  if (session.includeVerifiers) {
+    await runVerifierLabelingForNode(sessionId, nodeId);
+  }
 
   broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
 
@@ -254,7 +254,11 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
 
 /** After a free-form session.continue finishes: re-check verifiers + export; no nodeCompleted (runner already set status). */
 async function finalizeContinueWithVerification(sessionId: string, nodeId: string) {
-  await runVerifierLabelingForNode(sessionId, nodeId);
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (session?.includeVerifiers) {
+    await runVerifierLabelingForNode(sessionId, nodeId);
+  }
   runPostSolverExport(sessionId, nodeId);
 }
 
@@ -265,69 +269,14 @@ function emit(event: ServerEvent) {
     (event.type === "session.status" ||
       event.type === "stream.message" ||
       event.type === "stream.user_prompt" ||
-      event.type === "permission.request" ||
-      event.type === "session.modeChanged") &&
+      event.type === "permission.request") &&
     !hasLiveSession(event.payload.sessionId)
   ) {
     return;
   }
 
-  if (event.type === "session.modeChanged") {
-    const { sessionId, interactionMode } = event.payload;
-    sessions.updateSession(sessionId, { interactionMode });
-    if (interactionMode === "chat") {
-      const s = sessions.getSession(sessionId);
-      if (s?.planFilePath) {
-        pendingPlanContinuation.set(sessionId, s.planFilePath);
-      }
-    }
-  }
-
   if (event.type === "session.status") {
     sessions.updateSession(event.payload.sessionId, { status: event.payload.status });
-
-    const contPlanPath = pendingPlanContinuation.get(event.payload.sessionId);
-    if (contPlanPath && event.payload.status !== "running") {
-      pendingPlanContinuation.delete(event.payload.sessionId);
-      const session = sessions.getSession(event.payload.sessionId);
-      if (session && session.interactionMode === "chat") {
-        const continuationPrompt = `The plan at ${contPlanPath} has been approved. Read the plan file, then implement it fully. You now have full access to all tools.`;
-        sessions.updateSession(session.id, { status: "running", lastPrompt: continuationPrompt });
-        broadcast({
-          type: "session.status",
-          payload: { sessionId: session.id, status: "running", title: session.title, cwd: session.cwd }
-        });
-        emit({
-          type: "stream.user_prompt",
-          payload: { sessionId: session.id, prompt: continuationPrompt }
-        });
-        runClaude({
-          prompt: continuationPrompt,
-          session,
-          onEvent: emit,
-          onSessionUpdate: (updates) => {
-            sessions.updateSession(session.id, updates);
-          }
-        })
-          .then((handle) => {
-            runnerHandles.set(session.id, handle);
-          })
-          .catch((error) => {
-            sessions.updateSession(session.id, { status: "error" });
-            broadcast({
-              type: "session.status",
-              payload: {
-                sessionId: session.id,
-                status: "error",
-                title: session.title,
-                cwd: session.cwd,
-                error: String(error)
-              }
-            });
-          });
-        return;
-      }
-    }
   }
   if (event.type === "workflow.plan") {
     const { sessionId, workflowTree } = event.payload;
@@ -381,22 +330,22 @@ function emit(event: ServerEvent) {
                   completedNode.originalOutputs = originals;
                 }
               }
+
+              // Mark this node and all its descendants as completed
+              completeNodeAndDescendants(completedNode);
             }
 
-            // Mark this node and all its descendants as completed
-            completeNodeAndDescendants(completedNode);
-          }
+            // Bubble up: mark parents complete if all children are done
+            let parentNode = findParentNode(session.workflowTree!, nodeId);
+            while (parentNode && isNodeFullyComplete(parentNode)) {
+              parentNode.status = "completed";
+              parentNode = findParentNode(session.workflowTree!, parentNode.id);
+            }
 
-          // Bubble up: mark parents complete if all children are done
-          let parentNode = findParentNode(session.workflowTree, nodeId);
-          while (parentNode && isNodeFullyComplete(parentNode)) {
-            parentNode.status = "completed";
-            parentNode = findParentNode(session.workflowTree, parentNode.id);
+            sessions!.updateSession(sessionId, { workflowTree: session.workflowTree });
+            const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
+            broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
           }
-
-          sessions!.updateSession(sessionId, { workflowTree: session.workflowTree });
-          const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
-          broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
         }
         void finalizeNodeSolveAfterVerifierPass(sessionId, nodeId).catch((e) => {
           console.error("[ipc] finalizeNodeSolveAfterVerifierPass:", e);
@@ -721,7 +670,8 @@ export function handleClientEvent(event: ClientEvent) {
         title: history.session.title,
         engine: history.session.engine,
         interactionMode: history.session.interactionMode,
-        planFilePath: history.session.planFilePath
+        primaryInterface: history.session.primaryInterface,
+        includeVerifiers: history.session.includeVerifiers,
       }
     });
     return;
@@ -734,7 +684,9 @@ export function handleClientEvent(event: ClientEvent) {
       allowedTools: event.payload.allowedTools,
       prompt: event.payload.prompt,
       engine: "pi",
-      interactionMode: event.payload.interactionMode ?? "workflow"
+      interactionMode: event.payload.interactionMode ?? "workflow",
+      primaryInterface: event.payload.primaryInterface,
+      includeVerifiers: event.payload.includeVerifiers,
     });
 
     sessions.updateSession(session.id, {
