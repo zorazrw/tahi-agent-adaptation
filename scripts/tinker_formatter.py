@@ -417,7 +417,9 @@ class ReinforceDataset:
         self._indices = list(range(len(datums)))
 
     def __len__(self) -> int:
-        return max(1, (len(self._datums) + self._batch_size - 1) // self._batch_size)
+        if not self._datums:
+            return 0
+        return (len(self._datums) + self._batch_size - 1) // self._batch_size
 
     def set_epoch(self, seed: int) -> None:
         import random
@@ -444,7 +446,7 @@ class ReinforceDataBuilder(ChatDatasetBuilder):
 
     Reads a JSON file containing agent interaction data with reward signals
     and converts each learning unit into a tokenized Datum paired with a scalar
-    reward.  Skips the first learning unit (index 0) following OPD convention.
+    reward.
 
     Reward formula: ``reward = verifier - alpha * human`` where ``verifier`` is
     the 0-1 success ratio and ``human`` penalizes trajectories requiring more
@@ -465,9 +467,9 @@ class ReinforceDataBuilder(ChatDatasetBuilder):
         if "sessions" in raw:
             units: list[dict] = []
             for session in raw["sessions"]:
-                units.extend(session.get("learning_units", [])[1:])
+                units.extend(session.get("learning_units", []))
             return units
-        return raw["learning_units"][1:]
+        return raw["learning_units"]
 
     def _build_dataset(self, path: str, batch_size: int) -> ReinforceDataset:
         units = self._load_units(path)

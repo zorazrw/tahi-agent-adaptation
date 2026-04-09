@@ -11,6 +11,7 @@ Adapted from the DPO training script (tinker_dpo.py) for the training loop
 structure and Tinker client management.
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import cast
@@ -28,6 +29,7 @@ from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
 logger = logging.getLogger(__name__)
+BASELINE_STATE_FILENAME = "reinforce_baseline_state.json"
 
 
 @chz.chz
@@ -127,6 +129,53 @@ def create_training_client(
     return training_client
 
 
+def _baseline_state_path(log_path: str) -> Path:
+    return Path(log_path) / BASELINE_STATE_FILENAME
+
+
+def _save_baseline_state(log_path: str, epoch_idx: int, batch_idx: int, baseline: float) -> None:
+    path = _baseline_state_path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"epoch": epoch_idx, "batch": batch_idx, "baseline": baseline}),
+        encoding="utf-8",
+    )
+
+
+def _load_baseline_state(
+    log_path: str, resume_info: checkpoint_utils.CheckpointRecord | None
+) -> float | None:
+    if resume_info is None:
+        return None
+
+    path = _baseline_state_path(log_path)
+    if not path.exists():
+        return None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"Failed to read REINFORCE baseline state from {path}: {exc}")
+        return None
+
+    resume_epoch = resume_info.epoch or 0
+    resume_batch = resume_info.batch or 0
+    if payload.get("epoch") != resume_epoch or payload.get("batch") != resume_batch:
+        logger.warning(
+            "Ignoring saved REINFORCE baseline because it does not match the latest checkpoint "
+            f"(checkpoint=({resume_epoch}, {resume_batch}), "
+            f"baseline_state=({payload.get('epoch')}, {payload.get('batch')}))"
+        )
+        return None
+
+    baseline = payload.get("baseline")
+    if not isinstance(baseline, (int, float)):
+        logger.warning(f"Ignoring invalid saved REINFORCE baseline: {baseline!r}")
+        return None
+
+    return float(baseline)
+
+
 def make_reinforce_loss_fn(
     advantages: list[float],
 ):
@@ -188,6 +237,10 @@ def do_update(
     metrics: dict[str, int | float | str] = {"epoch": epoch_idx}
 
     with trace.trace_iteration(step=step) as window:
+        # Mirror checkpoint resume semantics by storing the baseline for the
+        # same loop position that checkpoint_utils records.
+        _save_baseline_state(log_path, epoch_idx, batch_idx, baseline)
+
         # Periodic checkpoint
         if config.save_every > 0 and step % config.save_every == 0 and step > 0:
             with trace.scope_span_sync("save_checkpoint"):
@@ -271,12 +324,8 @@ def main(config: Config):
     each step.
     """
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
-    if resume_info:
-        start_epoch = resume_info.epoch or 0
-        start_batch = resume_info.batch
-    else:
-        start_epoch = 0
-        start_batch = 0
+    start_epoch = resume_info.epoch or 0 if resume_info else 0
+    start_batch = resume_info.batch or 0 if resume_info else 0
 
     # Logging setup
     ml_logger = ml_log.setup_logging(
@@ -322,7 +371,9 @@ def main(config: Config):
     )
 
     # Initialize running baseline
-    baseline = config.initial_baseline
+    baseline = _load_baseline_state(config.log_path, resume_info)
+    if baseline is None:
+        baseline = config.initial_baseline
 
     # Training loop
     reached_max_steps = False
