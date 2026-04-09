@@ -75,12 +75,12 @@ from tinker_cookbook.utils import ml_log, trace
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DEMO_TEMPLATE = (
-    "{question}\n\n"
-    "This is an example for a response to the question:\n"
-    "{golden_answer}\n\n"
-    "Now answer with a response of your own, including the thinking process."
-)
+# DEFAULT_DEMO_TEMPLATE = (
+#     "{question}\n\n"
+#     "This is an example for a response to the question:\n"
+#     "{golden_answer}\n\n"
+#     "Now answer with a response of your own, including the thinking process."
+# )
 
 OPD_DEMO_TEMPLATE = (
     "{question}\n\n"
@@ -110,7 +110,7 @@ def build_sdft_teacher_prompt(
     golden_answer: str,
     renderer: renderers.Renderer,
     system_prompt: str | None = None,
-    demo_template: str = DEFAULT_DEMO_TEMPLATE,
+    demo_template: str = OPD_DEMO_TEMPLATE,
 ) -> tinker.ModelInput:
     """Build teacher ModelInput with golden answer as an in-context demonstration.
 
@@ -508,7 +508,7 @@ class Config:
 
     # SDFT-specific
     topk: int = 20
-    demo_template: str = DEFAULT_DEMO_TEMPLATE
+    demo_template: str = OPD_DEMO_TEMPLATE
     system_prompt: str | None = None
     teacher_sync_every: int | None = None
     max_context_length: int = 32768
