@@ -797,17 +797,55 @@ def trajectory_row(
     environment: dict,
     *,
     tool_result: Optional[str] = None,
+    message: Optional[str] = None,
 ) -> dict:
     """
     Build one trajectory object. User or agent steps that are only ``message("…")`` (no `` | ``)
     omit ``environment`` (keeps JSON small; state is on neighboring tool / verify / result rows).
     """
     row: Dict[str, Any] = {"actor": actor, "action": action}
+    if isinstance(message, str):
+        row["message"] = message
     if tool_result is not None:
         row["tool_result"] = tool_result
     if not _step_omits_environment(actor, action, tool_result):
         row["environment"] = environment
     return row
+
+
+def _parse_action_message_payload(action: str) -> Optional[str]:
+    """Parse a leading ``message("...")`` segment and return decoded text."""
+    if not isinstance(action, str):
+        return None
+    s = action.strip()
+    if not (s.startswith("message(") and s.endswith(")")):
+        return None
+    inner = s[len("message("):-1].strip()
+    if len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+        try:
+            return str(json.loads(inner))
+        except json.JSONDecodeError:
+            return inner[1:-1]
+    return inner
+
+
+def split_agent_action_and_message(action: str) -> Tuple[str, Optional[str]]:
+    """
+    For mixed rows like ``message("...") | Bash({...})``, export:
+    - action: ``Bash({...})`` (tool-call chain)
+    - message: decoded text from ``message("...")``
+    """
+    if not isinstance(action, str):
+        return action, None
+    parts = [p.strip() for p in action.split(" | ")]
+    if len(parts) <= 1:
+        return action, None
+    head = parts[0]
+    msg = _parse_action_message_payload(head)
+    if msg is None:
+        return action, None
+    tool_action = " | ".join(p for p in parts[1:] if p)
+    return (tool_action or action), msg
 
 
 def _prompts_equal(a: str, b: str) -> bool:
@@ -1052,12 +1090,17 @@ def build_full_session_trajectory(
                 memory=m_a,
                 skill=s_a,
             )
+            action_out = action
+            message_out: Optional[str] = None
+            if " | " in action:
+                action_out, message_out = split_agent_action_and_message(action)
             traj.append(
                 trajectory_row(
                     "agent",
-                    action,
+                    action_out,
                     step_env,
                     tool_result=merged_tool,
+                    message=message_out,
                 )
             )
             idx += consume
