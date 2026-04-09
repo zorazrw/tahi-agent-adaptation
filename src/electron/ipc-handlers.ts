@@ -25,6 +25,7 @@ import {
 } from "./libs/skill-store.js";
 import { runFullSessionExportAndExtract, setContextInductionNotifier } from "./libs/context-export.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
+import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
 import {
   buildExportEnvironmentSnapshot,
   buildExportEnvironmentSnapshotWithPreviewWrittenFile,
@@ -123,6 +124,60 @@ const sessionContinueVerificationNodeId = new Map<string, string>();
 
 /** Last workflow node the session was driving (solve or explicit selection); used to verify on continue when UI omits verificationNodeId. */
 const sessionLastVerificationNodeId = new Map<string, string>();
+type VerifierExampleState = { removed: string[]; added: string[] };
+const sessionVerifierExamplesByNodeId = new Map<string, Map<string, VerifierExampleState>>();
+
+function normalizeVerifierText(v: string): string {
+  return v.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function uniqueByNormalized(values: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const cleaned = String(raw ?? "").trim();
+    if (!cleaned) continue;
+    const key = normalizeVerifierText(cleaned);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
+function indexNodesById(tree: WorkflowNode[]): Map<string, WorkflowNode> {
+  const map = new Map<string, WorkflowNode>();
+  const stack = [...tree];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    map.set(node.id, node);
+    for (const child of node.children ?? []) stack.push(child);
+  }
+  return map;
+}
+
+function collectVerifierExampleUpdates(
+  oldTree: WorkflowNode[],
+  newTree: WorkflowNode[]
+): Map<string, VerifierExampleState> {
+  const out = new Map<string, VerifierExampleState>();
+  const oldIdx = indexNodesById(oldTree);
+  const newIdx = indexNodesById(newTree);
+  for (const [nodeId, beforeNode] of oldIdx.entries()) {
+    const afterNode = newIdx.get(nodeId);
+    if (!afterNode) continue;
+    const before = uniqueByNormalized([...(beforeNode.verifiers ?? [])]);
+    const after = uniqueByNormalized([...(afterNode.verifiers ?? [])]);
+    const beforeKeys = new Set(before.map(normalizeVerifierText));
+    const afterKeys = new Set(after.map(normalizeVerifierText));
+    const removed = before.filter((v) => !afterKeys.has(normalizeVerifierText(v)));
+    const added = after.filter((v) => !beforeKeys.has(normalizeVerifierText(v)));
+    if (removed.length > 0 || added.length > 0) {
+      out.set(nodeId, { removed, added });
+    }
+  }
+  return out;
+}
 
 function initializeSessions() {
   if (!sessions) {
@@ -759,19 +814,55 @@ export function handleClientEvent(event: ClientEvent) {
       sessionContinueVerificationNodeId.delete(session.id);
     }
 
-    runClaude({
-      prompt: event.payload.prompt,
-      session,
-      resumeSessionId: session.claudeSessionId,
-      onEvent: emit,
-      onSessionUpdate: (updates) => {
-        sessions.updateSession(session.id, updates);
-      }
-    })
-      .then((handle) => {
+    void (async () => {
+      try {
+        if (vNode) {
+          const latest = sessions.getSession(session.id);
+          if (latest?.workflowTree) {
+            const target = findNodeById(latest.workflowTree, vNode);
+            if (target) {
+              const priorUserPrompts = sessions
+                .getMessages(session.id)
+                .filter((m): m is { type: "user_prompt"; prompt: string } => m.type === "user_prompt")
+                .map((m) => m.prompt.trim())
+                .filter(Boolean);
+              const userMessages = [...priorUserPrompts, event.payload.prompt.trim()].filter(Boolean);
+              try {
+                const updatedVerifiers = await generateUpdatedVerifiersForNode(
+                  latest,
+                  latest.workflowTree,
+                  target,
+                  userMessages,
+                  sessionVerifierExamplesByNodeId.get(session.id)?.get(vNode)?.removed ?? [],
+                  sessionVerifierExamplesByNodeId.get(session.id)?.get(vNode)?.added ?? []
+                );
+                if (updatedVerifiers && updatedVerifiers.length > 0) {
+                  target.verifiers = updatedVerifiers;
+                  target.verifierMarks = updatedVerifiers.map(() => undefined);
+                  sessions.updateSession(session.id, { workflowTree: latest.workflowTree });
+                  broadcast({
+                    type: "session.workflowTree",
+                    payload: { sessionId: session.id, workflowTree: latest.workflowTree },
+                  });
+                }
+              } catch (e) {
+                console.error("[ipc] verifier generation failed:", e);
+              }
+            }
+          }
+        }
+
+        const handle = await runClaude({
+          prompt: event.payload.prompt,
+          session,
+          resumeSessionId: session.claudeSessionId,
+          onEvent: emit,
+          onSessionUpdate: (updates) => {
+            sessions.updateSession(session.id, updates);
+          }
+        });
         runnerHandles.set(session.id, handle);
-      })
-      .catch((error) => {
+      } catch (error) {
         sessions.updateSession(session.id, { status: "error" });
         emit({
           type: "session.status",
@@ -783,7 +874,8 @@ export function handleClientEvent(event: ClientEvent) {
             error: String(error)
           }
         });
-      });
+      }
+    })();
 
     return;
   }
@@ -830,6 +922,18 @@ export function handleClientEvent(event: ClientEvent) {
       broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree } });
     }
     const { workflow: wfEdit, verifier: verEdit } = classifyUserWorkflowTreeEdit(oldTree, workflowTree);
+    const nodeExampleUpdates = collectVerifierExampleUpdates(oldTree, workflowTree);
+    if (nodeExampleUpdates.size > 0) {
+      const existing = sessionVerifierExamplesByNodeId.get(sessionId) ?? new Map<string, VerifierExampleState>();
+      for (const [nodeId, delta] of nodeExampleUpdates.entries()) {
+        const prev = existing.get(nodeId) ?? { removed: [], added: [] };
+        existing.set(nodeId, {
+          removed: uniqueByNormalized([...prev.removed, ...delta.removed]),
+          added: uniqueByNormalized([...prev.added, ...delta.added]),
+        });
+      }
+      sessionVerifierExamplesByNodeId.set(sessionId, existing);
+    }
     const sessAfter = sessions.getSession(sessionId);
     if (sessAfter && wfEdit) {
       const rowId = sessions.recordMessage(sessionId, { type: "edit_workflow" });
@@ -923,6 +1027,7 @@ export function handleClientEvent(event: ClientEvent) {
     sessionCurrentNodeId.delete(sessionId);
     sessionContinueVerificationNodeId.delete(sessionId);
     sessionLastVerificationNodeId.delete(sessionId);
+    sessionVerifierExamplesByNodeId.delete(sessionId);
 
     sessions.deleteSession(sessionId);
     emit({
