@@ -294,7 +294,8 @@ class OPDDataBuilder:
         #     }
         # ]
         units = self._load_units(raw)
-        for unit in units[1:]:
+        units = units[1:]
+        for unit in units:
             question = "\n".join(unit["user_messages"])
             golden_answer = chat_to_text(traj_to_chat(unit["human_trajectory"]))
             student_prompt = [{"role": "user", "content": msg} for msg in unit["user_messages"]]

@@ -19,8 +19,8 @@ if [[ -z "${TINKER_API_KEY:-}" ]]; then
   exit 1
 fi
 
-python scripts/tinker_reinforce.py \
-  --train-path scripts/reinforce.json \
+python tinker_reinforce.py \
+  --train-path reinforce.json \
   --model-name Qwen/Qwen3-4B-Instruct-2507 \
   --renderer-name qwen3_instruct \
   --log-path ./logs/tinker_reinforce \

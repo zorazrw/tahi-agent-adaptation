@@ -539,9 +539,8 @@ async def main(
     """Main training loop for SDFT.
 
     Runs on-policy self-distillation: at each step, the student generates
-    completions, the teacher scores them (conditioned on the golden answer
-    demonstration), and the student is trained to match the teacher's
-    distribution.
+    completions, the teacher scores them (conditioned on the human feedback),
+    and the student is trained to match the teacher's distribution.
 
     When ``cfg.topk > 0``, uses top-K distillation via Tinker's
     ``cross_entropy`` loss with ``(N, K)``-shaped soft targets. When

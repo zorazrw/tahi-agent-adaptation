@@ -1,50 +1,75 @@
-# Scripts
+# Data Export and Agent Update
 
-## export_task_sessions.py
+## Data Export
 
-Standalone Python 3 script (stdlib only) to export task sessions from the Agent Cowork SQLite database to JSON.
-
-**What’s in the database (and what this exports):**
-
-| Data | In DB | Exported as |
-|------|--------|-------------|
-| Initial task instruction | `sessions.last_prompt` | `initial_task_instruction` |
-| Workflow step descriptions | `sessions.steps` (JSON array) | `workflow_steps[].step_description` |
-| Expected output files per step | `sessions.output_files` (JSON) | `workflow_steps[].expected_output_files` |
-| Verifiers per step | `sessions.verification_criteria` + `verifier_marks` | `workflow_steps[].verifiers` (criterion + status: success/failure/unchecked) |
-| Agent/user message turns | `messages.data` (JSON per row) | `action_trajectory` |
-
-**Formats:**
-
-| `--format` | Output | Use case |
-|------------|--------|----------|
-| `default` (default) | Human-readable action trajectory (`actor`, `action`, `environment`) | Context export pipeline |
-| `weight` | Raw SDK messages split into `task_units` with `agent_trajectory`, `human_trajectory`, `verifiers`, `prompt_first_turn` | DPO / OPSD / RL training (`scripts/weight/`) |
+`export_task_sessions.py` is a standalone Python 3 script (stdlib only) to export task sessions from the Agent Cowork SQLite database to JSON.
 
 **Usage:**
-
 ```bash
-# Default DB path (e.g. macOS: ~/Library/Application Support/Agent Cowork/sessions.db)
-python scripts/export_task_sessions.py
-
-# Custom DB path
-python scripts/export_task_sessions.py --db /path/to/sessions.db -o out.json
+python scripts/export_task_sessions.py -o out.json
 
 # Single session
 python scripts/export_task_sessions.py --session-id <uuid> -o session.json
 
 # Weight-based export (for training; see Formats table above)
 python scripts/export_task_sessions.py --format weight -o out_weight.json
-
-Output: with `--session-id`, one session object; when exporting all sessions, a JSON array of session objects (same structure as in the script docstring).
 ```
 
-## induce.py
+**Exported Data Structure:**
 
-Standalone Python 3 script (stdlib only) to extract memories and skills from session JSON (e.g. ``out.json``).
+```json
+{
+  "uuid": "<session id>",
+  "name": "<title>",
+  "trajectory": [
+    {
+      "actor": "user | agent",
+      "action": "<action string>",
+      "message": "<optional decoded message text>",
+      "tool_result": "<optional merged tool result text>",
+      "environment": {
+        "workflow": "<nested workflow tree with verifier statuses>",
+        "file": "<output file snapshots>",
+        "memory": "<memory file map>",
+        "skill": "<skill file map>"
+      }
+    }
+  ]
+}
+```
+
+
+## Context-Based Update
+
+`induce.py` is a standalone Python 3 script (stdlib only) to extract memories and skills from session JSON (e.g. ``memories/{task-name}.md`` and ``skills/{task-name}.md``).
 
 **Usage:**
 
 ```bash
 python scripts/induce.py --data_path out.json --output_dir "."
+```
+
+## Weight-Based Update
+
+1. DPO: `export_dpo_data.py` and `tinker_dpo.py`
+2. OPD: `export_opd_data.py` and `tinker_opd.py`
+3. REINFORCE: `export_reinforce_data.py` and `tinker_reinforce.py`
+
+to run tinker training, use the following commands:
+
+```bash
+cd scripts
+python export_task_sessions.py -o out.json
+
+# DPO
+python export_dpo_data.py out.json -o out_dpo.json
+bash tinker_dpo.sh
+
+# OPD
+python export_opd_data.py out.json -o out_opd.json
+bash tinker_opd.sh
+
+# REINFORCE
+python export_reinforce_data.py out.json -o out_reinforce.json
+bash tinker_reinforce.sh
 ```

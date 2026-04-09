@@ -19,8 +19,8 @@ if [[ -z "${TINKER_API_KEY:-}" ]]; then
   exit 1
 fi
 
-python scripts/tinker_opd.py \
-  --train-path scripts/opd.json \
+python tinker_opd.py \
+  --train-path opd.json \
   --model-name Qwen/Qwen3-4B-Instruct-2507 \
   --renderer-name qwen3_instruct \
   --log-path ./logs/tinker_opd \
