@@ -212,6 +212,12 @@ export type LegacyMessage =
   | LegacyResultMessage
   | LegacyStreamEventMessage;
 
+export type BrainEditMessage = { type: "brain_edit" };
+export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string };
+export type EditWorkflowMessage = { type: "edit_workflow" };
+export type EditVerifierMessage = { type: "edit_verifier" };
+export type FileEditMessage = { type: "file_edit"; path: string };
+
 export type StreamMessage =
   | UserPromptMessage
   | NodeCompletedMessage
@@ -220,6 +226,11 @@ export type StreamMessage =
   | PiToolResultMessage
   | PiRunResultMessage
   | PiLlmDebugMessage
+  | BrainEditMessage
+  | VerifierLabelMessage
+  | EditWorkflowMessage
+  | EditVerifierMessage
+  | FileEditMessage
   | LegacyMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
@@ -316,15 +327,20 @@ export type ServerEvent =
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }
   | { type: "session.nodeCompleted"; payload: { sessionId: string; nodeId: string } }
+  | { type: "session.contextInduction"; payload: { sessionId: string; phase: string; ok?: boolean } }
+  | { type: "session.verifierCheck"; payload: { sessionId: string; nodeId: string; phase: string } }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } }
   | { type: "workflow.plan"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
   | { type: "session.messagesReset"; payload: { sessionId: string; messages: StreamMessage[] } }
-  | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } };
+  | { type: "session.effectivePrompt"; payload: { sessionId: string; prompt: string } }
+  | { type: "memory.readResult"; payload: { requestId: string; dir: string; sections: unknown; skillsDir: string; skillSections: unknown } }
+  | { type: "memory.writeResult"; payload: { requestId: string; success: boolean; error?: string } }
+  | { type: "skills.writeResult"; payload: { requestId: string; success: boolean; error?: string } };
 
 export type ClientEvent =
   | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string } }
-  | { type: "session.continue"; payload: { sessionId: string; prompt: string } }
+  | { type: "session.continue"; payload: { sessionId: string; prompt: string; verificationNodeId?: string } }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }
   | { type: "session.updateWorkflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
@@ -334,4 +350,8 @@ export type ClientEvent =
   | { type: "session.history"; payload: { sessionId: string } }
   | { type: "session.solveNode"; payload: { sessionId: string; nodeId: string } }
   | { type: "session.regenerateWorkflow"; payload: { sessionId: string } }
-  | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: AppPermissionResult } };
+  | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: AppPermissionResult } }
+  | { type: "memory.read"; payload: { requestId: string } }
+  | { type: "memory.write"; payload: { requestId: string; sections: Array<{ fileName: string; content: string }>; deletedFileNames?: string[] } }
+  | { type: "skills.write"; payload: { requestId: string; sections: Array<{ fileName?: string; content?: string }>; deletedFileNames?: string[] } }
+  | { type: "session.recordBrainEdit"; payload: { sessionId: string } };

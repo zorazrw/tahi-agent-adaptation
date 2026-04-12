@@ -4,7 +4,6 @@ export type {
   AskUserQuestionInput,
   AvailableModel,
   ClientEvent,
-  InteractionMode,
   LegacyAssistantMessage,
   LegacyMessage,
   LegacyResultMessage,

@@ -499,7 +499,24 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const providerOptions = [...new Set([...models.map((item) => item.provider), "openai-compatible", "tinker"])];
+  // Priority order for provider selector; unlisted providers sort alphabetically after these.
+  const PROVIDER_PRIORITY: string[] = ["anthropic", "openai", "openai-compatible", "tinker"];
+  const PROVIDER_LABELS: Record<string, string> = {
+    anthropic: "Anthropic (Claude Code)",
+    openai: "OpenAI",
+    "openai-compatible": "OpenAI-Compatible Endpoint",
+    tinker: "Tinker",
+  };
+
+  const providerOptions = [...new Set([...models.map((item) => item.provider), "openai-compatible", "tinker"])]
+    .sort((a, b) => {
+      const ai = PROVIDER_PRIORITY.indexOf(a);
+      const bi = PROVIDER_PRIORITY.indexOf(b);
+      if (ai !== -1 && bi !== -1) return ai - bi;
+      if (ai !== -1) return -1;
+      if (bi !== -1) return 1;
+      return a.localeCompare(b);
+    });
   const modelOptions = models.filter((item) => item.provider === provider);
   const currentStatus = provider ? providerStatuses[provider] : undefined;
   const fieldClass =
@@ -522,7 +539,7 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
         <div className="flex flex-col gap-1">
           <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-primary/80">Runtime Configuration</div>
           <p className="text-sm text-muted-foreground">
-            Configure the default Pi provider and model. Select &ldquo;openai-compatible&rdquo; or &ldquo;tinker&rdquo; to set up a custom endpoint.
+            Configure the default provider and model. Use Anthropic or OpenAI directly, or select &ldquo;OpenAI-Compatible Endpoint&rdquo; or &ldquo;Tinker&rdquo; to set up a custom provider.
           </p>
         </div>
 
@@ -546,7 +563,7 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                   ? tinkerConfigured ? "Configured" : "Not Configured"
                   : provider === "openai-compatible"
                     ? customConfigured ? "Configured" : "Not Configured"
-                    : provider || "No provider"}
+                    : (PROVIDER_LABELS[provider] ?? provider) || "No provider"}
               </div>
             </div>
 
@@ -564,11 +581,38 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                   }}
                 >
                   {providerOptions.map((item) => (
-                    <option key={item} value={item}>{item}</option>
+                    <option key={item} value={item}>{PROVIDER_LABELS[item] ?? item}</option>
                   ))}
                 </select>
               </label>
-              {provider !== "tinker" && provider !== "openai-compatible" ? (
+              {provider === "tinker" ? (
+                <label className="grid min-w-0 gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Thinking</span>
+                  <button
+                    type="button"
+                    className={`${fieldClass} flex items-center justify-between cursor-pointer`}
+                    onClick={() => setThinkingLevel(thinkingLevel === "off" ? "medium" : "off")}
+                  >
+                    <span>{thinkingLevel === "off" ? "Off" : "On"}</span>
+                    <span className={`inline-block h-4 w-8 rounded-full transition-colors ${thinkingLevel === "off" ? "bg-ink-900/15" : "bg-primary"}`}>
+                      <span className={`block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${thinkingLevel === "off" ? "translate-x-0" : "translate-x-4"}`} />
+                    </span>
+                  </button>
+                </label>
+              ) : provider === "openai-compatible" ? (
+                <label className="grid min-w-0 gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">Default Thinking Level</span>
+                  <select
+                    className={fieldClass}
+                    value={thinkingLevel}
+                    onChange={(e) => setThinkingLevel(e.target.value as typeof thinkingLevel)}
+                  >
+                    {["off", "minimal", "low", "medium", "high", "xhigh"].map((item) => (
+                      <option key={item} value={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
                 <label className="grid min-w-0 gap-1.5">
                   <span className="text-xs font-medium text-muted-foreground">Model</span>
                   <select
@@ -579,19 +623,6 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                   >
                     {modelOptions.map((item) => (
                       <option key={item.id} value={item.id}>{item.label}</option>
-                    ))}
-                  </select>
-                </label>
-              ) : (
-                <label className="grid min-w-0 gap-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Default Thinking Level</span>
-                  <select
-                    className={fieldClass}
-                    value={thinkingLevel}
-                    onChange={(e) => setThinkingLevel(e.target.value as typeof thinkingLevel)}
-                  >
-                    {["off", "minimal", "low", "medium", "high", "xhigh"].map((item) => (
-                      <option key={item} value={item}>{item}</option>
                     ))}
                   </select>
                 </label>

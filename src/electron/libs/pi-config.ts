@@ -250,6 +250,8 @@ export async function saveAgentSettings(settings: AgentSettings): Promise<void> 
   await settingsManager.flush();
 }
 
+const PROVIDER_PRIORITY: string[] = ["anthropic", "openai", "openai-compatible", "tinker"];
+
 export function listAvailableModels(): AvailableModel[] {
   const { modelRegistry } = createPiManagers(process.cwd());
   return modelRegistry
@@ -260,7 +262,16 @@ export function listAvailableModels(): AvailableModel[] {
       label: `${model.provider}/${model.id}`,
       reasoning: Boolean(model.reasoning),
     }))
-    .sort((a: AvailableModel, b: AvailableModel) => a.label.localeCompare(b.label));
+    .sort((a: AvailableModel, b: AvailableModel) => {
+      const ai = PROVIDER_PRIORITY.indexOf(a.provider);
+      const bi = PROVIDER_PRIORITY.indexOf(b.provider);
+      if (ai !== bi) {
+        if (ai !== -1 && bi !== -1) return ai - bi;
+        if (ai !== -1) return -1;
+        if (bi !== -1) return 1;
+      }
+      return a.label.localeCompare(b.label);
+    });
 }
 
 export function getProviderAuthStatus(provider: string): ProviderAuthStatus {

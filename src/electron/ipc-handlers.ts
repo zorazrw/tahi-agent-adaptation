@@ -394,19 +394,21 @@ function emit(event: ServerEvent) {
             }
 
             // Mark this node and all its descendants as completed
-            completeNodeAndDescendants(completedNode);
-          }
+            if (completedNode) {
+              completeNodeAndDescendants(completedNode);
+            }
 
-          // Bubble up: mark parents complete if all children are done
-          let parentNode = findParentNode(session.workflowTree, nodeId);
-          while (parentNode && isNodeFullyComplete(parentNode)) {
-            parentNode.status = "completed";
-            parentNode = findParentNode(session.workflowTree, parentNode.id);
-          }
+            // Bubble up: mark parents complete if all children are done
+            let parentNode = findParentNode(session.workflowTree!, nodeId);
+            while (parentNode && isNodeFullyComplete(parentNode)) {
+              parentNode.status = "completed";
+              parentNode = findParentNode(session.workflowTree!, parentNode.id);
+            }
 
-          sessions!.updateSession(sessionId, { workflowTree: session.workflowTree });
-          const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
-          broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
+            sessions!.updateSession(sessionId, { workflowTree: session.workflowTree });
+            const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
+            broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
+          }
         }
         void finalizeNodeSolveAfterVerifierPass(sessionId, nodeId).catch((e) => {
           console.error("[ipc] finalizeNodeSolveAfterVerifierPass:", e);
