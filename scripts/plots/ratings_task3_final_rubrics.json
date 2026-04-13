@@ -1,0 +1,563 @@
+{
+  "uuid": "6178b6e7-53b4-4d2f-a02e-cb0e3b21cbd3",
+  "name": "WebArena Agent Performance Trend Analysis",
+  "dry_run": false,
+  "tasks": [
+    {
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "description": "Create HTML/CSS line chart visualization",
+      "output_files": [
+        "webarena_trend.html"
+      ],
+      "final_rubrics": [
+        "Chart is a scatter plot (not a line chart)",
+        "All data points from the source are plotted (no duplicates removed)",
+        "Increasing trend is visible in the scatter plot",
+        "3-6 date labels are shown on the x-axis",
+        "Date labels do not overlap each other",
+        "Y-axis has the title \"Success Rate (%)\"",
+        "X-axis and y-axis labels use the same text formatting",
+        "Dark gray is used instead of pure black",
+        "Scatter plot dots are visibly large",
+        "Design is clean with no gridlines"
+      ],
+      "unique_agent_snapshots": 11,
+      "versions": [
+        {
+          "version_index": 0,
+          "trajectory_step_index": 9,
+          "eval_cache_key_prefix": "ef72bd307d2fad9a",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 1,
+          "first_seen_trajectory_step_index": 9,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": false},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              false,
+              true,
+              true,
+              true,
+              true,
+              false,
+              false,
+              false,
+              false,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 50.0
+        },
+        {
+          "version_index": 1,
+          "trajectory_step_index": 16,
+          "eval_cache_key_prefix": "677387a4076b023a",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 2,
+          "first_seen_trajectory_step_index": 16,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": false},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": false}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              false,
+              true,
+              true,
+              true,
+              true,
+              false,
+              false,
+              true,
+              false,
+              false
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 50.0
+        },
+        {
+          "version_index": 2,
+          "trajectory_step_index": 22,
+          "eval_cache_key_prefix": "e348c6fac9eebb28",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 3,
+          "first_seen_trajectory_step_index": 22,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": false},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              false,
+              true,
+              true,
+              true,
+              true,
+              false,
+              false,
+              true,
+              false,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 60.0
+        },
+        {
+          "version_index": 3,
+          "trajectory_step_index": 23,
+          "eval_cache_key_prefix": "8658ca4f7bb94e23",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 4,
+          "first_seen_trajectory_step_index": 23,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              false,
+              false,
+              false,
+              true,
+              null
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 60.0
+        },
+        {
+          "version_index": 4,
+          "trajectory_step_index": 24,
+          "eval_cache_key_prefix": "e27e6a6c53148ab7",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 5,
+          "first_seen_trajectory_step_index": 24,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": true},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              false,
+              false,
+              false,
+              true,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 70.0
+        },
+        {
+          "version_index": 5,
+          "trajectory_step_index": 30,
+          "eval_cache_key_prefix": "9e0ab8d5075088ce",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 6,
+          "first_seen_trajectory_step_index": 30,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": false},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              false,
+              false,
+              false,
+              false,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 60.0
+        },
+        {
+          "version_index": 6,
+          "trajectory_step_index": 31,
+          "eval_cache_key_prefix": "99f17e6e9edc7499",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 7,
+          "first_seen_trajectory_step_index": 31,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": false},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              false,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 90.0
+        },
+        {
+          "version_index": 7,
+          "trajectory_step_index": 32,
+          "eval_cache_key_prefix": "5ef5f52d8e555041",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 8,
+          "first_seen_trajectory_step_index": 32,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 100.0
+        },
+        {
+          "version_index": 8,
+          "trajectory_step_index": 77,
+          "eval_cache_key_prefix": "5e0ed16c7d8160e5",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 9,
+          "first_seen_trajectory_step_index": 77,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 100.0
+        },
+        {
+          "version_index": 9,
+          "trajectory_step_index": 78,
+          "eval_cache_key_prefix": "efc39d653231ad73",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 10,
+          "first_seen_trajectory_step_index": 78,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 100.0
+        },
+        {
+          "version_index": 10,
+          "trajectory_step_index": 79,
+          "eval_cache_key_prefix": "f2d133e52eeedacf",
+          "eval_cache_hit": false,
+          "unique_eval_sequence": 11,
+          "first_seen_trajectory_step_index": 79,
+          "lm": {
+            "raw_text": "```json\n{\n  \"results\": [\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true},\n    {\"pass\": true}\n  ]\n}\n```",
+            "pass_per_criterion": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ],
+            "criteria": [
+              "Chart is a scatter plot (not a line chart)",
+              "All data points from the source are plotted (no duplicates removed)",
+              "Increasing trend is visible in the scatter plot",
+              "3-6 date labels are shown on the x-axis",
+              "Date labels do not overlap each other",
+              "Y-axis has the title \"Success Rate (%)\"",
+              "X-axis and y-axis labels use the same text formatting",
+              "Dark gray is used instead of pure black",
+              "Scatter plot dots are visibly large",
+              "Design is clean with no gridlines"
+            ]
+          },
+          "error": null,
+          "average_success_pct": 100.0
+        }
+      ]
+    }
+  ],
+  "scatter_plot_data": [
+    {
+      "trajectory_step_index": 9,
+      "average_success_pct": 50.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 0,
+      "unique_eval_sequence": 1,
+      "first_seen_trajectory_step_index": 9,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 16,
+      "average_success_pct": 50.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 1,
+      "unique_eval_sequence": 2,
+      "first_seen_trajectory_step_index": 16,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 22,
+      "average_success_pct": 60.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 2,
+      "unique_eval_sequence": 3,
+      "first_seen_trajectory_step_index": 22,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 23,
+      "average_success_pct": 60.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 3,
+      "unique_eval_sequence": 4,
+      "first_seen_trajectory_step_index": 23,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 24,
+      "average_success_pct": 70.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 4,
+      "unique_eval_sequence": 5,
+      "first_seen_trajectory_step_index": 24,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 30,
+      "average_success_pct": 60.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 5,
+      "unique_eval_sequence": 6,
+      "first_seen_trajectory_step_index": 30,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 31,
+      "average_success_pct": 90.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 6,
+      "unique_eval_sequence": 7,
+      "first_seen_trajectory_step_index": 31,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 32,
+      "average_success_pct": 100.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 7,
+      "unique_eval_sequence": 8,
+      "first_seen_trajectory_step_index": 32,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 77,
+      "average_success_pct": 100.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 8,
+      "unique_eval_sequence": 9,
+      "first_seen_trajectory_step_index": 77,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 78,
+      "average_success_pct": 100.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 9,
+      "unique_eval_sequence": 10,
+      "first_seen_trajectory_step_index": 78,
+      "eval_cache_hit": false
+    },
+    {
+      "trajectory_step_index": 79,
+      "average_success_pct": 100.0,
+      "node_id": "3de3527e-5693-450d-976c-5571b0b3671d",
+      "task_description": "Create HTML/CSS line chart visualization",
+      "version_index_within_task": 10,
+      "unique_eval_sequence": 11,
+      "first_seen_trajectory_step_index": 79,
+      "eval_cache_hit": false
+    }
+  ],
+  "eval_cache_stats": {
+    "dedupe_hits": 0,
+    "unique_agent_solutions_evaluated": 11,
+    "llm_calls": 11,
+    "cached_keys": 11,
+    "unique_eval_sequences": 11
+  },
+  "auth_resolved": {
+    "resolver": "induce.resolve_anthropic_config + CLI merge",
+    "skip_api_config": "False",
+    "skip_claude_settings": "False",
+    "base_url_effective": "https://api.anthropic.com",
+    "model": "claude-sonnet-4-5-20250929",
+    "llm": "induce.anthropic_user_text (Anthropic SDK)"
+  }
+}

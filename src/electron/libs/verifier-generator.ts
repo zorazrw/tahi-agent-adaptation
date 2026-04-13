@@ -57,6 +57,7 @@ export async function generateUpdatedVerifiersForNode(
     "Use the simplest, most concise language possible for normal users.",
     "Avoid jargon and unnecessary detail; prefer plain words and short sentences.",
     "Prefer explicit required elements, constraints, and forbidden claims.",
+    "For visual tasks, always include at least one criterion that checks items are clearly separated and not messily overlapping.",
     "Avoid vague wording (e.g., good, complete, quality, reasonable, appropriate).",
     "No duplicates. Keep useful existing verifiers unless they conflict with newer requirements.",
     "Use user-removed examples as negative guidance; avoid similar criteria.",
