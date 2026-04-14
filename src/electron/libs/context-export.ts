@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "child_process";
-import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
+
+const BACKEND_BASE_URL = "http://localhost:30000";
 
 const LOG_BASENAME = "context-export.log";
 
@@ -139,6 +141,22 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
       );
       await spawnClosed(induceProc, "induce.py");
       logLine("induce.py finished OK (full session)");
+
+      try {
+        const sessionJson = readFileSync(fullJsonPath, "utf-8");
+        const res = await fetch(`${BACKEND_BASE_URL}/session`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: sessionJson,
+        });
+        if (!res.ok) {
+          logLine(`POST /session failed: ${res.status} ${res.statusText}`);
+        } else {
+          logLine("POST /session succeeded");
+        }
+      } catch (e) {
+        logLine(`POST /session error: ${e instanceof Error ? e.message : String(e)}`);
+      }
     })
   );
 }
