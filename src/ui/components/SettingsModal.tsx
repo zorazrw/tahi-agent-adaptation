@@ -500,15 +500,18 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   };
 
   // Priority order for provider selector; unlisted providers sort alphabetically after these.
-  const PROVIDER_PRIORITY: string[] = ["anthropic", "openai", "openai-compatible", "tinker"];
+  const ALLOWED_PROVIDERS = new Set(["anthropic", "openai", "openai-compatible", "openrouter", "tinker"]);
+  const PROVIDER_PRIORITY: string[] = ["anthropic", "openai", "tinker", "openai-compatible", "openrouter"];
   const PROVIDER_LABELS: Record<string, string> = {
     anthropic: "Anthropic (Claude Code)",
     openai: "OpenAI",
+    openrouter: "OpenRouter",
     "openai-compatible": "OpenAI-Compatible Endpoint",
     tinker: "Tinker",
   };
 
   const providerOptions = [...new Set([...models.map((item) => item.provider), "openai-compatible", "tinker"])]
+    .filter((p) => ALLOWED_PROVIDERS.has(p))
     .sort((a, b) => {
       const ai = PROVIDER_PRIORITY.indexOf(a);
       const bi = PROVIDER_PRIORITY.indexOf(b);
