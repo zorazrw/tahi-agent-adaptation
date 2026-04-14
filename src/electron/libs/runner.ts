@@ -63,6 +63,10 @@ export function buildRegenerateWorkflowPrompt(taskSummary: string): string {
   return `Re-generate the workflow plan for this task. Call workflow_plan with a new plan. Do not execute any steps.\n\nTask: ${task}`;
 }
 
+function hasExistingWorkflowPlan(session: Session): boolean {
+  return Array.isArray(session.workflowTree) && session.workflowTree.length > 0;
+}
+
 export function buildPromptForNode(
   nodeDescription: string,
   pathContext: string,
@@ -377,10 +381,12 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     }
 
     const { agentDir, authStorage, modelRegistry, settingsManager } = createPiManagers(cwd);
-    const isFirstMessage = !session.piSessionFile;
-    const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
+    // Treat "no workflow plan yet" as the authoritative signal for initial planning.
+    // This stays correct even if model/provider switches change session-file behavior.
+    const shouldForceWorkflowPlan = regenerateWorkflow || !hasExistingWorkflowPlan(session);
+    const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, shouldForceWorkflowPlan);
     const resourceLoader = await createPiResourceLoader(cwd, {
-      appendSystemPrompt: isFirstMessage || regenerateWorkflow ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : undefined,
+      appendSystemPrompt: shouldForceWorkflowPlan ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : undefined,
     });
     let planRegistered = false;
     let lastUsage: Record<string, unknown> | undefined;
