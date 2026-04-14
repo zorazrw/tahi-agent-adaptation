@@ -39,7 +39,9 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
       const msg = item.message;
       if (msg.type !== "assistant") continue;
       const assistant = msg as SDKAssistantMessage;
-      for (const block of assistant.message.content) {
+      const blocks = assistant.message?.content;
+      if (!Array.isArray(blocks)) continue;
+      for (const block of blocks) {
         if (block.type === "tool_use" && block.name === "Task") {
           const input = block.input as Record<string, any>;
           taskMetas.set(block.id, {
@@ -79,7 +81,9 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
       // Check for tool_result that matches a Task tool_use_id
       if (item.message.type === "user") {
         const userMsg = item.message as SDKUserMessage;
-        for (const block of userMsg.message.content) {
+        const blocks = userMsg.message?.content;
+        if (!Array.isArray(blocks)) continue;
+        for (const block of blocks) {
           if (
             block.type === "tool_result" &&
             typeof block.tool_use_id === "string" &&
@@ -103,10 +107,19 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
       // Check if this assistant message contains Task tool_use blocks
       if (item.message.type === "assistant") {
         const assistant = item.message as SDKAssistantMessage;
+        const blocks = assistant.message?.content;
+        if (!Array.isArray(blocks)) {
+          output.push({
+            kind: "message",
+            originalIndex: item.originalIndex,
+            message: item.message,
+          });
+          continue;
+        }
         const taskBlocks: string[] = [];
         let hasNonTaskContent = false;
 
-        for (const block of assistant.message.content) {
+        for (const block of blocks) {
           if (block.type === "tool_use" && block.name === "Task") {
             taskBlocks.push(block.id);
           } else {
@@ -134,9 +147,12 @@ export function useGroupedMessages(visibleMessages: IndexedMessage[]): TopLevelI
           let status: "running" | "completed" | "error" = "running";
           if (resultMessage) {
             const userMsg = resultMessage as SDKUserMessage;
-            const resultBlock = userMsg.message.content.find(
-              (b: any) => b.type === "tool_result" && b.tool_use_id === taskId
-            ) as any;
+            const resultBlocks = userMsg.message?.content;
+            const resultBlock = (Array.isArray(resultBlocks)
+              ? resultBlocks.find(
+                  (b: any) => b?.type === "tool_result" && b?.tool_use_id === taskId
+                )
+              : undefined) as any;
             status = resultBlock?.is_error ? "error" : "completed";
           }
 
