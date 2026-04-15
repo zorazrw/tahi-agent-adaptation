@@ -439,11 +439,12 @@ def raw_has_workflow_tool(raw: dict) -> bool:
     """Match app MCP tool ``workflow``; SDK may expose as ``mcp__workflow__WorkflowPlan`` etc."""
     if raw.get("type") != "assistant":
         return False
-    for b in (raw.get("message") or {}).get("content") or []:
+    blocks = (raw.get("message") or {}).get("content") or raw.get("blocks") or []
+    for b in blocks:
         if not isinstance(b, dict) or b.get("type") != "tool_use":
             continue
         name = str(b.get("name") or "")
-        if name == "workflow" or "WorkflowPlan" in name:
+        if name in ("workflow", "workflow_plan") or "WorkflowPlan" in name:
             return True
         nl = name.lower()
         if "workflow" in nl and "plan" in nl:
@@ -455,7 +456,13 @@ def is_tool_result_message(norm: dict) -> bool:
     if norm.get("role") != "agent":
         return False
     raw = norm.get("raw")
-    if not isinstance(raw, dict) or raw.get("type") != "user":
+    if not isinstance(raw, dict):
+        return False
+    # Pi format: standalone tool_result message
+    if raw.get("type") == "tool_result":
+        return True
+    # Legacy format: user message with tool_result blocks
+    if raw.get("type") != "user":
         return False
     for b in (raw.get("message") or {}).get("content") or []:
         if isinstance(b, dict) and b.get("type") == "tool_result":
@@ -464,6 +471,19 @@ def is_tool_result_message(norm: dict) -> bool:
 
 
 def _tool_result_blob(raw: dict) -> str:
+    # Pi format: standalone tool_result
+    if raw.get("type") == "tool_result":
+        c = raw.get("content", "")
+        if isinstance(c, str):
+            return c.strip() or "(empty)"
+        if isinstance(c, list):
+            texts = []
+            for item in c:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    texts.append(str(item.get("text", "")))
+            return "\n".join(texts).strip() or "(empty)"
+        return str(c).strip() or "(empty)"
+    # Legacy format
     parts: List[str] = []
     for b in (raw.get("message") or {}).get("content") or []:
         if not isinstance(b, dict) or b.get("type") != "tool_result":
@@ -491,8 +511,10 @@ def describe_agent_action(norm: dict) -> str:
         return "agent"
     t = raw.get("type")
     if t == "assistant":
+        # Pi format uses top-level blocks; legacy uses raw.message.content
+        blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
         parts: List[str] = []
-        for block in (raw.get("message") or {}).get("content") or []:
+        for block in blocks:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text":
@@ -501,15 +523,23 @@ def describe_agent_action(norm: dict) -> str:
                     parts.append(f"message({json.dumps(txt, ensure_ascii=False)})")
             elif block.get("type") == "tool_use":
                 name = block.get("name", "?")
-                inp = block.get("input", {})
+                inp = block.get("input") or block.get("arguments") or {}
                 try:
                     inp_s = json.dumps(inp, ensure_ascii=False)
                 except TypeError:
                     inp_s = str(inp)
                 parts.append(f"{name}({inp_s})")
         return " | ".join(parts) if parts else "assistant"
+    if t == "tool_result":
+        return f"tool_result({json.dumps(_tool_result_blob(raw), ensure_ascii=False)})"
     if t == "user":
         return f"tool_result({json.dumps(_tool_result_blob(raw), ensure_ascii=False)})"
+    if t == "run_result":
+        status = raw.get("status", "")
+        return f"run_result({status})"
+    if t == "system_init":
+        model = raw.get("model", "")
+        return f"system_init({model})"
     if t == "result":
         sub = raw.get("subtype", "")
         try:
@@ -529,7 +559,8 @@ def _assistant_message_has_tool_use(m: dict) -> bool:
     raw = m.get("raw")
     if not isinstance(raw, dict) or raw.get("type") != "assistant":
         return False
-    for block in (raw.get("message") or {}).get("content") or []:
+    blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
+    for block in blocks:
         if isinstance(block, dict) and block.get("type") == "tool_use":
             return True
     return False
@@ -541,7 +572,8 @@ def _assistant_tool_use_ids(m: dict) -> set:
     if not isinstance(raw, dict):
         return set()
     ids: set = set()
-    for block in (raw.get("message") or {}).get("content") or []:
+    blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
+    for block in blocks:
         if isinstance(block, dict) and block.get("type") == "tool_use":
             tid = block.get("id")
             if tid:
@@ -552,7 +584,14 @@ def _assistant_tool_use_ids(m: dict) -> set:
 def _tool_result_message_ids(norm: dict) -> set:
     """Return the set of tool_use_ids referenced by tool_result blocks in a user message."""
     raw = norm.get("raw")
-    if not isinstance(raw, dict) or raw.get("type") != "user":
+    if not isinstance(raw, dict):
+        return set()
+    # Pi format: standalone tool_result with toolUseId
+    if raw.get("type") == "tool_result":
+        tid = raw.get("toolUseId")
+        return {tid} if tid else set()
+    # Legacy format
+    if raw.get("type") != "user":
         return set()
     ids: set = set()
     for b in (raw.get("message") or {}).get("content") or []:
@@ -573,8 +612,9 @@ def _assistant_text_only_payload(m: dict) -> Optional[str]:
     raw = m.get("raw")
     if not isinstance(raw, dict) or raw.get("type") != "assistant":
         return None
+    blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
     texts: List[str] = []
-    for block in (raw.get("message") or {}).get("content") or []:
+    for block in blocks:
         if not isinstance(block, dict):
             continue
         if block.get("type") == "tool_use":
@@ -1274,9 +1314,9 @@ def _is_export_noise_message(msg: dict) -> bool:
     Messages to omit from exported trajectories.
 
     ``stream_event``: partial streaming chunks.
-    ``system`` (e.g. subtype init): SDK session/bootstrap; the export ``environment`` on each step is
-    always derived from the stored session snapshot (workflow + files), not from these rows, so they
-    only duplicate the same env as adjacent steps.
+    ``system`` / ``system_init``: SDK session/bootstrap metadata.
+    ``run_result``: Pi run completion metadata (status/usage only, no LLM content).
+    ``node_completed``: Pi node lifecycle event.
     """
     if msg.get("role") != "agent":
         return False
@@ -1284,7 +1324,9 @@ def _is_export_noise_message(msg: dict) -> bool:
     if not isinstance(raw, dict):
         return False
     t = raw.get("type")
-    return t == "stream_event" or t == "system"
+    if t in ("stream_event", "system", "system_init", "run_result", "node_completed"):
+        return True
+    return False
 
 
 def normalize_pi_message(msg: dict) -> dict:
@@ -1348,7 +1390,9 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
             action_trajectory.append(norm)
         except json.JSONDecodeError:
             action_trajectory.append({"role": "unknown", "raw": data_str[:200]})
-    if engine != "pi":
+    if engine == "pi":
+        action_trajectory = [m for m in action_trajectory if not _is_export_noise_message(m)]
+    else:
         action_trajectory = filter_out_stream_events(action_trajectory)
 
     initial_task_instruction = extract_initial_task_instruction(action_trajectory, last_prompt or "")
@@ -1704,7 +1748,8 @@ def _merge_partial_assistant_messages(agent_traj: List[dict]) -> List[dict]:
             continue
 
         pending.append(entry)
-        stop = raw.get("message", {}).get("stop_reason")
+        # Legacy: stop_reason nested under message; Pi: stopReason at top level
+        stop = raw.get("message", {}).get("stop_reason") or raw.get("stopReason")
         if stop is not None:
             out.append(_flush_partial_group(pending))
             pending = []
@@ -1778,11 +1823,70 @@ def _slim_content_block(block: dict) -> dict:
     return block
 
 
+# ── Pi engine constants ──────────────────────────────────────────────────────
+PI_AGENT_TYPES = {"system_init", "assistant", "tool_result", "run_result"}
+LEGACY_AGENT_TYPES = {"system", "assistant", "user", "result"}
+ALL_AGENT_MSG_TYPES = PI_AGENT_TYPES | LEGACY_AGENT_TYPES
+
+
+def _slim_pi_block(b: dict) -> dict:
+    bt = b.get("type")
+    if bt == "text":
+        return {"type": "text", "text": b.get("text", "")}
+    if bt == "thinking":
+        return {"type": "thinking", "thinking": b.get("thinking", "")}
+    if bt == "tool_use":
+        return {"type": "tool_use", "id": b.get("id", ""), "name": b.get("name", ""), "input": b.get("input", {})}
+    return b
+
+
+def _is_pi_engine(all_msgs: List[dict]) -> bool:
+    for m in all_msgs:
+        if m.get("engine") == "pi":
+            return True
+        if m.get("type") == "system_init" and m.get("engine") == "pi":
+            return True
+    return False
+
+
 def _slim_raw_message(raw: dict) -> dict:
     """Strip infrastructure metadata from a raw SDK message, keeping only
     what LLM produced (assistant) or what LLM sees (user/tool_result)."""
     t = raw.get("type")
+    engine = raw.get("engine")
 
+    # ── Pi engine format ──
+    if engine == "pi":
+        if t == "assistant":
+            blocks = [_slim_pi_block(b) for b in (raw.get("blocks") or []) if isinstance(b, dict)]
+            out: Dict[str, Any] = {"type": "assistant", "engine": "pi", "blocks": blocks}
+            sr = raw.get("stopReason")
+            if sr is not None:
+                out["stopReason"] = sr
+            return out
+        if t == "tool_result":
+            return {
+                "type": "tool_result",
+                "toolUseId": raw.get("toolUseId", ""),
+                "toolName": raw.get("toolName", ""),
+                "content": raw.get("content", ""),
+                "isError": raw.get("isError", False),
+            }
+        if t == "system_init":
+            out = {"type": "system_init", "engine": "pi"}
+            if raw.get("model"):
+                out["model"] = raw["model"]
+            if raw.get("provider"):
+                out["provider"] = raw["provider"]
+            return out
+        if t == "run_result":
+            out = {"type": "run_result", "status": raw.get("status", "")}
+            if raw.get("usage"):
+                out["usage"] = raw["usage"]
+            return out
+        # fall through for verifier_label etc.
+
+    # ── Legacy format ──
     if t == "assistant":
         msg = raw.get("message", {})
         content = [_slim_content_block(b) for b in (msg.get("content") or []) if isinstance(b, dict)]
@@ -1856,6 +1960,288 @@ def _merge_parallel_tool_results(agent_traj: List[dict]) -> List[dict]:
     return out
 
 
+# ── Pi system prompt & tool schemas (hardcoded from Pi mono source) ───────────
+# These are code constants that never appear in DB; we splice them into exports.
+
+PI_SYSTEM_PROMPT_TEMPLATE = (
+    "You are an expert coding assistant operating inside pi, a coding agent harness. "
+    "You help users by reading files, executing commands, editing code, and writing new files.\n\n"
+    "Available tools:\n"
+    "- read: Read file contents\n"
+    "- bash: Execute bash commands (ls, grep, find, etc.)\n"
+    "- edit: Edit a file using exact text replacement\n"
+    "- write: Write content to a file\n"
+    "- grep: Search file contents for patterns (respects .gitignore)\n"
+    "- find: Find files by glob pattern (respects .gitignore)\n"
+    "- ls: List directory contents\n\n"
+    "In addition to the tools above, you may have access to other custom tools depending on the project.\n\n"
+    "Guidelines:\n"
+    "- Prefer grep/find/ls tools over bash for file exploration (faster, respects .gitignore)\n"
+    "- Be concise in your responses\n"
+    "- Show file paths clearly when working with files"
+)
+
+
+def _pi_system_prompt(cwd: Optional[str] = None) -> str:
+    prompt = PI_SYSTEM_PROMPT_TEMPLATE
+    import datetime
+    date_str = datetime.date.today().isoformat()
+    prompt += f"\nCurrent date: {date_str}"
+    if cwd:
+        prompt += f"\nCurrent working directory: {cwd}"
+    return prompt
+
+
+PI_TOOL_SCHEMAS: List[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read the contents of a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
+                    "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
+                    "limit": {"type": "number", "description": "Maximum number of lines to read"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write",
+            "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
+                    "content": {"type": "string", "description": "Content to write to the file"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit",
+            "description": "Edit a single file using exact text replacement.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
+                    "edits": {
+                        "type": "array",
+                        "description": "One or more targeted replacements.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": {"type": "string", "description": "Exact text to find."},
+                                "newText": {"type": "string", "description": "Replacement text."},
+                            },
+                            "required": ["oldText", "newText"],
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Execute a bash command in the current working directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Bash command to execute"},
+                    "timeout": {"type": "number", "description": "Timeout in seconds (optional)"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Search file contents for a pattern. Respects .gitignore.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
+                    "path": {"type": "string", "description": "Directory or file to search (default: current directory)"},
+                    "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. '*.ts'"},
+                    "ignoreCase": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
+                    "literal": {"type": "boolean", "description": "Treat pattern as literal string (default: false)"},
+                    "context": {"type": "number", "description": "Lines of context before and after each match"},
+                    "limit": {"type": "number", "description": "Maximum number of matches to return"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find",
+            "description": "Search for files by glob pattern. Respects .gitignore.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern to match files"},
+                    "path": {"type": "string", "description": "Directory to search in (default: current directory)"},
+                    "limit": {"type": "number", "description": "Maximum number of results"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ls",
+            "description": "List directory contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to list (default: current directory)"},
+                    "limit": {"type": "number", "description": "Maximum number of entries to return"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workflow_plan",
+            "description": "Register a hierarchical workflow plan.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "Top-level workflow steps",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "outputFiles": {"type": "array", "items": {"type": "string"}},
+                                "verifiers": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {"criterion": {"type": "string"}},
+                                    },
+                                },
+                                "children": {"type": "array", "items": {"type": "object"}},
+                            },
+                            "required": ["description"],
+                        },
+                    },
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_question",
+            "description": "Ask the operator a structured question and wait for the answer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string"},
+                                "header": {"type": "string"},
+                                "options": {"type": "array", "items": {"type": "string"}},
+                                "multiSelect": {"type": "boolean"},
+                            },
+                            "required": ["question"],
+                        },
+                    },
+                },
+                "required": ["questions"],
+            },
+        },
+    },
+]
+
+
+def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
+    """Convert Pi DB messages to OpenAI chat format.
+
+    Follows the same field mapping as tinker-provider.ts contextToBridgeMessages():
+      - assistant.blocks[] → role:assistant content + tool_calls
+      - tool_result → role:tool with tool_call_id
+      - user_prompt → role:user
+      - system_init / run_result → skipped (metadata, not LLM turns)
+    """
+    oai: List[dict] = []
+    for m in all_msgs:
+        t = m.get("type")
+
+        if t == "user_prompt":
+            oai.append({"role": "user", "content": m.get("prompt", "")})
+            continue
+
+        if t == "assistant":
+            blocks = m.get("blocks") or []
+            text_parts: List[str] = []
+            tool_calls: List[dict] = []
+            for b in blocks:
+                bt = b.get("type")
+                if bt == "text":
+                    text_parts.append(b.get("text", ""))
+                elif bt == "tool_use":
+                    inp = b.get("input", {})
+                    tool_calls.append({
+                        "id": b.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": json.dumps(inp, ensure_ascii=False) if isinstance(inp, dict) else str(inp),
+                        },
+                    })
+            msg: Dict[str, Any] = {"role": "assistant"}
+            content_str = "\n".join(text_parts).strip()
+            if content_str:
+                msg["content"] = content_str
+            else:
+                msg["content"] = None
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            oai.append(msg)
+            continue
+
+        if t == "tool_result":
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(
+                    p.get("text", str(p)) if isinstance(p, dict) else str(p)
+                    for p in content
+                )
+            oai.append({
+                "role": "tool",
+                "tool_call_id": m.get("toolUseId", ""),
+                "name": m.get("toolName", ""),
+                "content": str(content),
+            })
+            continue
+
+    return oai
+
+
 WORKFLOW_PLAN_INSTRUCTION = "\n".join([
     "",
     "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
@@ -1877,14 +2263,23 @@ def build_weight_based_session(
     cursor: sqlite3.Cursor, session_id: str
 ) -> Optional[dict]:
     """Build the weight-based export for a single session."""
-    row = cursor.execute(
-        """SELECT id, title, workflow_tree, last_prompt, cwd
-           FROM sessions WHERE id = ?""",
-        (session_id,),
-    ).fetchone()
+    try:
+        row = cursor.execute(
+            """SELECT id, title, workflow_tree, last_prompt, cwd, engine
+               FROM sessions WHERE id = ?""",
+            (session_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = cursor.execute(
+            """SELECT id, title, workflow_tree, last_prompt, cwd
+               FROM sessions WHERE id = ?""",
+            (session_id,),
+        ).fetchone()
+        if row:
+            row = (*row, None)
     if not row:
         return None
-    sid, title, workflow_tree_raw, last_prompt, cwd = row
+    sid, title, workflow_tree_raw, last_prompt, cwd, db_engine = row
     workflow_tree = parse_json_column(workflow_tree_raw, [])
     export_cwd: Optional[str] = None
     if cwd is not None:
@@ -1924,6 +2319,8 @@ def build_weight_based_session(
             except (json.JSONDecodeError, TypeError):
                 pass
         all_msgs.append(norm)
+
+    is_pi = _is_pi_engine(all_msgs)
 
     initial_task_instruction = ""
     for m in all_msgs:
@@ -1965,7 +2362,7 @@ def build_weight_based_session(
 
     for m in planning_msgs:
         t = m.get("type")
-        if t in ("system", "assistant", "user", "result"):
+        if t in ALL_AGENT_MSG_TYPES:
             planning_agent_traj_raw.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
 
         elif t == "edit_workflow":
@@ -1997,10 +2394,16 @@ def build_weight_based_session(
         elif t == "brain_edit":
             planning_human_traj.append(_brain_edit_human_entry(m))
 
-    planning_agent_traj_merged = _merge_partial_assistant_messages(planning_agent_traj_raw)
+    if is_pi:
+        planning_agent_traj_merged = planning_agent_traj_raw
+    else:
+        planning_agent_traj_merged = _merge_partial_assistant_messages(planning_agent_traj_raw)
     workflow_tree_generated = _extract_workflow_tree_from_tool_use(planning_agent_traj_merged)
     workflow_tree_after_planning = prev_workflow_snapshot or workflow_tree
-    planning_agent_traj_final = _merge_parallel_tool_results(planning_agent_traj_merged)
+    if is_pi:
+        planning_agent_traj_final = planning_agent_traj_merged
+    else:
+        planning_agent_traj_final = _merge_parallel_tool_results(planning_agent_traj_merged)
     planning_agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in planning_agent_traj_final]
 
     # Normalize planning human_trajectory workflow snapshots to LLM native format
@@ -2069,10 +2472,12 @@ def build_weight_based_session(
                 })
                 continue
 
-            if t in ("system", "assistant", "user", "result"):
+            if t in ALL_AGENT_MSG_TYPES:
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
                 agent_traj_raw.append({"raw": raw_clean})
                 if t == "system" and m.get("subtype") == "init":
+                    round_counter += 1
+                if t == "system_init":
                     round_counter += 1
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
@@ -2139,9 +2544,12 @@ def build_weight_based_session(
                     "status": mark == "check",
                 })
 
-        agent_traj_merged = _merge_partial_assistant_messages(agent_traj_raw)
-        agent_traj_with_results = _merge_parallel_tool_results(agent_traj_merged)
-        agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in agent_traj_with_results]
+        if is_pi:
+            agent_traj_final = agent_traj_raw
+        else:
+            agent_traj_merged = _merge_partial_assistant_messages(agent_traj_raw)
+            agent_traj_final = _merge_parallel_tool_results(agent_traj_merged)
+        agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in agent_traj_final]
 
         unit: Dict[str, Any] = {
             "intent": node_desc,
@@ -2152,12 +2560,30 @@ def build_weight_based_session(
         }
         task_units.append(unit)
 
-    return {
+    # ── Extract model name from messages ──
+    model_name = ""
+    for m in all_msgs:
+        if m.get("type") == "system_init" and m.get("model"):
+            model_name = m["model"]
+            break
+        if m.get("type") == "assistant" and m.get("model"):
+            model_name = m["model"]
+            break
+        if m.get("type") == "system" and m.get("model"):
+            model_name = m["model"]
+            break
+
+    result: Dict[str, Any] = {
         "uuid": sid,
         "name": title or "",
         "initial_task_instruction": initial_task_instruction,
+        "model": model_name,
         "task_units": task_units,
     }
+    if is_pi:
+        result["system_prompt"] = _pi_system_prompt(export_cwd)
+        result["tool_schemas"] = PI_TOOL_SCHEMAS
+    return result
 
 
 def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> List[dict]:
