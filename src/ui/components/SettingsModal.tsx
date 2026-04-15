@@ -174,6 +174,7 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   const [tinkerResolving, setTinkerResolving] = useState(false);
   const [tinkerResolveError, setTinkerResolveError] = useState<string | null>(null);
   const [tinkerBaseModelResolved, setTinkerBaseModelResolved] = useState(false);
+  const [authMethod, setAuthMethod] = useState<"oauth" | "api_key">("api_key");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
@@ -198,12 +199,14 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
           ? defaults.defaultProvider
           : providers[0] || "";
     const providerModels = availableModels.filter((item) => item.provider === nextProvider);
+    const fallbackModel = providerModels.find((item) => item.id.includes("claude-sonnet-4-6"))?.id
+      ?? providerModels[0]?.id ?? "";
     const nextModel =
       preferred?.model && providerModels.some((item) => item.id === preferred.model)
         ? preferred.model
         : defaults?.defaultModel && providerModels.some((item) => item.id === defaults.defaultModel)
           ? defaults.defaultModel
-          : providerModels[0]?.id || "";
+          : fallbackModel;
     setProvider(nextProvider);
     setModel(nextModel);
     await loadStatuses(providers);
@@ -256,6 +259,20 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
         setLoading(false);
       });
   }, []);
+
+  // Sync authMethod when provider or statuses change.
+  useEffect(() => {
+    const status = providerStatuses[provider];
+    if (!status) return;
+    if (status.supportsOAuth && status.authType === "oauth") {
+      setAuthMethod("oauth");
+    } else if (status.authType === "api_key" || status.authType === "env" || !status.supportsOAuth) {
+      setAuthMethod("api_key");
+    } else {
+      // Provider supports OAuth but no auth configured yet – default to OAuth for Anthropic.
+      setAuthMethod(status.supportsOAuth ? "oauth" : "api_key");
+    }
+  }, [provider, providerStatuses]);
 
   useEffect(() => {
     if (provider !== "tinker") {
@@ -503,7 +520,7 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   const ALLOWED_PROVIDERS = new Set(["anthropic", "openai", "openai-compatible", "openrouter", "tinker"]);
   const PROVIDER_PRIORITY: string[] = ["anthropic", "openai", "tinker", "openai-compatible", "openrouter"];
   const PROVIDER_LABELS: Record<string, string> = {
-    anthropic: "Anthropic (Claude Code)",
+    anthropic: "Anthropic",
     openai: "OpenAI",
     openrouter: "OpenRouter",
     "openai-compatible": "OpenAI-Compatible Endpoint",
@@ -579,7 +596,9 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                   onChange={(e) => {
                     const nextProvider = e.target.value;
                     setProvider(nextProvider);
-                    const nextModel = models.find((item) => item.provider === nextProvider)?.id || "";
+                    const providerModels = models.filter((item) => item.provider === nextProvider);
+                    const nextModel = providerModels.find((item) => item.id.includes("claude-sonnet-4-6"))?.id
+                      ?? providerModels[0]?.id ?? "";
                     setModel(nextModel);
                   }}
                 >
@@ -834,7 +853,7 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
               </div>
             ) : (
               <>
-                <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
                   <label className="grid gap-1.5">
                     <span className="text-xs font-medium text-muted-foreground">Default Thinking Level</span>
                     <select
@@ -848,49 +867,79 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                     </select>
                   </label>
 
-                  <div className="rounded-2xl border border-ink-900/8 bg-white/80 px-4 py-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-500">Auth Status</div>
-                    <div className="mt-2 text-sm text-ink-700">
-                      {currentStatus?.hasAuth
-                        ? `Configured via ${currentStatus.authType === "env" ? "environment" : currentStatus.authType?.replace("_", " ") || "credentials"}`
-                        : "Not configured"}
-                    </div>
-                    {currentStatus?.supportsOAuth && (
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        OAuth supported: {currentStatus.oauthName || provider}
-                      </div>
-                    )}
-                  </div>
+                  {currentStatus?.supportsOAuth && (
+                    <label className="grid gap-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">Authentication Method</span>
+                      <select
+                        className={fieldClass}
+                        value={authMethod}
+                        onChange={(e) => setAuthMethod(e.target.value as "oauth" | "api_key")}
+                      >
+                        <option value="oauth">OAuth (Claude Pro / Max)</option>
+                        <option value="api_key">API Key</option>
+                      </select>
+                    </label>
+                  )}
                 </div>
 
-                <div className="mt-4 grid gap-4">
-                  <label className="grid gap-1.5">
-                    <span className="text-xs font-medium text-muted-foreground">Provider API Key</span>
-                    <input
-                      type="password"
-                      className={fieldClass}
-                      placeholder="sk-..."
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                    />
-                  </label>
-
-                  {currentStatus?.supportsOAuth && (
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <button
-                        className={secondaryButtonClass}
-                        onClick={() => handleAuthAction("login")}
-                        disabled={authBusy || !provider.trim()}
-                      >
-                        Login OAuth
-                      </button>
-                      <button
-                        className={secondaryButtonClass}
-                        onClick={() => handleAuthAction("logout")}
-                        disabled={authBusy || !provider.trim()}
-                      >
-                        Logout
-                      </button>
+                <div className="mt-4">
+                  {currentStatus?.supportsOAuth && authMethod === "oauth" ? (
+                    <div className="rounded-2xl border border-ink-900/8 bg-white/80 px-4 py-4">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-500">Login Status</div>
+                          <div className="mt-1.5 flex items-center gap-2">
+                            <span className={`inline-block h-2 w-2 rounded-full ${currentStatus.hasAuth && currentStatus.authType === "oauth" ? "bg-green-500" : "bg-ink-300"}`} />
+                            <span className="text-sm text-ink-700">
+                              {currentStatus.hasAuth && currentStatus.authType === "oauth"
+                                ? "Logged in"
+                                : "Not logged in"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          {currentStatus.hasAuth && currentStatus.authType === "oauth" ? (
+                            <button
+                              className={`${secondaryButtonClass} text-red-600 hover:text-red-700 hover:bg-red-50`}
+                              onClick={() => handleAuthAction("logout")}
+                              disabled={authBusy}
+                            >
+                              {authBusy ? <Spinner className="mx-auto w-4 h-4" /> : "Logout"}
+                            </button>
+                          ) : (
+                            <button
+                              className="rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white shadow-soft hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => handleAuthAction("login")}
+                              disabled={authBusy}
+                            >
+                              {authBusy ? <Spinner className="mx-auto w-4 h-4" /> : "Login with OAuth"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid gap-4">
+                      <label className="grid gap-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Provider API Key</span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="password"
+                            className={`${fieldClass} flex-1`}
+                            placeholder="sk-..."
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value)}
+                          />
+                          {currentStatus?.hasAuth && currentStatus.authType === "api_key" && !apiKey && (
+                            <span className="text-green-600 text-sm">✓</span>
+                          )}
+                        </div>
+                      </label>
+                      {currentStatus?.hasAuth && currentStatus.authType === "env" && (
+                        <div className="text-xs text-muted-foreground">
+                          Key detected from environment variable.
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

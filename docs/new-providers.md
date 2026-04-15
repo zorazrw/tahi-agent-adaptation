@@ -4,13 +4,13 @@ Agent Cowork supports multiple LLM providers through the Pi runtime. You can con
 
 ## Supported Providers
 
-### Anthropic (Claude Code)
+### Anthropic
 
 Uses your local Claude Code credentials.
 
 - **Authentication**: API key or OAuth. If you have Claude Code installed and authenticated, the app picks up your existing credentials automatically via environment.
-- **Models**: All Claude models registered in the Pi model registry (e.g. `claude-sonnet-4-20250514`).
-- **Setup**: Select "Anthropic (Claude Code)" in the provider dropdown. Enter an API key if one isn't detected from your environment.
+- **Models**: Claude Haiku 4.5, Claude Sonnet 4.6, and Claude Opus 4.6. Defaults to Claude Sonnet 4.6.
+- **Setup**: Select "Anthropic" in the provider dropdown. Enter an API key if one isn't detected from your environment.
 
 ![Anthropic session with workflow and run result](assets/session-pi-anthropic.png)
 

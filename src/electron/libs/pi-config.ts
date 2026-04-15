@@ -136,7 +136,7 @@ function writeModelsConfig(config: ModelsJsonConfig): void {
 }
 
 function writeAnthropicBaseUrlOverride(baseURL: string): void {
-  const normalized = baseURL.trim();
+  const normalized = baseURL.trim().replace(/\/+$/, "");
   if (!normalized || normalized === DEFAULT_ANTHROPIC_BASE_URL) {
     return;
   }
@@ -148,7 +148,6 @@ function writeAnthropicBaseUrlOverride(baseURL: string): void {
     ...providers,
     anthropic: {
       ...anthropic,
-      api: (anthropic.api as string | undefined) ?? "anthropic",
       baseUrl: normalized,
     },
   };
@@ -252,10 +251,19 @@ export async function saveAgentSettings(settings: AgentSettings): Promise<void> 
 
 const PROVIDER_PRIORITY: string[] = ["anthropic", "openai", "openai-compatible", "tinker"];
 
+// Only expose these Anthropic models (matched by substring in the model id).
+const ANTHROPIC_ALLOWED_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"];
+
 export function listAvailableModels(): AvailableModel[] {
   const { modelRegistry } = createPiManagers(process.cwd());
   return modelRegistry
     .getAll()
+    .filter((model: { provider: string; id: string }) => {
+      if (model.provider === "anthropic") {
+        return ANTHROPIC_ALLOWED_MODELS.some((allowed) => model.id.includes(allowed));
+      }
+      return true;
+    })
     .map((model: { provider: string; id: string; reasoning?: boolean }) => ({
       provider: model.provider,
       id: model.id,
@@ -274,6 +282,7 @@ export function listAvailableModels(): AvailableModel[] {
     });
 }
 
+
 export function getProviderAuthStatus(provider: string): ProviderAuthStatus {
   const { authStorage } = createPiManagers(process.cwd());
   const cred = authStorage.get(provider);
@@ -291,6 +300,12 @@ export function getProviderAuthStatus(provider: string): ProviderAuthStatus {
 export function saveProviderApiKey(provider: string, apiKey: string): void {
   const { authStorage } = createPiManagers(process.cwd());
   authStorage.set(provider, { type: "api_key", key: apiKey.trim() });
+  // Verify the key was persisted to disk.
+  const errors = authStorage.drainErrors();
+  if (errors.length > 0) {
+    console.error(`[pi-config] saveProviderApiKey: write errors for ${provider}:`, errors);
+    throw new Error(`Failed to persist API key for ${provider}: ${errors[0]?.message ?? "unknown error"}`);
+  }
 }
 
 export function getOpenAICompatibleProviderConfig(): OpenAICompatibleProviderConfig | null {
@@ -417,22 +432,18 @@ export async function loginProvider(provider: string): Promise<void> {
 
   await authStorage.login(providerId, {
     onAuth: (info) => {
-      shell.openExternal(info.url).catch(() => {
-        // Ignore browser launch failures; prompt still contains the URL.
-      });
-      const win = BrowserWindow.getAllWindows()[0];
-      if (win) {
-        dialog.showMessageBox(win, {
-          type: "info",
-          title: `Login: ${provider}`,
-          message: `Continue login for ${provider} in your browser.`,
-          detail: [info.url, info.instructions].filter(Boolean).join("\n\n"),
-        }).catch(() => {});
-      }
+      shell.openExternal(info.url).catch(() => {});
+      // The browser has been opened for OAuth – no blocking dialog needed.
+      // A blocking dialog (showMessageBox or window.prompt) would freeze the
+      // renderer and prevent the UI from updating when the callback arrives.
     },
-    onPrompt: async (prompt) => promptInRenderer(`Login: ${provider}`, prompt.message, prompt.placeholder ?? ""),
-    onManualCodeInput: async () =>
-      promptInRenderer(`Login: ${provider}`, "Paste the redirect URL or code from the browser."),
+    onPrompt: async (prompt) =>
+      promptInRenderer(`Login: ${provider}`, prompt.message, prompt.placeholder ?? ""),
+    // NOTE: We intentionally omit `onManualCodeInput`. The OAuth callback server
+    // runs on localhost and receives the redirect automatically in Electron.
+    // Providing onManualCodeInput opens a blocking window.prompt() that races
+    // with the callback server and freezes the renderer – making it look like
+    // the login didn't work even when it succeeded.
   });
 }
 
