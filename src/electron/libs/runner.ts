@@ -381,6 +381,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     }
 
     const { agentDir, authStorage, modelRegistry, settingsManager } = createPiManagers(cwd);
+    settingsManager.applyOverrides({ compaction: { enabled: false } });
     // Treat "no workflow plan yet" as the authoritative signal for initial planning.
     // This stays correct even if model/provider switches change session-file behavior.
     const shouldForceWorkflowPlan = regenerateWorkflow || !hasExistingWorkflowPlan(session);
