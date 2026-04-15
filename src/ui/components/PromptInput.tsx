@@ -112,10 +112,6 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
     selectedNode.status !== "running"
   );
 
-  const pendingStepLabel = hasPendingNode
-    ? selectedNode!.description || "Selected node"
-    : null;
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Tab to start next pending step
     if (e.key === "Tab" && hasPendingNode && selectedNodeId && !prompt.trim()) {

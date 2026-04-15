@@ -11,8 +11,6 @@ import { getPreloadPath, getUIPath, getIconPath } from "./pathResolver.js";
 import { getStaticData, pollResources, stopPolling } from "./test.js";
 import { handleClientEvent, sessions, cleanupAllSessions, recordFileEditAfterPreviewSave } from "./ipc-handlers.js";
 import { generateSessionTitle } from "./libs/util.js";
-import { saveApiConfig } from "./libs/config-store.js";
-import { getCurrentApiConfig } from "./libs/claude-settings.js";
 import type { ClientEvent } from "./types.js";
 import "./libs/claude-settings.js";
 import {
@@ -27,6 +25,24 @@ import {
     isValidFlatSkillMdFileName,
 } from "./libs/skill-store.js";
 import { ensureMemoriesDir, readAllMemorySections, writeMemorySections, getMemoriesDir } from "./libs/memory-store.js";
+import {
+    createPiManagers,
+    ensurePiBootstrap,
+    getAgentSettings,
+    getOpenAICompatibleProviderConfig,
+    getProviderAuthStatus,
+    getTinkerProviderConfig,
+    listAvailableModels,
+    loginProvider,
+    logoutProvider,
+    removeOpenAICompatibleProviderConfig,
+    removeTinkerProviderConfig,
+    saveAgentSettings,
+    saveOpenAICompatibleProviderConfig,
+    saveProviderApiKey,
+    saveTinkerProviderConfig,
+} from "./libs/pi-config.js";
+import { resolveTinkerCheckpoint } from "./libs/tinker-provider.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -181,6 +197,7 @@ app.on("ready", () => {
     Menu.setApplicationMenu(null);
     ensureAppSkillsDir();
     ensureMemoriesDir();
+    ensurePiBootstrap();
     // Setup event handlers
     app.on("before-quit", cleanup);
     app.on("will-quit", cleanup);
@@ -284,24 +301,137 @@ app.on("ready", () => {
         return result.filePaths;
     });
 
-    // Handle API config
-    ipcMainHandle("get-api-config", () => {
-        return getCurrentApiConfig();
+    ipcMainHandle("get-agent-settings", () => {
+        return getAgentSettings();
     });
 
-    ipcMainHandle("check-api-config", () => {
-        const config = getCurrentApiConfig();
-        return { hasConfig: config !== null, config };
-    });
-
-    ipcMainHandle("save-api-config", (_: any, config: any) => {
+    ipcMainHandle("save-agent-settings", async (_: any, settings: any) => {
         try {
-            saveApiConfig(config);
+            await saveAgentSettings(settings);
             return { success: true };
         } catch (error) {
-            return { 
-                success: false, 
-                error: error instanceof Error ? error.message : String(error) 
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("list-available-models", () => {
+        return listAvailableModels();
+    });
+
+    ipcMainHandle("get-openai-compatible-provider", () => {
+        return getOpenAICompatibleProviderConfig();
+    });
+
+    ipcMainHandle("get-tinker-provider", () => {
+        return getTinkerProviderConfig();
+    });
+
+    ipcMainHandle("save-openai-compatible-provider", (_: any, config: any) => {
+        try {
+            saveOpenAICompatibleProviderConfig(config);
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("remove-openai-compatible-provider", () => {
+        try {
+            removeOpenAICompatibleProviderConfig();
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("save-tinker-provider", (_: any, config: any) => {
+        try {
+            saveTinkerProviderConfig(config);
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("remove-tinker-provider", () => {
+        try {
+            removeTinkerProviderConfig();
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("resolve-tinker-checkpoint", async (_: any, tinkerPath: string, apiKey?: string, baseUrl?: string) => {
+        try {
+            const { authStorage } = createPiManagers(process.cwd());
+            const savedCredential = authStorage.get("tinker");
+            const effectiveApiKey =
+                typeof apiKey === "string" && apiKey.trim()
+                    ? apiKey.trim()
+                    : savedCredential?.type === "api_key"
+                        ? savedCredential.key
+                        : undefined;
+            return await resolveTinkerCheckpoint(tinkerPath, effectiveApiKey, baseUrl);
+        } catch (error) {
+            return {
+                ok: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("get-provider-auth-status", (_: any, provider: string) => {
+        return getProviderAuthStatus(provider);
+    });
+
+    ipcMainHandle("save-provider-api-key", (_: any, provider: string, apiKey: string) => {
+        try {
+            saveProviderApiKey(provider, apiKey);
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("login-provider", async (_: any, provider: string) => {
+        try {
+            await loginProvider(provider);
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("logout-provider", (_: any, provider: string) => {
+        try {
+            logoutProvider(provider);
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
             };
         }
     });

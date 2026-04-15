@@ -28,6 +28,7 @@ cd agent-cowork
 
 #### Install dependencies
 bun install (bun run rebuild)
+uv sync --project tinker-bridge
 
 #### Run in development mode
 bun run dev

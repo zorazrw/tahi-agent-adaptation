@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import type { AppPermissionResult } from "../types";
 import type { PermissionRequest } from "../store/useAppStore";
 
 type AskUserQuestionInput = {
@@ -17,7 +17,7 @@ export function DecisionPanel({
   onSubmit
 }: {
   request: PermissionRequest;
-  onSubmit: (result: PermissionResult) => void;
+  onSubmit: (result: AppPermissionResult) => void;
 }) {
   const input = request.input as AskUserQuestionInput | null;
   const questions = input?.questions ?? [];
@@ -66,7 +66,7 @@ export function DecisionPanel({
     return selected.length > 0 || otherText.length > 0;
   });
 
-  if (request.toolName === "AskUserQuestion" && questions.length > 0) {
+  if ((request.toolName === "AskUserQuestion" || request.toolName === "ask_user_question") && questions.length > 0) {
     return (
       <div className="rounded-2xl border border-primary/20 bg-primary-subtle p-5">
         <div className="text-xs font-semibold text-primary">Question from Claude</div>

@@ -48,15 +48,97 @@ type MemorySavePayload = {
     deletedFileNames?: string[];
 }
 
+type AgentSettings = {
+    defaultProvider?: string;
+    defaultModel?: string;
+    defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+}
+
+type OpenAICompatibleApiFormat = "openai-completions" | "openai-responses";
+
+type OpenAICompatibleProviderConfig = {
+    provider: "openai-compatible";
+    baseUrl: string;
+    model: string;
+    apiFormat: OpenAICompatibleApiFormat;
+    hasApiKey: boolean;
+}
+
+type OpenAICompatibleProviderInput = {
+    baseUrl: string;
+    model: string;
+    apiFormat: OpenAICompatibleApiFormat;
+    apiKey?: string;
+}
+
+type TinkerModelConfig = {
+    id: string;
+    baseModel: string;
+    modelPath?: string;
+    rendererName?: string;
+    reasoning: boolean;
+    contextWindow: number;
+    maxTokens: number;
+}
+
+type TinkerProviderConfig = {
+    provider: "tinker";
+    baseUrl?: string;
+    hasApiKey: boolean;
+    model: TinkerModelConfig;
+}
+
+type TinkerProviderInput = {
+    baseUrl?: string;
+    apiKey?: string;
+    model: string;
+    baseModel: string;
+    modelPath?: string;
+    rendererName?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+    maxTokens?: number;
+}
+
+type AvailableModel = {
+    provider: string;
+    id: string;
+    label: string;
+    reasoning: boolean;
+}
+
+type ProviderAuthStatus = {
+    provider: string;
+    hasAuth: boolean;
+    authType?: "api_key" | "oauth" | "env";
+    supportsOAuth: boolean;
+    oauthName?: string;
+}
+
+type ResolveTinkerCheckpointResult =
+    | { ok: true; base_model: string }
+    | { ok: false; error: string };
+
 type EventPayloadMapping = {
     statistics: Statistics;
     getStaticData: StaticData;
     "generate-session-title": string;
     "get-recent-cwds": string[];
     "select-directory": string | null;
-    "get-api-config": { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null;
-    "save-api-config": { success: boolean; error?: string };
-    "check-api-config": { hasConfig: boolean; config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null };
+    "get-agent-settings": AgentSettings;
+    "save-agent-settings": { success: boolean; error?: string };
+    "list-available-models": AvailableModel[];
+    "get-openai-compatible-provider": OpenAICompatibleProviderConfig | null;
+    "get-tinker-provider": TinkerProviderConfig | null;
+    "save-openai-compatible-provider": { success: boolean; error?: string };
+    "save-tinker-provider": { success: boolean; error?: string };
+    "remove-openai-compatible-provider": { success: boolean; error?: string };
+    "remove-tinker-provider": { success: boolean; error?: string };
+    "resolve-tinker-checkpoint": ResolveTinkerCheckpointResult;
+    "get-provider-auth-status": ProviderAuthStatus;
+    "save-provider-api-key": { success: boolean; error?: string };
+    "login-provider": { success: boolean; error?: string };
+    "logout-provider": { success: boolean; error?: string };
     "preview-file": PreviewFileResult;
     "write-file": { success: boolean; error?: string };
     "list-skills": SkillInfo[];
@@ -82,9 +164,20 @@ interface Window {
         generateSessionTitle: (userInput: string | null) => Promise<string>;
         getRecentCwds: (limit?: number) => Promise<string[]>;
         selectDirectory: () => Promise<string | null>;
-        getApiConfig: () => Promise<{ apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null>;
-        saveApiConfig: (config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" }) => Promise<{ success: boolean; error?: string }>;
-        checkApiConfig: () => Promise<{ hasConfig: boolean; config: { apiKey: string; baseURL: string; model: string; apiType?: "anthropic" } | null }>;
+        getAgentSettings: () => Promise<AgentSettings>;
+        saveAgentSettings: (settings: AgentSettings) => Promise<{ success: boolean; error?: string }>;
+        listAvailableModels: () => Promise<AvailableModel[]>;
+        getOpenAICompatibleProvider: () => Promise<OpenAICompatibleProviderConfig | null>;
+        getTinkerProvider: () => Promise<TinkerProviderConfig | null>;
+        saveOpenAICompatibleProvider: (config: OpenAICompatibleProviderInput) => Promise<{ success: boolean; error?: string }>;
+        saveTinkerProvider: (config: TinkerProviderInput) => Promise<{ success: boolean; error?: string }>;
+        removeOpenAICompatibleProvider: () => Promise<{ success: boolean; error?: string }>;
+        removeTinkerProvider: () => Promise<{ success: boolean; error?: string }>;
+        resolveTinkerCheckpoint: (tinkerPath: string, apiKey?: string, baseUrl?: string) => Promise<ResolveTinkerCheckpointResult>;
+        getProviderAuthStatus: (provider: string) => Promise<ProviderAuthStatus>;
+        saveProviderApiKey: (provider: string, apiKey: string) => Promise<{ success: boolean; error?: string }>;
+        loginProvider: (provider: string) => Promise<{ success: boolean; error?: string }>;
+        logoutProvider: (provider: string) => Promise<{ success: boolean; error?: string }>;
         previewFile: (filePath: string, cwd?: string | null) => Promise<PreviewFileResult>;
         writeFile: (
             filePath: string,

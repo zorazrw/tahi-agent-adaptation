@@ -13,9 +13,6 @@
             "filter": ["**/*"]
         }
     ],
-    "asarUnpack": [
-        "node_modules/@anthropic-ai/claude-agent-sdk/**/*"
-    ],
     "icon": "./claude-color.png",
     "mac": {
         "target": "dmg"
