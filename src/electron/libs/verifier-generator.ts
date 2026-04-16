@@ -1,6 +1,6 @@
 import type { Session } from "./session-store.js";
-import type { WorkflowNode } from "./workflow-tree-utils.js";
-import { getCurrentApiConfig } from "./claude-settings.js";
+import type { WorkflowNode } from "../types.js";
+import { loadApiConfig, type ApiConfig } from "./config-store.js";
 import { getNodePath } from "./workflow-tree-utils.js";
 
 function messagesApiUrl(baseURL: string): string {
@@ -39,7 +39,7 @@ export async function generateUpdatedVerifiersForNode(
   userRemovedExamples: string[] = [],
   userAddedExamples: string[] = []
 ): Promise<string[] | null> {
-  const config = getCurrentApiConfig();
+  const config = loadApiConfig();
   if (!config) return null;
 
   const messageList = userMessages
@@ -57,6 +57,7 @@ export async function generateUpdatedVerifiersForNode(
     "Use the simplest, most concise language possible for normal users.",
     "Avoid jargon and unnecessary detail; prefer plain words and short sentences.",
     "Prefer explicit required elements, constraints, and forbidden claims.",
+    "For visual tasks, always include at least one criterion that checks items are clearly separated and not messily overlapping.",
     "Avoid vague wording (e.g., good, complete, quality, reasonable, appropriate).",
     "No duplicates. Keep useful existing verifiers unless they conflict with newer requirements.",
     "Use user-removed examples as negative guidance; avoid similar criteria.",
@@ -70,13 +71,13 @@ export async function generateUpdatedVerifiersForNode(
     messageList || "(none)",
     "",
     "Existing verifiers:",
-    ...existing.map((v, i) => `${i + 1}. ${v}`),
+    ...existing.map((v: string, i: number) => `${i + 1}. ${v}`),
     "",
     "User-removed verifier examples (negative; avoid similar criteria):",
-    ...(userRemovedExamples.length > 0 ? userRemovedExamples.map((v, i) => `${i + 1}. ${v}`) : ["(none)"]),
+    ...(userRemovedExamples.length > 0 ? userRemovedExamples.map((v: string, i: number) => `${i + 1}. ${v}`) : ["(none)"]),
     "",
     "User-added verifier examples (positive; prefer similar/preserved criteria when relevant):",
-    ...(userAddedExamples.length > 0 ? userAddedExamples.map((v, i) => `${i + 1}. ${v}`) : ["(none)"]),
+    ...(userAddedExamples.length > 0 ? userAddedExamples.map((v: string, i: number) => `${i + 1}. ${v}`) : ["(none)"]),
   ].join("\n");
 
   const res = await fetch(messagesApiUrl(config.baseURL), {

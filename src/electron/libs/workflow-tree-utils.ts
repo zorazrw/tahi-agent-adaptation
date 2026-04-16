@@ -1,20 +1,5 @@
 import { basename } from "path";
-import type { VerifierMark } from "../types.js";
-
-export type NodeStatus = "pending" | "running" | "completed" | "error";
-
-export type WorkflowNode = {
-  id: string;
-  description: string;
-  outputFiles: string[];
-  verifiers: string[];
-  verifierMarks: VerifierMark[];
-  children: WorkflowNode[];
-  status: NodeStatus;
-  depth: number;
-  resumePoint?: { uuid: string; claudeSessionId: string };
-  originalOutputs?: { path: string; content: string }[];
-};
+import type { NodeStatus, VerifierMark, WorkflowNode } from "../types.js";
 
 /** Find a node by id in the tree. */
 export function findNodeById(tree: WorkflowNode[], id: string): WorkflowNode | undefined {

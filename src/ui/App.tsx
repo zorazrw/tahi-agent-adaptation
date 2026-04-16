@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
-import type { ServerEvent } from "./types";
+import type { AppPermissionResult, ServerEvent } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
@@ -167,15 +166,21 @@ function App() {
   // Check API configuration on startup
   useEffect(() => {
     if (!apiConfigChecked) {
-      window.electron.checkApiConfig().then((result) => {
-        setApiConfigChecked(true);
-        if (!result.hasConfig) {
-          setShowSettingsModal(true);
-        }
-      }).catch((err) => {
-        console.error("Failed to check API config:", err);
-        setApiConfigChecked(true);
-      });
+      window.electron.listAvailableModels()
+        .then(async (models) => {
+          const providers = [...new Set(models.map((model) => model.provider))];
+          const statuses = await Promise.all(
+            providers.map((provider) => window.electron.getProviderAuthStatus(provider))
+          );
+          setApiConfigChecked(true);
+          if (!statuses.some((status) => status.hasAuth)) {
+            setShowSettingsModal(true);
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to load agent auth state:", err);
+          setApiConfigChecked(true);
+        });
     }
   }, [apiConfigChecked, setApiConfigChecked, setShowSettingsModal]);
 
@@ -297,7 +302,7 @@ function App() {
     sendEvent({ type: "session.delete", payload: { sessionId } });
   }, [sendEvent]);
 
-  const handlePermissionResult = useCallback((toolUseId: string, result: PermissionResult) => {
+  const handlePermissionResult = useCallback((toolUseId: string, result: AppPermissionResult) => {
     if (!activeSessionId) return;
     sendEvent({ type: "permission.response", payload: { sessionId: activeSessionId, toolUseId, result } });
     resolvePermissionRequest(activeSessionId, toolUseId);

@@ -94,15 +94,21 @@ def _resolved_from_env() -> ResolvedAnthropicConfig | None:
     return ResolvedAnthropicConfig(key.strip(), base, model)
 
 
-def resolve_anthropic_config() -> ResolvedAnthropicConfig:
+def resolve_anthropic_config(
+    *,
+    skip_api_config: bool = False,
+    skip_claude_settings: bool = False,
+) -> ResolvedAnthropicConfig:
     """Same order as the app: userData ``api-config.json``, ``~/.claude/settings.json``, then env."""
-    for path in _api_config_paths():
-        r = _resolved_from_api_config(path)
+    if not skip_api_config:
+        for path in _api_config_paths():
+            r = _resolved_from_api_config(path)
+            if r:
+                return r
+    if not skip_claude_settings:
+        r = _resolved_from_claude_settings()
         if r:
             return r
-    r = _resolved_from_claude_settings()
-    if r:
-        return r
     r = _resolved_from_env()
     if r:
         return r
@@ -121,6 +127,31 @@ def make_anthropic_client(cfg: ResolvedAnthropicConfig):
     if cfg.base_url:
         kw["base_url"] = cfg.base_url
     return anthropic.Anthropic(**kw)
+
+
+def anthropic_user_text(
+    client: Any,
+    model: str,
+    user: str,
+    *,
+    system: str | None = None,
+    max_tokens: int = 1024,
+    temperature: float = 0.0,
+) -> str:
+    """
+    One Messages API call; concatenate text blocks. Same pattern as memory/skill extraction.
+    Omit ``system`` when the full instruction lives in ``user`` (e.g. verifier-labeler-style prompts).
+    """
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": [{"role": "user", "content": user}],
+    }
+    if system:
+        kwargs["system"] = system
+    msg = client.messages.create(**kwargs)
+    return "".join(b.text for b in msg.content if b.type == "text")
 
 
 def _session_blobs(data: Any) -> list[dict[str, Any]]:
@@ -171,14 +202,7 @@ If nothing fits: NONE"""
 
 
 def _llm_text(client, model: str, system: str, user: str, max_tokens: int = 1024) -> str:
-    msg = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=0.0,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return "".join(b.text for b in msg.content if b.type == "text")
+    return anthropic_user_text(client, model, user, system=system, max_tokens=max_tokens, temperature=0.0)
 
 
 def extract_memories(client, model: str, task: str, log: str) -> list[str]:

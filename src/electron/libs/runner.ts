@@ -1,39 +1,28 @@
-import { query, type SDKMessage, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import type { ServerEvent } from "../types.js";
+import { Type } from "@sinclair/typebox";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import {
+  createAgentSession,
+  createBashTool,
+  createEditTool,
+  createFindTool,
+  createGrepTool,
+  createLsTool,
+  createReadTool,
+  createWriteTool,
+  type AgentSessionEvent,
+  type ToolDefinition,
+} from "@mariozechner/pi-coding-agent";
+import type { AppPermissionResult, PiAssistantBlock, PiLlmDebugMessage, ServerEvent, StreamMessage } from "../types.js";
+import { runWithLlmDebugContext } from "./llm-debug.js";
+import { createPiManagers, createPiResourceLoader, createPiSessionManager } from "./pi-config.js";
 import type { Session } from "./session-store.js";
-
-import { getCurrentApiConfig, buildEnvForConfig, getClaudeCodePath} from "./claude-settings.js";
-import { getEnhancedEnv } from "./util.js";
-import { syncAppSkills } from "./skill-store.js";
-import { createWorkflowMcpServer } from "./workflow-mcp-server.js";
-import type { WorkflowNode } from "./workflow-tree-utils.js";
-import { appendFileSync } from "fs";
-import { join } from "path";
-import { app } from "electron";
-import { readMemoryForPrompt } from "./memory-store.js";
-
-const LOG_PATH = join(app.getPath("userData"), "runner.log");
-
-function log(msg: string) {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
-  try { appendFileSync(LOG_PATH, line); } catch { /* ignore */ }
-  console.error(line.trimEnd());
-}
-
+import { hydrateWorkflowTree, type RawWorkflowNode } from "./workflow-tree-utils.js";
 
 export type RunnerOptions = {
   prompt: string;
   session: Session;
-  /** When true, run only to get a new workflow plan; do not update session.claudeSessionId. */
   regenerateWorkflow?: boolean;
-  resumeSessionId?: string;
-  /** When rerunning a node, resume the SDK conversation up to this message UUID. */
-  resumeSessionAt?: string;
-  /**
-   * When true, do not emit session.status "completed" on a successful result message.
-   * Used for node solves so ipc-handlers can run verifier labeling first, then emit completed.
-   */
-  suppressSessionStatusOnSuccess?: boolean;
+  branchEntryId?: string;
   onEvent: (event: ServerEvent) => void;
   onSessionUpdate?: (updates: Partial<Session>) => void;
 };
@@ -42,43 +31,42 @@ export type RunnerHandle = {
   abort: () => void;
 };
 
-const DEFAULT_CWD = process.cwd();
-
-/** Appended to the user's first message so the model calls the WorkflowPlan MCP tool. */
-const WORKFLOW_PLAN_INSTRUCTION = [
-  "",
-  "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
+const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
+  "IMPORTANT: You MUST call the workflow_plan tool as your very first action to register a structured plan.",
   "Do NOT write out steps as text. Use the tool with structured JSON input.",
   "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
-  "Each main step (automation / level 0) must have a visually verifiable output: set outputFiles to file **names only** (e.g. position_slide.html, report.md, summary.txt)—no folders, no absolute paths, no ../ segments—or use verifiers to describe what the operator can check.",
-  "For control mode (detailed view): add optional children to any main step to break it into detailed sub-steps; the number of sub-steps can depend on that step's complexity.",
-  "Do NOT add separate validation/verification/testing steps — our system handles verification via verifier criteria on each node.",
-  "Keep descriptions short but complete (under 10 words). Each node needs: description, outputFiles, verifiers, and optionally children.",
-  "For outputFiles: use a single basename per entry (e.g. deliverable.md). Prefer .md for document-style output; use .txt when markdown does not apply.",
-  "After calling the tool, STOP. Do NOT execute any steps yourself.",
+  "Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
+  "You may add children to break a main step into detailed sub-steps when useful.",
+  "Do NOT add separate validation/testing steps. Express checks inside each step's verifiers.",
+  "Keep descriptions short but complete. Each node needs description, outputFiles, verifiers, and optional children.",
+  "Prefer .md for document-style outputs when markdown preview is useful.",
+  "After calling workflow_plan, STOP. Do not execute any steps yourself.",
   "The human operator will trigger each step individually.",
-  "",
-  "Task instruction:"
 ].join("\n");
 
-/** Builds the prompt used when re-generating the workflow plan (regenerateWorkflow run). */
-export function buildRegenerateWorkflowPrompt(taskSummary: string): string {
-  const task = (taskSummary || "Current task").trim();
-  return (
-    WORKFLOW_PLAN_INSTRUCTION +
-    "\nRe-generate the workflow plan for this task. Call the WorkflowPlan tool with a new plan. Do not execute any steps.\n\nTask: " +
-    task
-  );
+function normalizeRoots(tasks: RawWorkflowNode[]): RawWorkflowNode[] {
+  let roots = tasks;
+  while (roots.length === 1 && roots[0].children && roots[0].children.length > 0) {
+    roots = roots[0].children;
+  }
+  return roots;
 }
 
 function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): string {
   const trimmed = userPrompt.trim();
   if (!trimmed) return trimmed;
-  if (!isFirstMessage) return trimmed;
-  return WORKFLOW_PLAN_INSTRUCTION + trimmed;
+  return trimmed;
 }
 
-/** Builds the resume prompt for executing a single workflow node. */
+export function buildRegenerateWorkflowPrompt(taskSummary: string): string {
+  const task = (taskSummary || "Current task").trim();
+  return `Re-generate the workflow plan for this task. Call workflow_plan with a new plan. Do not execute any steps.\n\nTask: ${task}`;
+}
+
+function hasExistingWorkflowPlan(session: Session): boolean {
+  return Array.isArray(session.workflowTree) && session.workflowTree.length > 0;
+}
+
 export function buildPromptForNode(
   nodeDescription: string,
   pathContext: string,
@@ -94,231 +82,639 @@ export function buildPromptForNode(
     : "\n\nUse paths relative to the session working directory for all Read, Write, and Edit calls.";
   const hasMd = outputFiles.some((f) => f.toLowerCase().endsWith(".md"));
   const formatNote = hasMd
-    ? "\n\nWhen writing output to .md files, use markdown format (headers, lists, code blocks, etc.) so the file preview shows formatted content."
+    ? "\n\nWhen writing output to .md files, use markdown format so the file preview renders properly."
     : "";
   const filesNote =
     outputFiles.length > 0
-      ? "\n\nRelevant output files for this step (basenames only; resolve under the working directory above when reading or writing):\n" +
-        outputFiles.map((f) => `- ${f}`).join("\n")
+      ? "\n\nRelevant output files for this step:\n" + outputFiles.map((f) => `- ${f}`).join("\n")
       : "";
   const refinementNote =
-    "\n\nWhen refining or updating existing outputs, you MUST first call the Read tool to load the latest on-disk contents of any relevant output files (using the path relative to the working directory), " +
-    "then apply edits on top of that version using Edit or Write. Do NOT recreate files from memory or discard existing content, and do NOT revert to older model-only drafts.";
+    "\n\nWhen refining existing outputs, first read the current on-disk contents, then edit on top of that version. Do not recreate files from memory.";
   const editsNote = humanEdits
-    ? "\n\nThe human has manually edited your previous outputs. For each file below you will see:\n" +
-      "(1) the original model-written output, and\n" +
-      "(2) the current version after human edits.\n\n" +
-      "You MUST treat version (2) as the authoritative base text and ONLY apply further changes on top of it. " +
-      "Never discard or overwrite the human-edited version, and never recreate content purely from memory of earlier drafts.\n\n" +
-      "Human-edited files (showing original vs current):\n" +
+    ? "\n\nThe human has manually edited previous outputs. Treat the current version as the authoritative base.\n\nHuman-edited files:\n" +
       humanEdits
     : "";
   return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${cwdNote}${filesNote}${formatNote}${refinementNote}${editsNote}`;
 }
 
-export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
-  const {
-    prompt,
-    session,
-    regenerateWorkflow,
-    resumeSessionId,
-    resumeSessionAt,
-    suppressSessionStatusOnSuccess,
-    onEvent,
-    onSessionUpdate,
-  } = options;
-  const abortController = new AbortController();
-  const isFirstMessage = resumeSessionId == null;
-  const basePrompt = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, isFirstMessage);
-  const memoryPrefix = readMemoryForPrompt();
-  const promptToSend = memoryPrefix ? memoryPrefix + basePrompt : basePrompt;
+function stringifyToolContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item) {
+          return String(item.text ?? "");
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
 
-  // Emit the fully constructed prompt being sent to the LM for debugging/inspection in the UI.
-  onEvent({
-    type: "session.effectivePrompt",
-    payload: { sessionId: session.id, prompt: promptToSend }
+function extractUserPrompt(message: Record<string, unknown>): string {
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        if ("type" in item && item.type === "text" && "text" in item) {
+          return String(item.text ?? "");
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function normalizeAssistantBlocks(message: Record<string, unknown>, includeToolUses: boolean): PiAssistantBlock[] {
+  const content = Array.isArray(message.content) ? message.content : [];
+  const blocks: PiAssistantBlock[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object" || !("type" in block)) continue;
+    if (block.type === "text" && "text" in block) {
+      blocks.push({ type: "text", text: String(block.text ?? "") });
+    } else if (block.type === "thinking" && "thinking" in block) {
+      blocks.push({ type: "thinking", thinking: String(block.thinking ?? "") });
+    } else if (includeToolUses && block.type === "toolCall") {
+      blocks.push({
+        type: "tool_use",
+        id: String((block as { id?: unknown }).id ?? crypto.randomUUID()),
+        name: String((block as { name?: unknown }).name ?? "tool"),
+        input: ((block as { arguments?: Record<string, unknown> }).arguments ?? {}) as Record<string, unknown>,
+      });
+    }
+  }
+  return blocks;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function buildCanonicalHistory(
+  sessionFile: string | undefined,
+  provider: string | undefined,
+  model: string | undefined,
+  cwd: string | undefined,
+  thinkingLevel: string | undefined,
+  messages: AgentMessage[],
+  runResult?: {
+    status: "success" | "error" | "aborted";
+    error?: string;
+    usage?: {
+      input?: number;
+      output?: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+      totalTokens?: number;
+      cost?: {
+        input?: number;
+        output?: number;
+        cacheRead?: number;
+        cacheWrite?: number;
+        total?: number;
+      };
+    };
+  }
+): StreamMessage[] {
+  const history: StreamMessage[] = [
+    {
+      type: "system_init",
+      engine: "pi",
+      sessionFile,
+      provider,
+      model,
+      cwd,
+      thinkingLevel,
+    },
+  ];
+
+  for (const rawMessage of messages) {
+    const message = asRecord(rawMessage);
+    if (!message) continue;
+    if (message.role === "user") {
+      history.push({
+        type: "user_prompt",
+        prompt: extractUserPrompt(message),
+      });
+      continue;
+    }
+
+    if (message.role === "assistant") {
+      const blocks = normalizeAssistantBlocks(message, true);
+      if (blocks.length > 0) {
+        history.push({
+          type: "assistant",
+          engine: "pi",
+          id: crypto.randomUUID(),
+          blocks,
+          provider: typeof message.provider === "string" ? message.provider : provider,
+          model: typeof message.model === "string" ? message.model : model,
+          stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+          timestamp: typeof message.timestamp === "number" ? message.timestamp : undefined,
+        });
+      }
+      continue;
+    }
+
+    if (message.role === "toolResult") {
+      history.push({
+        type: "tool_result",
+        engine: "pi",
+        toolUseId: String(message.toolCallId ?? ""),
+        toolName: String(message.toolName ?? "tool"),
+        content: stringifyToolContent(message.content),
+        isError: Boolean(message.isError),
+        details: message.details,
+        timestamp: typeof message.timestamp === "number" ? message.timestamp : undefined,
+      });
+    }
+  }
+
+  if (runResult) {
+    history.push({
+      type: "run_result",
+      engine: "pi",
+      status: runResult.status,
+      error: runResult.error,
+      usage: runResult.usage,
+      timestamp: Date.now(),
+    });
+  }
+
+  return history;
+}
+
+function resolveRunStatus(planRegistered: boolean, regenerateWorkflow: boolean | undefined): "idle" | "completed" {
+  if (planRegistered || regenerateWorkflow) return "idle";
+  return "completed";
+}
+
+function createWorkflowPlanTool(session: Session, onEvent: (event: ServerEvent) => void): ToolDefinition {
+  const workflowNodeSchema = Type.Recursive((Self) =>
+    Type.Object({
+      description: Type.String(),
+      outputFiles: Type.Array(Type.String()),
+      verifiers: Type.Array(Type.String()),
+      children: Type.Optional(Type.Array(Self)),
+    })
+  );
+
+  return {
+    name: "workflow_plan",
+    label: "Workflow Plan",
+    description:
+      "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level with description, outputFiles, verifiers, and optional children.",
+    promptSnippet: "workflow_plan: register a hierarchical task plan before doing any work",
+    parameters: Type.Object({
+      tasks: Type.Array(workflowNodeSchema),
+    }),
+    execute: async (_toolCallId, params) => {
+      const roots = normalizeRoots((params as { tasks: RawWorkflowNode[] }).tasks);
+      const tree = hydrateWorkflowTree(roots);
+      onEvent({
+        type: "workflow.plan",
+        payload: { sessionId: session.id, workflowTree: tree },
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Workflow plan registered. Stop now. Do not execute any steps.",
+          },
+        ],
+        details: { workflowTree: tree },
+      };
+    },
+  };
+}
+
+function createAskUserQuestionTool(session: Session, onEvent: (event: ServerEvent) => void): ToolDefinition {
+  const questionOption = Type.Object({
+    label: Type.String(),
+    description: Type.Optional(Type.String()),
+  });
+  const question = Type.Object({
+    question: Type.String(),
+    header: Type.Optional(Type.String()),
+    options: Type.Optional(Type.Array(questionOption)),
+    multiSelect: Type.Optional(Type.Boolean()),
   });
 
-  const sendMessage = (message: SDKMessage) => {
+  return {
+    name: "ask_user_question",
+    label: "Ask User Question",
+    description: "Ask the operator a structured question and wait for the answer.",
+    parameters: Type.Object({
+      questions: Type.Array(question),
+      answers: Type.Optional(Type.Record(Type.String(), Type.String())),
+    }),
+    execute: async (_toolCallId, params, signal) => {
+      const toolUseId = crypto.randomUUID();
+      onEvent({
+        type: "permission.request",
+        payload: {
+          sessionId: session.id,
+          toolUseId,
+          toolName: "ask_user_question",
+          input: params,
+        },
+      });
+
+      const result = await new Promise<AppPermissionResult>((resolve) => {
+        session.pendingPermissions.set(toolUseId, {
+          toolUseId,
+          toolName: "ask_user_question",
+          input: params,
+          resolve: (permissionResult) => {
+            session.pendingPermissions.delete(toolUseId);
+            resolve(permissionResult);
+          },
+        });
+
+        signal?.addEventListener("abort", () => {
+          session.pendingPermissions.delete(toolUseId);
+          resolve({ behavior: "deny", message: "Session aborted" });
+        });
+      });
+
+      if (result.behavior === "deny") {
+        return {
+          content: [{ type: "text", text: result.message ?? "User declined to answer." }],
+          details: { denied: true },
+        };
+      }
+
+      const updatedInput = (result.updatedInput ?? params) as Record<string, unknown>;
+      const answers = (updatedInput.answers ?? {}) as Record<string, string>;
+      const summary =
+        Object.keys(answers).length > 0
+          ? Object.entries(answers)
+              .map(([key, value]) => `${key}: ${value}`)
+              .join("\n")
+          : "User answered the questions.";
+
+      return {
+        content: [{ type: "text", text: summary }],
+        details: { answers },
+      };
+    },
+  };
+}
+
+export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
+  const { prompt, session, regenerateWorkflow, branchEntryId, onEvent, onSessionUpdate } = options;
+  let disposed = false;
+  let piSessionAbort: (() => Promise<void>) | undefined;
+
+  (async () => {
+    const cwd = session.cwd ?? process.cwd();
+    const sessionManager = createPiSessionManager(session.id, cwd, session.piSessionFile);
+    if (branchEntryId) {
+      sessionManager.branch(branchEntryId);
+    }
+
+    const { agentDir, authStorage, modelRegistry, settingsManager } = createPiManagers(cwd);
+    // Treat "no workflow plan yet" as the authoritative signal for initial planning.
+    // This stays correct even if model/provider switches change session-file behavior.
+    const shouldForceWorkflowPlan = regenerateWorkflow || !hasExistingWorkflowPlan(session);
+    const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, shouldForceWorkflowPlan);
+    const resourceLoader = await createPiResourceLoader(cwd, {
+      appendSystemPrompt: shouldForceWorkflowPlan ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : undefined,
+    });
+    let planRegistered = false;
+    let lastUsage: Record<string, unknown> | undefined;
+
+    onEvent({
+      type: "session.effectivePrompt",
+      payload: { sessionId: session.id, prompt: promptToSend },
+    });
+
+    const { session: piSession, modelFallbackMessage } = await createAgentSession({
+      cwd,
+      agentDir,
+      authStorage,
+      modelRegistry,
+      settingsManager,
+      resourceLoader,
+      sessionManager,
+      tools: [
+        createReadTool(cwd),
+        createBashTool(cwd),
+        createEditTool(cwd),
+        createWriteTool(cwd),
+        createGrepTool(cwd),
+        createFindTool(cwd),
+        createLsTool(cwd),
+      ],
+      customTools: [createWorkflowPlanTool(session, onEvent), createAskUserQuestionTool(session, onEvent)],
+    });
+
+    piSessionAbort = () => piSession.abort();
+
+    if (modelFallbackMessage && !piSession.model) {
+      onEvent({
+        type: "session.status",
+        payload: {
+          sessionId: session.id,
+          status: "error",
+          title: session.title,
+          cwd: session.cwd,
+          error: modelFallbackMessage,
+        },
+      });
+      return;
+    }
+
+    const persistSessionFile = () => {
+      const nextSessionFile = piSession.sessionFile ?? sessionManager.getSessionFile();
+      if (nextSessionFile && nextSessionFile !== session.piSessionFile) {
+        session.piSessionFile = nextSessionFile;
+        onSessionUpdate?.({ engine: "pi", piSessionFile: nextSessionFile });
+      }
+    };
+
+    persistSessionFile();
     onEvent({
       type: "stream.message",
-      payload: { sessionId: session.id, message }
+      payload: {
+        sessionId: session.id,
+        message: {
+          type: "system_init",
+          engine: "pi",
+          sessionFile: piSession.sessionFile ?? sessionManager.getSessionFile(),
+          provider: piSession.model?.provider,
+          model: piSession.model?.id,
+          cwd,
+          thinkingLevel: piSession.thinkingLevel,
+        },
+      },
     });
-  };
 
-  const sendPermissionRequest = (toolUseId: string, toolName: string, input: unknown) => {
-    onEvent({
-      type: "permission.request",
-      payload: { sessionId: session.id, toolUseId, toolName, input }
-    });
-  };
+    let thinkingMessageId: string | undefined;
 
-  // Start the query in the background
-  (async () => {
-    const savedClaudeSessionId = session.claudeSessionId;
+    const unsubscribe = piSession.subscribe((event: AgentSessionEvent) => {
+      if (disposed) return;
 
-    try {
-      const config = getCurrentApiConfig();
+      if (event.type === "message_start") {
+        const message = asRecord(event.message);
+        if (message?.role === "assistant") {
+          thinkingMessageId = crypto.randomUUID();
+          onEvent({
+            type: "stream.message",
+            payload: {
+              sessionId: session.id,
+              message: {
+                type: "assistant",
+                engine: "pi",
+                id: thinkingMessageId,
+                blocks: [{ type: "thinking", thinking: "" }],
+                provider: piSession.model?.provider,
+                model: piSession.model?.id,
+              },
+            },
+          });
+        }
+        return;
+      }
 
-      if (!config) {
+      if (event.type === "tool_execution_start") {
         onEvent({
-          type: "session.status",
-          payload: { sessionId: session.id, status: "error", title: session.title, cwd: session.cwd, error: "API configuration not found. Please configure API settings." }
+          type: "stream.message",
+          payload: {
+            sessionId: session.id,
+            message: {
+              type: "assistant",
+              engine: "pi",
+              id: crypto.randomUUID(),
+              blocks: [
+                {
+                  type: "tool_use",
+                  id: event.toolCallId,
+                  name: event.toolName,
+                  input: (event.args ?? {}) as Record<string, unknown>,
+                },
+              ],
+              provider: piSession.model?.provider,
+              model: piSession.model?.id,
+            },
+          },
+        });
+        if (event.toolName === "workflow_plan") {
+          planRegistered = true;
+        }
+        return;
+      }
+
+      if (event.type === "tool_execution_end") {
+        onEvent({
+          type: "stream.message",
+          payload: {
+            sessionId: session.id,
+            message: {
+              type: "tool_result",
+              engine: "pi",
+              toolUseId: event.toolCallId,
+              toolName: event.toolName,
+              content: stringifyToolContent((event.result as { content?: unknown }).content),
+              isError: Boolean(event.isError),
+              details: (event.result as { details?: unknown }).details,
+              timestamp: Date.now(),
+            },
+          },
         });
         return;
       }
 
-      syncAppSkills();
+      if (event.type === "message_end") {
+        const message = asRecord(event.message);
+        if (!message) return;
+        if (message.role === "assistant") {
+          const blocks = normalizeAssistantBlocks(message, false);
+          const messageId = thinkingMessageId ?? crypto.randomUUID();
+          thinkingMessageId = undefined;
 
-      const env = buildEnvForConfig(config);
-      const mergedEnv = {
-        ...getEnhancedEnv(),
-        ...env
+          if (blocks.length > 0) {
+            onEvent({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message: {
+                  type: "assistant",
+                  engine: "pi",
+                  id: messageId,
+                  blocks,
+                  provider: typeof message.provider === "string" ? message.provider : piSession.model?.provider,
+                  model: typeof message.model === "string" ? message.model : piSession.model?.id,
+                  stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+                  timestamp: typeof message.timestamp === "number" ? message.timestamp : undefined,
+                },
+              },
+            });
+          }
+          lastUsage = (message.usage ?? undefined) as Record<string, unknown> | undefined;
+        }
+      }
+
+      if (event.type === "agent_end") {
+        const lastAssistant = [...event.messages]
+          .reverse()
+          .find((message) => typeof message === "object" && message !== null && "role" in message && message.role === "assistant") as
+          | Record<string, unknown>
+          | undefined;
+        lastUsage = (lastAssistant?.usage ?? lastUsage) as Record<string, unknown> | undefined;
+      }
+    });
+
+    try {
+      const llmDebugMessages: PiLlmDebugMessage[] = [];
+      await runWithLlmDebugContext(
+        {
+          provider: piSession.model?.provider,
+          model: piSession.model?.id,
+          emit: (message) => {
+            llmDebugMessages.push(message);
+            onEvent({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message,
+              },
+            });
+          },
+        },
+        async () => {
+          await piSession.prompt(promptToSend);
+        },
+      );
+      persistSessionFile();
+
+      const runResult = {
+        status: "success" as const,
+        usage: lastUsage as
+          | {
+              input?: number;
+              output?: number;
+              cacheRead?: number;
+              cacheWrite?: number;
+              totalTokens?: number;
+              cost?: {
+                input?: number;
+                output?: number;
+                cacheRead?: number;
+                cacheWrite?: number;
+                total?: number;
+              };
+            }
+          | undefined,
       };
 
-      const defaultTools = [
-        "Task", "TaskOutput", "Bash", "Glob", "Grep", "ExitPlanMode", "Read", "Edit", "Write",
-        "NotebookEdit", "WebFetch", "WebSearch", "KillShell", "AskUserQuestion",
-        "Skill", "EnterPlanMode"
-      ];
-      const codeExecutionTool = "CodeExecution";
-      const toolsList = defaultTools.includes(codeExecutionTool)
-        ? defaultTools
-        : [...defaultTools, codeExecutionTool];
-
-      let planRegistered = false;
-      let mcpServers: Record<string, ReturnType<typeof createWorkflowMcpServer>> | undefined;
-      if (isFirstMessage) {
-        mcpServers = {
-          workflow: createWorkflowMcpServer((workflowTree: WorkflowNode[]) => {
-            onEvent({
-              type: "workflow.plan",
-              payload: { sessionId: session.id, workflowTree }
-            });
-            planRegistered = true;
-          })
-        };
-      }
-
-      log(`[runner] Starting query: resume=${resumeSessionId ?? "none"}, resumeAt=${resumeSessionAt ?? "none"}, prompt="${promptToSend.slice(0, 80)}..."`);
-
-      const q = query({
-        prompt: promptToSend,
-        options: {
-          cwd: session.cwd ?? DEFAULT_CWD,
-          settingSources: ["user", "project"],
-          maxThinkingTokens: 0,
-          resume: resumeSessionId,
-          resumeSessionAt,
-          abortController,
-          env: mergedEnv,
-          pathToClaudeCodeExecutable: getClaudeCodePath(),
-          permissionMode: "bypassPermissions",
-          includePartialMessages: true,
-          allowDangerouslySkipPermissions: true,
-          tools: toolsList,
-          mcpServers,
-          stderr: (data: string) => {
-            log(`[runner:stderr] ${data.trimEnd()}`);
+      onEvent({
+        type: "stream.message",
+        payload: {
+          sessionId: session.id,
+          message: {
+            type: "run_result",
+            engine: "pi",
+            status: runResult.status,
+            usage: runResult.usage,
+            timestamp: Date.now(),
           },
-          canUseTool: async (toolName, input, { signal }) => {
-            if (toolName === "AskUserQuestion") {
-              const toolUseId = crypto.randomUUID();
-
-              sendPermissionRequest(toolUseId, toolName, input);
-
-              return new Promise<PermissionResult>((resolve) => {
-                session.pendingPermissions.set(toolUseId, {
-                  toolUseId,
-                  toolName,
-                  input,
-                  resolve: (result) => {
-                    session.pendingPermissions.delete(toolUseId);
-                    resolve(result as PermissionResult);
-                  }
-                });
-
-                signal.addEventListener("abort", () => {
-                  session.pendingPermissions.delete(toolUseId);
-                  resolve({ behavior: "deny", message: "Session aborted" });
-                });
-              });
-            }
-
-            return { behavior: "allow", updatedInput: input };
-          }
-        }
+        },
       });
 
-      let messageCount = 0;
-      let gotSuccessResult = false;
-      for await (const message of q) {
-        messageCount++;
-        log(`[runner] msg #${messageCount}: type=${message.type}${
-          "subtype" in message ? ` subtype=${(message as any).subtype}` : ""
-        }${message.type === "result" ? ` cost=$${(message as any).total_cost_usd?.toFixed(4)}` : ""}`);
+      const canonicalHistory = buildCanonicalHistory(
+        piSession.sessionFile ?? sessionManager.getSessionFile(),
+        piSession.model?.provider,
+        piSession.model?.id,
+        cwd,
+        piSession.thinkingLevel,
+        sessionManager.buildSessionContext().messages,
+        runResult
+      );
+      const historyWithDebug =
+        llmDebugMessages.length > 0
+          ? [...canonicalHistory.slice(0, -1), ...llmDebugMessages, canonicalHistory[canonicalHistory.length - 1]!]
+          : canonicalHistory;
 
-        if (message.type === "system" && "subtype" in message && message.subtype === "init") {
-          if (!regenerateWorkflow) {
-            const sdkSessionId = message.session_id;
-            if (sdkSessionId) session.claudeSessionId = sdkSessionId;
-          }
-        }
+      onEvent({
+        type: "session.messagesReset",
+        payload: {
+          sessionId: session.id,
+          messages: historyWithDebug,
+        },
+      });
 
-        sendMessage(message);
+      onSessionUpdate?.({
+        engine: "pi",
+        piSessionFile: piSession.sessionFile ?? sessionManager.getSessionFile(),
+      });
 
-        if (message.type === "result") {
-          if (message.subtype === "success") gotSuccessResult = true;
-          if (!planRegistered) {
-            const status = message.subtype === "success" ? "completed" : "error";
-            const skipOkStatus = suppressSessionStatusOnSuccess && message.subtype === "success";
-            if (!skipOkStatus) {
-              onEvent({
-                type: "session.status",
-                payload: { sessionId: session.id, status, title: session.title }
-              });
-            }
-          }
-        }
-      }
-
-      if (regenerateWorkflow) {
-        session.claudeSessionId = savedClaudeSessionId;
-        if (!planRegistered) {
-          onEvent({
-            type: "session.status",
-            payload: { sessionId: session.id, status: "idle", title: session.title, cwd: session.cwd }
-          });
-        }
-      } else {
-        if (gotSuccessResult || planRegistered) {
-          onSessionUpdate?.({ claudeSessionId: session.claudeSessionId });
-        } else {
-          log(`[runner] Run did not succeed; restoring claudeSessionId to ${savedClaudeSessionId}`);
-          session.claudeSessionId = savedClaudeSessionId;
-        }
-      }
-
-      log(`[runner] Query finished. Total messages: ${messageCount}`);
-    } catch (error) {
-      log(`[runner] Query error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-
-      if (savedClaudeSessionId) {
-        session.claudeSessionId = savedClaudeSessionId;
-        onSessionUpdate?.({ claudeSessionId: savedClaudeSessionId });
-      }
-
-      if ((error as Error).name === "AbortError") {
-        return;
-      }
       onEvent({
         type: "session.status",
-        payload: { sessionId: session.id, status: "error", title: session.title, error: String(error) }
+        payload: {
+          sessionId: session.id,
+          status: resolveRunStatus(planRegistered, regenerateWorkflow),
+          title: session.title,
+          cwd: session.cwd,
+        },
       });
+    } catch (error) {
+      if ((error as Error).name === "AbortError") {
+        onEvent({
+          type: "stream.message",
+          payload: {
+            sessionId: session.id,
+            message: {
+              type: "run_result",
+              engine: "pi",
+              status: "aborted",
+              timestamp: Date.now(),
+            },
+          },
+        });
+        return;
+      }
+
+      onEvent({
+        type: "stream.message",
+        payload: {
+          sessionId: session.id,
+          message: {
+            type: "run_result",
+            engine: "pi",
+            status: "error",
+            error: String(error),
+            timestamp: Date.now(),
+          },
+        },
+      });
+      onEvent({
+        type: "session.status",
+        payload: {
+          sessionId: session.id,
+          status: "error",
+          title: session.title,
+          cwd: session.cwd,
+          error: String(error),
+        },
+      });
+    } finally {
+      disposed = true;
+      unsubscribe();
+      piSession.dispose();
     }
   })();
 
   return {
-    abort: () => abortController.abort()
+    abort: () => {
+      piSessionAbort?.().catch(() => {});
+    },
   };
 }
