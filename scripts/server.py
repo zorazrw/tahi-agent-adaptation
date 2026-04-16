@@ -34,6 +34,7 @@ from tinker_opd import Config as OPDConfig, main as _opd_train
 from tinker_dpo import Config as DPOConfig, main as _dpo_train
 from tinker_reinforce import Config as ReinforceConfig, main as _reinforce_train
 from tinker_formatter import DPODataBuilder, OPDSDFTDataset, ReinforceDataBuilder
+from toolcall_parser import *
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -173,12 +174,18 @@ class Server:
             body = await request.json()
             
             messages = body.pop("messages", [])
-            stream = body.pop("stream", False)
+            stream = body.pop("stream", True)
+            _ = body.pop("model", None)
             log.info("Chat completion request: model=%s stream=%s messages=%d",
                      self.model_path, stream, len(messages))
             
             if stream:
+                rewrite = func_mapping.get(config.renderer_name)
+                
                 async def generate():
+                    chunks = []
+                    state = {}
+                    
                     response = await self.client.chat.completions.create(
                         model=self.model_path,
                         messages=messages,
@@ -186,8 +193,16 @@ class Server:
                         **body,
                     )
                     async for chunk in response:
-                        yield f"data: {chunk.model_dump_json()}\n\n"
+                        chunk_dict = chunk.model_dump()
+                        if rewrite:
+                            rewritten = rewrite(chunk_dict, state)
+                        else:
+                            rewritten = chunk_dict
+                        chunks.append(chunk_dict)
+                        if rewritten is not None:
+                            yield f"data: {json.dumps(rewritten)}\n\n"
                     yield "data: [DONE]\n\n"
+                    log.info("Streamed chat completion chunks: %s", json.dumps(chunks, indent=4))
                 return StreamingResponse(generate(), media_type="text/event-stream")
 
             response = await self.client.chat.completions.create(
@@ -195,6 +210,7 @@ class Server:
                 messages=messages,
                 **body,
             )
+            log.info("Chat completion response: %s", response.model_dump_json(indent=4))
             return JSONResponse(response.model_dump())
         
         return app
@@ -278,7 +294,8 @@ class Server:
                     # update the model path to the new checkpoint
                     self.model_ready.clear()
                     try:
-                        await asyncio.wait_for(self.update_model_path(checkpoint))
+                        log.info("Updating model path to %s", checkpoint)
+                        await asyncio.wait_for(self.update_model_path(checkpoint, timeout=600.0), timeout=600.0)
                     except TimeoutError:
                         log.error("Checkpoint %s never became ready, keeping previous model %s",
                                 checkpoint, prev_model)
@@ -323,9 +340,9 @@ class Server:
 
     def _get_checkpoint_path(self, log_path: str) -> str:
         last = checkpoint_utils.get_last_checkpoint(log_path)
-        if last is None or last.state_path is None:
-            raise RuntimeError(f"No checkpoint found in {log_path} after training")
-        return last.state_path
+        if last is None or last.sampler_path is None:
+            raise RuntimeError(f"No sampling checkpoint found in {log_path} after training")
+        return last.sampler_path
     
     def _check_if_use_checkpoint(self) -> bool:
         # helper function to decide whether to start training from scratch or from the current model checkpoint

@@ -1,5 +1,5 @@
 # -- Mode --
-mode: reinforce  # "dpo", "opd", or "reinforce"
+mode: dpo  # "dpo", "opd", or "reinforce"
 
 # -- Model --
 model_name: Qwen/Qwen3-4B-Instruct-2507
