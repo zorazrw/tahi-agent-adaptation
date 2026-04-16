@@ -12,7 +12,6 @@ import { getStaticData, pollResources, stopPolling } from "./test.js";
 import { handleClientEvent, sessions, cleanupAllSessions, recordFileEditAfterPreviewSave } from "./ipc-handlers.js";
 import { generateSessionTitle } from "./libs/util.js";
 import type { ClientEvent } from "./types.js";
-import "./libs/claude-settings.js";
 import {
     ensureAppSkillsDir,
     listSkills,
