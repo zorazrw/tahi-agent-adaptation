@@ -1317,6 +1317,7 @@ def _is_export_noise_message(msg: dict) -> bool:
     ``system`` / ``system_init``: SDK session/bootstrap metadata.
     ``run_result``: Pi run completion metadata (status/usage only, no LLM content).
     ``node_completed``: Pi node lifecycle event.
+    ``assistant`` with ``stopReason: "error"``: truncated/failed Pi retry attempts.
     """
     if msg.get("role") != "agent":
         return False
@@ -1325,6 +1326,8 @@ def _is_export_noise_message(msg: dict) -> bool:
         return False
     t = raw.get("type")
     if t in ("stream_event", "system", "system_init", "run_result", "node_completed"):
+        return True
+    if t == "assistant" and raw.get("stopReason") == "error":
         return True
     return False
 
@@ -2198,6 +2201,8 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
             continue
 
         if t == "assistant":
+            if m.get("stopReason") == "error":
+                continue
             blocks = m.get("blocks") or []
             text_parts: List[str] = []
             tool_calls: List[dict] = []
