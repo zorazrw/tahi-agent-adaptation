@@ -59,7 +59,7 @@ Formats
     prompt_first_turn   : full prompt sent to the LM for the first turn (memoryPrefix included
                           when effective_prompt is persisted; otherwise reconstructed)
     agent_trajectory    : slimmed raw SDK messages (assistant/user/result/system/verifier_label)
-    human_trajectory    : follow_up, file_edit, brain_edit, edit_workflow, edit_verifier actions
+    human_trajectories  : follow_up, file_edit, brain_edit, edit_workflow, edit_verifier actions
     verifiers           : final verifier criteria + pass/fail status
   Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
 
@@ -1438,7 +1438,9 @@ def _extract_workflow_tree_from_tool_use(agent_traj: List[dict]) -> List[dict]:
         raw = entry.get("raw", {})
         if raw.get("type") != "assistant":
             continue
-        for block in (raw.get("message") or {}).get("content") or []:
+        # Legacy: raw.message.content[];  Pi: raw.blocks[]
+        blocks = (raw.get("message") or {}).get("content") or raw.get("blocks") or []
+        for block in blocks:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             name = block.get("name", "")
@@ -2182,7 +2184,7 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
     """Convert Pi DB messages to OpenAI chat format.
 
     Follows the same field mapping as tinker-provider.ts contextToBridgeMessages():
-      - assistant.blocks[] → role:assistant content + tool_calls
+      - assistant.blocks[] → role:assistant content + tool_calls (+ thinking if present)
       - tool_result → role:tool with tool_call_id
       - user_prompt → role:user
       - system_init / run_result → skipped (metadata, not LLM turns)
@@ -2199,10 +2201,13 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
             blocks = m.get("blocks") or []
             text_parts: List[str] = []
             tool_calls: List[dict] = []
+            thinking_parts: List[str] = []
             for b in blocks:
                 bt = b.get("type")
                 if bt == "text":
                     text_parts.append(b.get("text", ""))
+                elif bt == "thinking":
+                    thinking_parts.append(b.get("thinking", ""))
                 elif bt == "tool_use":
                     inp = b.get("input", {})
                     tool_calls.append({
@@ -2221,6 +2226,8 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
                 msg["content"] = None
             if tool_calls:
                 msg["tool_calls"] = tool_calls
+            if thinking_parts:
+                msg["thinking"] = "\n".join(thinking_parts)
             oai.append(msg)
             continue
 
@@ -2406,7 +2413,7 @@ def build_weight_based_session(
         planning_agent_traj_final = _merge_parallel_tool_results(planning_agent_traj_merged)
     planning_agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in planning_agent_traj_final]
 
-    # Normalize planning human_trajectory workflow snapshots to LLM native format
+    # Normalize planning human_trajectories workflow snapshots to LLM native format
     for h in planning_human_traj:
         if h.get("type") == "edit_workflow":
             if "workflow_tree_before" in h:
@@ -2420,11 +2427,21 @@ def build_weight_based_session(
     # effective_prompt is persisted (TODO: modify src/electron).
     planning_prompt = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
 
+    # Build planning trajectories (planning is always a single trajectory)
+    if is_pi:
+        pi_raw_msgs = [e["raw"] for e in planning_agent_traj if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
+        planning_messages = [{"role": "user", "content": planning_prompt}] + pi_messages_to_openai(pi_raw_msgs)
+    else:
+        planning_messages = [{"role": "user", "content": planning_prompt}]
+    planning_traj_entry: Dict[str, Any] = {
+        "prompt": planning_prompt,
+        "messages": planning_messages,
+    }
+
     planning_unit: Dict[str, Any] = {
         "intent": "planning",
-        "prompt_first_turn": planning_prompt,
-        "agent_trajectory": planning_agent_traj,
-        "human_trajectory": planning_human_traj,
+        "agent_trajectories": [planning_traj_entry],
+        "human_trajectories": planning_human_traj,
         "verifiers": [],
         "workflow_tree_generated": workflow_tree_generated,
         "workflow_tree_final": _to_llm_native_tree(workflow_tree_after_planning),
@@ -2446,6 +2463,9 @@ def build_weight_based_session(
         node_prompt_consumed = False
         node_first_turn_prompt: Optional[str] = None
         last_snapshot_msg: Optional[dict] = None
+        # Track where follow_up prompts split the trajectory.
+        # Each entry: (index into agent_traj_raw at time of split, prompt text)
+        follow_up_splits: List[Tuple[int, str]] = []
 
         for m in node_msgs:
             t = m.get("type")
@@ -2455,19 +2475,20 @@ def build_weight_based_session(
                 if isinstance(p, str) and is_backend_node_user_prompt(p):
                     if not node_prompt_consumed:
                         node_prompt_consumed = True
-                        # Capture buildPromptForNode prompt as first-turn prompt.
-                        # NOTE: memoryPrefix not included (TODO: persist effective_prompt).
                         node_first_turn_prompt = p
                         continue
+                    follow_up_splits.append((len(agent_traj_raw), p))
                     human_traj.append({
                         "type": "follow_up",
-                        "round_index": max(round_counter - 1, 0),
+                        # 0-based index of this follow-up (aligns with trajectories[1], [2], …)
+                        "round_index": len(follow_up_splits) - 1,
                         "prompt": p,
                     })
                     continue
+                follow_up_splits.append((len(agent_traj_raw), p if isinstance(p, str) else ""))
                 human_traj.append({
                     "type": "follow_up",
-                    "round_index": max(round_counter - 1, 0),
+                    "round_index": len(follow_up_splits) - 1,
                     "prompt": p if isinstance(p, str) else "",
                 })
                 continue
@@ -2551,11 +2572,35 @@ def build_weight_based_session(
             agent_traj_final = _merge_parallel_tool_results(agent_traj_merged)
         agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in agent_traj_final]
 
+        # ── Split agent_trajectory into per-trajectory segments ──
+        # ``follow_up_splits`` was populated during the message loop:
+        # each entry is (index_in_agent_traj_raw, prompt_text).
+        # Since merging / slimming preserves ordering and count for Pi
+        # (no merging) and approximately for Legacy, the indices still
+        # align with agent_traj.
+        def _build_traj_entry(prompt: str, seg: List[dict]) -> Dict[str, Any]:
+            if is_pi:
+                pi_raw = [e["raw"] for e in seg
+                          if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
+                messages = [{"role": "user", "content": prompt}] + pi_messages_to_openai(pi_raw)
+            else:
+                messages = [{"role": "user", "content": prompt}]
+            return {"prompt": prompt, "messages": messages}
+
+        agent_trajectories: List[dict] = []
+        if not follow_up_splits:
+            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj))
+        else:
+            first_end = follow_up_splits[0][0]
+            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj[:first_end]))
+            for si, (split_idx, follow_prompt) in enumerate(follow_up_splits):
+                next_end = follow_up_splits[si + 1][0] if si + 1 < len(follow_up_splits) else len(agent_traj)
+                agent_trajectories.append(_build_traj_entry(follow_prompt, agent_traj[split_idx:next_end]))
+
         unit: Dict[str, Any] = {
             "intent": node_desc,
-            "prompt_first_turn": node_first_turn_prompt or "",
-            "agent_trajectory": agent_traj,
-            "human_trajectory": human_traj,
+            "agent_trajectories": agent_trajectories,
+            "human_trajectories": human_traj,
             "verifiers": verifiers,
         }
         task_units.append(unit)
@@ -2616,7 +2661,7 @@ def main() -> int:
         type=str,
         choices=["default", "weight"],
         default="default",
-        help='Export format: "default" (human-readable trajectory) or "weight" (raw SDK messages + human_trajectory for training).',
+        help='Export format: "default" (human-readable trajectory) or "weight" (OAI messages + human_trajectories for training).',
     )
     args = parser.parse_args()
 
