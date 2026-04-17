@@ -100,3 +100,36 @@ bash tinker_opd.sh
 python export_reinforce_data.py out.json -o out_reinforce.json
 bash tinker_reinforce.sh
 ```
+
+## Online RL Server
+
+`server.py` runs a small **FastAPI** proxy in front of the Tinker OpenAI-compatible API. It accepts chat completions (streaming or not), enqueues exported **sessions** for training, and periodically runs **DPO**, **OPD**, or **REINFORCE** updates depending on `mode` in the YAML.
+
+**Prerequisites**
+
+- Set `TINKER_API_KEY` in the environment (or `.env` under the root directory).
+- Install the dependencies: `pip install -r scripts/requirements.txt`
+
+**Configuration**
+
+Edit `config.yaml` (or any YAML with the same keys). Important fields:
+
+- `mode`: `dpo` | `opd` | `reinforce` — which trainer runs when enough sessions are queued.
+- `update_every_n_sessions`: enqueue this many sessions before triggering a training job.
+- `proxy_host` / `proxy_port`: where the HTTP server listens (default `localhost:8000`).
+
+**Run**
+
+From the root directory:
+
+```bash
+python3 scripts/server.py --config scripts/config.yaml
+```
+
+`GET /healthz` returns `{"ok": true}` when the process is up.
+
+**Frontend**
+
+Point your provider at this proxy (base URL and port from `proxy_host` / `proxy_port`). Example layout:
+
+![](assets/serverconfig.png)
