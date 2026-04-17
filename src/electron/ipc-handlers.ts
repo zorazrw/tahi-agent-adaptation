@@ -263,7 +263,11 @@ async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Pr
         } catch (e) {
           console.error("[ipc] verifier labeling failed:", e);
         }
-        const verifyPayload = { type: "verifier_label" as const, nodeId };
+        const verifyPayload = {
+          type: "verifier_label" as const,
+          nodeId,
+          runEndTimestamp: Date.now(),
+        };
         const verifyRowId = store.recordMessage(sessionId, verifyPayload);
         const sessAfter = store.getSession(sessionId);
         if (sessAfter) {

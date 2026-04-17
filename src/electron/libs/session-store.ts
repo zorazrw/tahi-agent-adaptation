@@ -325,14 +325,17 @@ export class SessionStore {
   }
 
   replaceMessages(sessionId: string, messages: StreamMessage[]): void {
+    /** Rows with these `data.type` values are written after each agent run (verifier / human) and must not be wiped. */
+    const notPreserved = `coalesce(json_extract(data, '$.type'), '') not in ('verifier_label', 'edit_verifier')`;
+
     const tx = this.db.transaction((items: StreamMessage[]) => {
-      const oldRows = this.db.prepare(
-        `SELECT data, state_snapshot FROM messages WHERE session_id = ? ORDER BY rowid`
+      const canonicalRows = this.db.prepare(
+        `SELECT data, state_snapshot FROM messages WHERE session_id = ? AND ${notPreserved} ORDER BY rowid`
       ).all(sessionId) as { data: string; state_snapshot: string | null }[];
 
-      // Collect snapshots per type in chronological order
+      // Collect snapshots per type in chronological order (canonical rows only)
       const snapshotsByType = new Map<string, string[]>();
-      for (const row of oldRows) {
+      for (const row of canonicalRows) {
         if (!row.state_snapshot) continue;
         try {
           const parsed = JSON.parse(row.data) as { type?: string };
@@ -362,7 +365,7 @@ export class SessionStore {
         }
       }
 
-      this.db.prepare(`delete from messages where session_id = ?`).run(sessionId);
+      this.db.prepare(`delete from messages where session_id = ? AND ${notPreserved}`).run(sessionId);
 
       const insert = this.db.prepare(
         `insert into messages (id, session_id, data, created_at, state_snapshot) values (?, ?, ?, ?, ?)`
