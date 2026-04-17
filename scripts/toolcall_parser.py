@@ -18,6 +18,11 @@ def parse_qwen3_instruct(chunk_dict: dict, state: dict) -> dict | None:
     pending = state.setdefault("pending_tool_calls", {})
     suppress = False
 
+    is_final = any(
+        c.get("finish_reason") is not None
+        for c in chunk_dict.get("choices") or []
+    )
+
     for choice in chunk_dict.get("choices") or []:
         delta = choice.get("delta") or {}
         tool_calls = delta.get("tool_calls")
@@ -31,8 +36,11 @@ def parse_qwen3_instruct(chunk_dict: dict, state: dict) -> dict | None:
             name = fn.get("name")
 
             if name and tc_id and tc_id.startswith("functions."):
-                pending[idx] = (tc_id, name)
-                suppress = True
+                if is_final:
+                    pass
+                else:
+                    pending[idx] = (tc_id, name)
+                    suppress = True
             elif idx in pending:
                 real_id, real_name = pending[idx]
                 tc["id"] = real_id

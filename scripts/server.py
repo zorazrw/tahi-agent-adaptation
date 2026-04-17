@@ -50,6 +50,10 @@ class Config:
     renderer_name: str = "qwen3_instruct"
     lora_rank: int = 32
     
+    # -- Inference --
+    temperature: float = 0.0
+    logprobs: bool = False
+    
     # -- Update --
     update_every_n_sessions: int = 1 # update the model after n new sessions are processed
     
@@ -179,6 +183,10 @@ class Server:
             log.info("Chat completion request: model=%s stream=%s messages=%d",
                      self.model_path, stream, len(messages))
             
+            # Override inference parameters
+            body["temperature"] = self.config.temperature
+            body["logprobs"] = self.config.logprobs
+            
             if stream:
                 rewrite = func_mapping.get(config.renderer_name)
                 
@@ -193,6 +201,7 @@ class Server:
                         **body,
                     )
                     async for chunk in response:
+                        log.info("Received chat completion chunk: %s", json.dumps(chunk.model_dump(), indent=4))
                         chunk_dict = chunk.model_dump()
                         if rewrite:
                             rewritten = rewrite(chunk_dict, state)

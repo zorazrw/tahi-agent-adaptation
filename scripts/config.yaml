@@ -1,20 +1,24 @@
 # -- Mode --
-mode: dpo  # "dpo", "opd", or "reinforce"
+mode: opd  # "dpo", "opd", or "reinforce"
 
 # -- Model --
 model_name: Qwen/Qwen3-4B-Instruct-2507
 renderer_name: qwen3_instruct
 lora_rank: 32
 
+# -- Inference --
+temperature: 0.0
+logprobs: true
+
 # -- Update --
 update_every_n_sessions: 1
 
 # -- Training (shared) --
 dry_run: false
-learning_rate: 1.0e-5
+learning_rate: 5.0e-5
 num_epochs: 1
-batch_size: 1
-lr_schedule: linear
+batch_size: 2
+lr_schedule: constant
 max_steps: null
 
 # -- DPO-specific --

@@ -44,6 +44,7 @@ loss functions used, see the `Tinker loss docs <https://tinker-docs.thinkingmach
 
 import asyncio
 import logging
+import datetime
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
@@ -772,7 +773,7 @@ async def main(
     if start_batch < num_batches:
         await checkpoint_utils.save_checkpoint_async(
             training_client=training_client,
-            name="final",
+            name=f"final_OPD_{cfg.model_name.split('/')[-1]}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
             log_path=cfg.log_path,
             kind="both",
             loop_state={"batch": num_batches},

@@ -15,7 +15,7 @@ import json
 import logging
 from pathlib import Path
 from typing import cast
-
+import datetime
 import chz
 import tinker
 import torch
@@ -410,7 +410,7 @@ def main(config: Config):
     if did_train:
         checkpoint_utils.save_checkpoint(
             training_client=training_client,
-            name="final",
+            name=f"final_REINFORCE_{config.model_name.split('/')[-1]}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
             log_path=config.log_path,
             kind="both",
             loop_state={"epoch": config.num_epochs, "batch": 0},

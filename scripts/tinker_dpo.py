@@ -6,6 +6,7 @@ https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbo
 
 import asyncio
 import logging
+import datetime
 from pathlib import Path
 from typing import cast
 
@@ -559,7 +560,7 @@ def main(config: Config):
     if did_train:
         checkpoint_utils.save_checkpoint(
             training_client=training_client,
-            name="final",
+            name=f"final_DPO_{config.model_name.split('/')[-1]}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
             log_path=config.log_path,
             kind="both",
             loop_state={"epoch": config.num_epochs, "batch": 0},
