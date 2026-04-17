@@ -262,5 +262,6 @@ export function shouldWriteSnapshotForSdkMessage(message: { type?: string }): bo
   if (t === "stream_event" || t === "system") return false;
   if (t === "assistant") return false;
   if (t === "user" || t === "result") return true;
+  if (t === "tool_result" || t === "run_result") return true;
   return false;
 }

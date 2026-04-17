@@ -326,16 +326,58 @@ export class SessionStore {
 
   replaceMessages(sessionId: string, messages: StreamMessage[]): void {
     const tx = this.db.transaction((items: StreamMessage[]) => {
+      const oldRows = this.db.prepare(
+        `SELECT data, state_snapshot FROM messages WHERE session_id = ? ORDER BY rowid`
+      ).all(sessionId) as { data: string; state_snapshot: string | null }[];
+
+      // Collect snapshots per type in chronological order
+      const snapshotsByType = new Map<string, string[]>();
+      for (const row of oldRows) {
+        if (!row.state_snapshot) continue;
+        try {
+          const parsed = JSON.parse(row.data) as { type?: string };
+          const t = parsed.type ?? "unknown";
+          if (!snapshotsByType.has(t)) snapshotsByType.set(t, []);
+          snapshotsByType.get(t)!.push(row.state_snapshot);
+        } catch {
+          // skip unparseable rows
+        }
+      }
+
+      // Count new messages per type to align from the end
+      const newTypeCounts = new Map<string, number>();
+      for (const message of items) {
+        const t = ("type" in message && typeof message.type === "string") ? message.type : "unknown";
+        newTypeCounts.set(t, (newTypeCounts.get(t) ?? 0) + 1);
+      }
+
+      // Build reverse-aligned index: new[last] ← old[last], new[last-1] ← old[last-1], ...
+      const snapshotsByTypeRevSeq = new Map<string, string>();
+      for (const [t, snaps] of snapshotsByType) {
+        const newCount = newTypeCounts.get(t) ?? 0;
+        for (let i = 0; i < Math.min(snaps.length, newCount); i++) {
+          const oldIdx = snaps.length - 1 - i;
+          const newRevIdx = newCount - 1 - i;
+          snapshotsByTypeRevSeq.set(`${t}:${newRevIdx}`, snaps[oldIdx]);
+        }
+      }
+
       this.db.prepare(`delete from messages where session_id = ?`).run(sessionId);
+
       const insert = this.db.prepare(
-        `insert into messages (id, session_id, data, created_at) values (?, ?, ?, ?)`
+        `insert into messages (id, session_id, data, created_at, state_snapshot) values (?, ?, ?, ?, ?)`
       );
+      const newTypeCounters = new Map<string, number>();
       for (const message of items) {
         const id =
           ("uuid" in message && typeof message.uuid === "string" && message.uuid) ||
           ("id" in message && typeof message.id === "string" && message.id) ||
           crypto.randomUUID();
-        insert.run(id, sessionId, JSON.stringify(message), Date.now());
+        const t = ("type" in message && typeof message.type === "string") ? message.type : "unknown";
+        const seq = newTypeCounters.get(t) ?? 0;
+        newTypeCounters.set(t, seq + 1);
+        const snapshot = snapshotsByTypeRevSeq.get(`${t}:${seq}`) ?? null;
+        insert.run(id, sessionId, JSON.stringify(message), Date.now(), snapshot);
       }
     });
     tx(messages);
