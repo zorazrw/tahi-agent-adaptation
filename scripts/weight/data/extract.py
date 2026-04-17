@@ -120,9 +120,9 @@ def extract_dpo_pairs(sessions: list[dict]) -> list[dict[str, Any]]:
     For each execution task_unit with >=2 rounds and >=1 follow_up,
     pairs round k (rejected) with round k+1 (chosen).
 
-    Prompt is the initial system + user message (same for all pairs in a
-    task_unit).  Each round's completion (messages after the first user
-    message) becomes the chosen or rejected trajectory.
+    Prompt accumulates context: for pair k, the prompt includes the system
+    message, initial user message, and all prior rounds' completions plus
+    the follow-ups that triggered them (up to but not including round k).
 
     Returns list of::
 
@@ -154,8 +154,12 @@ def extract_dpo_pairs(sessions: list[dict]) -> list[dict[str, Any]]:
                 if not any(rej_is_agent) or not any(cho_is_agent):
                     continue
 
+                prompt = _build_conversation_context(
+                    base_prompt, rounds, human_traj, up_to_round=k,
+                )
+
                 pairs.append({
-                    "prompt": base_prompt,
+                    "prompt": prompt,
                     "chosen": cho_msgs,
                     "rejected": rej_msgs,
                     "chosen_is_agent": cho_is_agent,
