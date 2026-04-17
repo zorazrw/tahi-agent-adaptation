@@ -43,6 +43,18 @@ def _completion_and_mask(
     return completion, is_agent
 
 
+def _is_complete_round(messages: list[dict]) -> bool:
+    """Return True if the round ends with a final assistant message.
+
+    Rounds that end on a tool result are incomplete (the agent was mid-execution
+    when the session was cut). Such rounds should be excluded from training.
+    """
+    completion = messages[1:]
+    if not completion:
+        return False
+    return completion[-1].get("role") == "assistant"
+
+
 def _build_base_prompt(system_prompt: str, first_user_content: str) -> list[dict]:
     """System message + initial user message."""
     msgs: list[dict] = []
@@ -153,6 +165,13 @@ def extract_dpo_pairs(sessions: list[dict]) -> list[dict[str, Any]]:
                     continue
                 if not any(rej_is_agent) or not any(cho_is_agent):
                     continue
+                # Keep only pairs where both rounds are complete (completion ends
+                # with a final assistant message). Incomplete rounds provide
+                # truncated supervision and unstable preference signal.
+                if not _is_complete_round(rounds[k]["messages"]):
+                    continue
+                if not _is_complete_round(rounds[k + 1]["messages"]):
+                    continue
 
                 prompt = _build_conversation_context(
                     base_prompt, rounds, human_traj, up_to_round=k,
@@ -208,6 +227,8 @@ def extract_opd_examples(sessions: list[dict]) -> list[dict[str, Any]]:
             for k in range(len(rounds) - 1):
                 completion, is_agent = _completion_and_mask(rounds[k]["messages"])
                 if not completion or not any(is_agent):
+                    continue
+                if not _is_complete_round(rounds[k]["messages"]):
                     continue
 
                 student_prompt = _build_conversation_context(
@@ -269,6 +290,8 @@ def extract_reinforce_examples(sessions: list[dict]) -> list[dict[str, Any]]:
             for k, rnd in enumerate(rounds):
                 completion, is_agent = _completion_and_mask(rnd["messages"])
                 if not completion or not any(is_agent):
+                    continue
+                if not _is_complete_round(rnd["messages"]):
                     continue
 
                 prompt = _build_conversation_context(
