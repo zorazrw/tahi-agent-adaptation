@@ -1712,6 +1712,37 @@ def _find_node_in_tree(tree: Any, node_id: str) -> Optional[dict]:
     return None
 
 
+def _verifiers_from_snapshot(snapshot_msg: Optional[dict], node_id: str) -> Optional[List[dict]]:
+    """Extract per-criterion verifier results for *node_id* from a snapshot message.
+
+    Returns a list like [{"criterion": "...", "status": True/False}, …], or None
+    if no snapshot / node is found.  The snapshot stores each criterion as
+    ``{"criterion": str, "status": "success" | "failure"}`` (``buildExportEnvironmentSnapshot``
+    collapses the in-memory ``verifierMarks`` ("check"/"cross"/undefined) into
+    these strings via ``verifierStatusForExport`` in message-state-snapshot.ts),
+    so we read ``status`` directly instead of looking up ``verifierMarks``.
+    """
+    if snapshot_msg is None:
+        return None
+    tree = _snapshot_workflow_tree(snapshot_msg)
+    if tree is None:
+        return None
+    node = _find_node_in_tree(tree, node_id)
+    if node is None:
+        return None
+    criteria = node.get("verifiers") or []
+    result = []
+    for c in criteria:
+        if isinstance(c, dict):
+            crit = str(c.get("criterion", ""))
+            status = c.get("status") == "success"
+        else:
+            crit = str(c)
+            status = False
+        result.append({"criterion": crit, "status": status})
+    return result if result else None
+
+
 def _flush_partial_group(partials: List[dict]) -> dict:
     """Merge a group of consecutive assistant partials into one entry."""
     if len(partials) == 1:
@@ -1868,15 +1899,22 @@ def _slim_raw_message(raw: dict) -> dict:
             sr = raw.get("stopReason")
             if sr is not None:
                 out["stopReason"] = sr
+            ts = raw.get("timestamp")
+            if ts is not None:
+                out["timestamp"] = ts
             return out
         if t == "tool_result":
-            return {
+            out: Dict[str, Any] = {
                 "type": "tool_result",
                 "toolUseId": raw.get("toolUseId", ""),
                 "toolName": raw.get("toolName", ""),
                 "content": raw.get("content", ""),
                 "isError": raw.get("isError", False),
             }
+            ts = raw.get("timestamp")
+            if ts is not None:
+                out["timestamp"] = ts
+            return out
         if t == "system_init":
             out = {"type": "system_init", "engine": "pi"}
             if raw.get("model"):
@@ -2583,24 +2621,94 @@ def build_weight_based_session(
         # Since merging / slimming preserves ordering and count for Pi
         # (no merging) and approximately for Legacy, the indices still
         # align with agent_traj.
-        def _build_traj_entry(prompt: str, seg: List[dict]) -> Dict[str, Any]:
+        # verifier_label rows survive replaceMessages(); order matches trajectory order for this node
+        vl_snaps_for_node = [
+            m for m in all_msgs
+            if m.get("type") == "verifier_label"
+            and m.get("nodeId") == node_id
+            and m.get("state_snapshot")
+        ]
+
+        # Build raw (prompt, segment) pairs first so we can align vl → traj by
+        # time window before building entries.
+        raw_segments: List[Tuple[str, List[dict]]] = []
+        if not follow_up_splits:
+            raw_segments.append((node_first_turn_prompt or "", agent_traj))
+        else:
+            first_end = follow_up_splits[0][0]
+            raw_segments.append((node_first_turn_prompt or "", agent_traj[:first_end]))
+            for si, (split_idx, follow_prompt) in enumerate(follow_up_splits):
+                next_end = follow_up_splits[si + 1][0] if si + 1 < len(follow_up_splits) else len(agent_traj)
+                raw_segments.append((follow_prompt, agent_traj[split_idx:next_end]))
+
+        # For each segment, compute the max Pi ``timestamp`` among its
+        # assistant / tool_result entries.  This is the real LLM call time
+        # and survives replaceMessages() (unlike DB created_at, which is
+        # rewritten).  Used only for the precise alignment path below.
+        def _seg_end_ts(seg: List[dict]) -> Optional[int]:
+            best: Optional[int] = None
+            for e in seg:
+                raw = e.get("raw") or {}
+                if raw.get("type") not in ("assistant", "tool_result"):
+                    continue
+                ts = raw.get("timestamp")
+                if isinstance(ts, (int, float)):
+                    if best is None or ts > best:
+                        best = int(ts)
+            return best
+
+        seg_end_ts_list = [_seg_end_ts(seg) for (_, seg) in raw_segments]
+
+        # Align vl → segment.  New sessions: each vl carries
+        # ``runEndTimestamp`` (set right after labelVerifiers writes it).
+        # Old sessions: fall back to end-aligned mapping (last vl → last
+        # segment, second-last vl → second-last segment, …) which is what
+        # the user actually cares about for training.
+        vl_for_segment: List[Optional[dict]] = [None] * len(raw_segments)
+        use_timestamp_alignment = any(
+            isinstance(vl.get("runEndTimestamp"), (int, float)) for vl in vl_snaps_for_node
+        )
+        if use_timestamp_alignment:
+            for vl in vl_snaps_for_node:
+                run_end = vl.get("runEndTimestamp")
+                if not isinstance(run_end, (int, float)):
+                    continue
+                # Pick the last segment whose end_ts is < run_end; ignore
+                # segments that have no Pi timestamps (stuck trajectories).
+                chosen: Optional[int] = None
+                for k, end_ts in enumerate(seg_end_ts_list):
+                    if end_ts is None:
+                        continue
+                    if end_ts < run_end:
+                        chosen = k
+                if chosen is not None:
+                    vl_for_segment[chosen] = vl
+        else:
+            N = len(raw_segments)
+            M = len(vl_snaps_for_node)
+            shift = N - M
+            for k in range(N):
+                idx = k - shift
+                if 0 <= idx < M:
+                    vl_for_segment[k] = vl_snaps_for_node[idx]
+
+        def _build_traj_entry(prompt: str, seg: List[dict], vl_snap: Optional[dict]) -> Dict[str, Any]:
             if is_pi:
                 pi_raw = [e["raw"] for e in seg
                           if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
                 messages = [{"role": "user", "content": prompt}] + pi_messages_to_openai(pi_raw)
             else:
                 messages = [{"role": "user", "content": prompt}]
-            return {"prompt": prompt, "messages": messages}
+            entry: Dict[str, Any] = {"prompt": prompt, "messages": messages}
+            v = _verifiers_from_snapshot(vl_snap, node_id)
+            if v is not None:
+                entry["verifiers"] = v
+            return entry
 
-        agent_trajectories: List[dict] = []
-        if not follow_up_splits:
-            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj))
-        else:
-            first_end = follow_up_splits[0][0]
-            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj[:first_end]))
-            for si, (split_idx, follow_prompt) in enumerate(follow_up_splits):
-                next_end = follow_up_splits[si + 1][0] if si + 1 < len(follow_up_splits) else len(agent_traj)
-                agent_trajectories.append(_build_traj_entry(follow_prompt, agent_traj[split_idx:next_end]))
+        agent_trajectories: List[dict] = [
+            _build_traj_entry(prompt, seg, vl_for_segment[i])
+            for i, (prompt, seg) in enumerate(raw_segments)
+        ]
 
         unit: Dict[str, Any] = {
             "intent": node_desc,

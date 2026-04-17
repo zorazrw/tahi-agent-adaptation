@@ -213,7 +213,7 @@ export type LegacyMessage =
   | LegacyStreamEventMessage;
 
 export type BrainEditMessage = { type: "brain_edit" };
-export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string };
+export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string; runEndTimestamp?: number };
 export type EditWorkflowMessage = { type: "edit_workflow" };
 export type EditVerifierMessage = { type: "edit_verifier" };
 export type FileEditMessage = { type: "file_edit"; path: string };
