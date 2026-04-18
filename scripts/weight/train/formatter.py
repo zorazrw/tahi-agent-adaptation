@@ -31,11 +31,11 @@ from tinker_cookbook.supervised.data import (
 )
 from tinker_cookbook.supervised.types import ChatDatasetBuilder, SupervisedDataset
 
-_weight_data = Path(__file__).resolve().parent.parent / "data"
-if str(_weight_data) not in sys.path:
-    sys.path.insert(0, str(_weight_data))
-
-from extract import extract_dpo_pairs, extract_opd_examples, extract_reinforce_examples  # noqa: E402
+from weight.data.extract import (  # noqa: E402
+    extract_dpo_pairs,
+    extract_opd_examples,
+    extract_reinforce_examples,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _hydrate_tool_calls(conversation: list[dict]) -> list[dict]:
-    """Convert plain-dict tool_calls to ToolCall pydantic objects for the renderer."""
+    """Convert plain-dict tool_calls to ToolCall pydantic objects for the renderer.
+
+    Also normalises ``content: null`` → ``content: ""`` because the qwen3
+    renderer does string concatenation on content and crashes on None.
+    """
     out = []
     for msg in conversation:
+        # Normalise null content (common when a message only has tool_calls)
+        if msg.get("content") is None:
+            msg = {**msg, "content": ""}
         if msg.get("tool_calls"):
             msg = {
                 **msg,
