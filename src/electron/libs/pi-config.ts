@@ -29,6 +29,7 @@ import {
   writeStoredTinkerProviderConfig,
 } from "./tinker-config.js";
 import { registerTinkerProvider } from "./tinker-provider.js";
+import { registerToolCallFallback } from "./tool-call-fallback.js";
 
 const PI_AGENT_DIR_NAME = "pi-agent";
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
@@ -190,6 +191,7 @@ export function createPiManagers(cwd: string) {
   };
   const modelRegistry = new ModelRegistryCtor(authStorage, getModelsPath());
   registerTinkerProvider(modelRegistry, getTinkerConfigPath());
+  registerToolCallFallback(modelRegistry);
   const settingsManager = SettingsManager.create(cwd, agentDir);
   return {
     agentDir,

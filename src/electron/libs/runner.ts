@@ -33,7 +33,9 @@ export type RunnerHandle = {
 
 const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
   "IMPORTANT: You MUST call the workflow_plan tool as your very first action to register a structured plan.",
-  "Do NOT write out steps as text. Use the tool with structured JSON input.",
+  "You MUST use the actual tool/function calling mechanism provided by the API to invoke workflow_plan.",
+  "Do NOT write tool calls as plain text. Do NOT use <tool_call> XML tags or any other text-based format in your message content.",
+  "The tool call must be a structured function call sent through the API's native tool-use protocol.",
   "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
   "Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
   "You may add children to break a main step into detailed sub-steps when useful.",
