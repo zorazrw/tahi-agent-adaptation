@@ -20,14 +20,13 @@ Usage::
 
     python -m scripts.weight.train.run_opd \\
         --train-path data/weight.json \\
-        --model-name Qwen/Qwen3.5-4B \\
+        --model-name Qwen/Qwen3-4B \\
         --renderer-name qwen3 \\
         --log-path ~/logs/opd_run
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from pathlib import Path
@@ -99,56 +98,121 @@ def _extract_completion_info(
     return mask_indices, completion_tokens
 
 
-async def _compute_teacher_logprobs(
+def _datum_fingerprint(datum: tinker.Datum) -> tuple:
+    """Content-based stable key for caching per-datum results across shuffles."""
+    mi = tuple(datum.model_input.to_ints())
+    tt = tuple(datum.loss_fn_inputs["target_tokens"].data)
+    return (mi, tt)
+
+
+def _forward_teacher_logprobs(
+    training_client: tinker.TrainingClient,
+    teacher_datums: list[tinker.Datum],
+) -> list[torch.Tensor]:
+    """Run a gradient-free forward pass on teacher datums via the training client.
+
+    Returns one tensor per datum with per-target-position logprobs (same
+    shape as each teacher datum's ``target_tokens``). MUST be called before
+    any ``optim_step`` so the policy equals the base / loaded checkpoint
+    model — which plays the role of the frozen teacher in offline OPD.
+
+    This replaces ``teacher_client.compute_logprobs_async(seq)``: SkyRL's
+    vLLM backend does not yet support ``prompt_logprobs``, so the sampling
+    path silently returns ``None``. The training-client forward path is
+    the portable way to get per-token logprobs.
+    """
+    forward_result = training_client.forward(teacher_datums, "cross_entropy").result()
+    out: list[torch.Tensor] = []
+    for entry in forward_result.loss_fn_outputs:
+        lp_data = entry["logprobs"]
+        tensor = torch.tensor(lp_data.data, dtype=torch.float32)
+        if lp_data.shape is not None:
+            tensor = tensor.reshape(lp_data.shape)
+        out.append(tensor.detach().cpu())
+    return out
+
+
+def _align_teacher_to_student(
+    student_datum: tinker.Datum,
+    teacher_datum: tinker.Datum,
+    teacher_per_pos_lps: torch.Tensor,
+) -> torch.Tensor:
+    """Extract teacher logprobs at completion positions, aligned to the student's mask.
+
+    The teacher's target_tokens index the teacher-forced sequence
+    (teacher prompt + completion), while the student's weight mask
+    indexes the student sequence. Both sides have the same completion
+    *length*; we align by taking the first N teacher completion positions
+    (those with weight > 0 on the teacher side) to match the N student
+    completion positions.
+    """
+    weights = student_datum.loss_fn_inputs["weights"].data
+    mask_indices = [j for j, w in enumerate(weights) if w > 0]
+    n_completion = len(mask_indices)
+
+    td_weights = teacher_datum.loss_fn_inputs["weights"].data
+    td_mask_indices = [j for j, w in enumerate(td_weights) if w > 0]
+
+    teacher_completion_lps: list[float] = []
+    for t in range(min(n_completion, len(td_mask_indices))):
+        pos = td_mask_indices[t]
+        lp = float(teacher_per_pos_lps[pos]) if pos < len(teacher_per_pos_lps) else 0.0
+        teacher_completion_lps.append(lp)
+    while len(teacher_completion_lps) < n_completion:
+        teacher_completion_lps.append(0.0)
+    return torch.tensor(teacher_completion_lps[:n_completion], dtype=torch.float32)
+
+
+def precompute_teacher_logprob_cache(
+    training_client: tinker.TrainingClient,
+    dataset: OfflineOPDDataset,
+    num_epochs: int,
+) -> dict[tuple, torch.Tensor]:
+    """Pre-compute aligned teacher logprobs for every student datum we will train on.
+
+    Iterates all epochs × batches and caches per-(student,teacher) aligned
+    logprob tensors keyed by ``(student_fp, teacher_fp)``. Dedupes across
+    epochs so each unique pair is computed exactly once. Must be called
+    before any ``optim_step`` — ``training_client.forward()`` runs on the
+    current policy, and we want the initial (teacher) policy.
+    """
+    cache: dict[tuple, torch.Tensor] = {}
+    n_batches = len(dataset)
+    for epoch_idx in range(num_epochs):
+        dataset.set_epoch(seed=epoch_idx)
+        for batch_idx in range(n_batches):
+            student_datums, teacher_datums = dataset.get_batch(batch_idx)
+            missing_idxs = [
+                i for i, (sd, td) in enumerate(zip(student_datums, teacher_datums))
+                if (_datum_fingerprint(sd), _datum_fingerprint(td)) not in cache
+            ]
+            if not missing_idxs:
+                continue
+            missing_teachers = [teacher_datums[i] for i in missing_idxs]
+            per_pos_lps = _forward_teacher_logprobs(training_client, missing_teachers)
+            for i, t_lp in zip(missing_idxs, per_pos_lps, strict=True):
+                aligned = _align_teacher_to_student(
+                    student_datums[i], teacher_datums[i], t_lp,
+                )
+                cache[(_datum_fingerprint(student_datums[i]), _datum_fingerprint(teacher_datums[i]))] = aligned
+    logger.info(
+        "Pre-computed teacher logprobs for %d unique (student, teacher) pairs "
+        "(across %d epochs x %d batches)",
+        len(cache), num_epochs, n_batches,
+    )
+    return cache
+
+
+def _lookup_teacher_logprobs(
     student_datums: list[tinker.Datum],
     teacher_datums: list[tinker.Datum],
-    teacher_client: tinker.SamplingClient,
+    cache: dict[tuple, torch.Tensor],
 ) -> list[torch.Tensor]:
-    """Compute per-completion-position teacher logprobs.
-
-    For each example, builds the teacher-forced sequence (teacher datum
-    model_input + last target token) and extracts logprobs at the
-    completion positions.
-
-    Returns a list of tensors, one per datum, aligned with the student
-    datum's weight mask (only positions where weight > 0).
-    """
-    teacher_full_seqs = []
-    for td in teacher_datums:
-        targets = td.loss_fn_inputs["target_tokens"].data
-        if targets:
-            seq = td.model_input.append_int(int(targets[-1]))
-        else:
-            seq = td.model_input
-        teacher_full_seqs.append(seq)
-
-    raw_lps = await asyncio.gather(
-        *[teacher_client.compute_logprobs_async(seq) for seq in teacher_full_seqs]
-    )
-
-    result: list[torch.Tensor] = []
-    for i, sd in enumerate(student_datums):
-        weights = sd.loss_fn_inputs["weights"].data
-        mask_indices = [j for j, w in enumerate(weights) if w > 0]
-        n_completion = len(mask_indices)
-
-        td = teacher_datums[i]
-        td_weights = td.loss_fn_inputs["weights"].data
-        td_mask_indices = [j for j, w in enumerate(td_weights) if w > 0]
-
-        teacher_lp_raw = raw_lps[i]
-        teacher_completion_lps = []
-        for t in range(min(n_completion, len(td_mask_indices))):
-            pos = td_mask_indices[t]
-            lp = teacher_lp_raw[pos] if pos < len(teacher_lp_raw) else 0.0
-            teacher_completion_lps.append(lp if lp is not None else 0.0)
-
-        while len(teacher_completion_lps) < n_completion:
-            teacher_completion_lps.append(0.0)
-
-        result.append(torch.tensor(teacher_completion_lps[:n_completion], dtype=torch.float32))
-
-    return result
+    """Fetch aligned teacher logprobs for the current batch from the cache."""
+    return [
+        cache[(_datum_fingerprint(sd), _datum_fingerprint(td))]
+        for sd, td in zip(student_datums, teacher_datums, strict=True)
+    ]
 
 
 def do_update(
@@ -156,7 +220,6 @@ def do_update(
     total_steps: int,
     config: Config,
     training_client: tinker.TrainingClient,
-    teacher_client: tinker.SamplingClient,
     student_datums: list[tinker.Datum],
     teacher_completion_lps: list[torch.Tensor],
     ml_logger: ml_log.Logger,
@@ -277,7 +340,6 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
             user_metadata=user_metadata,
         )
 
-    teacher_client = service_client.create_sampling_client(base_model=config.model_name)
     tokenizer = get_tokenizer(config.model_name)
 
     n_batches = len(dataset)
@@ -290,6 +352,15 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
         f"= {n_batches * config.num_epochs} steps"
     )
 
+    # Pre-compute teacher logprobs for every (student, teacher) pair we will
+    # train on. This MUST happen before any optim_step so the "teacher" is
+    # the initial policy (base + zero-init LoRA, or the loaded checkpoint).
+    # See precompute_teacher_logprob_cache for details on why we route
+    # through training_client.forward() instead of the sampling client.
+    teacher_cache = precompute_teacher_logprob_cache(
+        training_client, dataset, config.num_epochs,
+    )
+
     for epoch_idx in range(config.num_epochs):
         dataset.set_epoch(seed=epoch_idx)
         logger.info(f"Starting epoch {epoch_idx}")
@@ -300,9 +371,8 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
                 break
 
             student_datums, teacher_datums = dataset.get_batch(batch_idx)
-
-            teacher_lps = asyncio.run(
-                _compute_teacher_logprobs(student_datums, teacher_datums, teacher_client)
+            teacher_lps = _lookup_teacher_logprobs(
+                student_datums, teacher_datums, teacher_cache,
             )
 
             if step == 0:
@@ -319,7 +389,6 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
                 total_steps=total_steps,
                 config=config,
                 training_client=training_client,
-                teacher_client=teacher_client,
                 student_datums=student_datums,
                 teacher_completion_lps=teacher_lps,
                 ml_logger=ml_logger,
