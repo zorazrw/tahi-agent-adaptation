@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .reward import compute_reward
+from .reward import compute_per_traj_rewards
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ def extract_reinforce_examples(sessions: list[dict]) -> list[dict[str, Any]]:
 
             first_user = rounds[0]["messages"][0]["content"] if rounds[0].get("messages") else ""
             base_prompt = _build_base_prompt(system_prompt, first_user)
-            reward = compute_reward(unit)
+            per_traj_rewards = compute_per_traj_rewards(unit)
 
             for k, rnd in enumerate(rounds):
                 completion, is_agent = _completion_and_mask(rnd["messages"])
@@ -302,7 +302,7 @@ def extract_reinforce_examples(sessions: list[dict]) -> list[dict[str, Any]]:
                     "prompt": prompt,
                     "completion": completion,
                     "is_agent": is_agent,
-                    "reward": reward,
+                    "reward": per_traj_rewards[k],
                 })
 
     return examples
