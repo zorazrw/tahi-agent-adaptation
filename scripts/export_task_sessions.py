@@ -506,10 +506,18 @@ def describe_human_action(norm: dict) -> str:
 
 
 def describe_agent_action(norm: dict) -> str:
+    if norm.get("type") == "verifier_label":
+        nid_raw = norm.get("nodeId", "")
+        nid = str(nid_raw) if nid_raw is not None else ""
+        return f"verify({json.dumps(nid, ensure_ascii=False)})"
     raw = norm.get("raw")
     if not isinstance(raw, dict):
         return "agent"
     t = raw.get("type")
+    if t == "verifier_label":
+        nid_raw = raw.get("nodeId", "")
+        nid = str(nid_raw) if nid_raw is not None else ""
+        return f"verify({json.dumps(nid, ensure_ascii=False)})"
     if t == "assistant":
         # Pi format uses top-level blocks; legacy uses raw.message.content
         blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
@@ -998,7 +1006,7 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
-        if m.get("type") == "update_verifiers":
+        if m.get("role") == "agent" and m.get("type") in ("update_verifiers", "edit_verifier"):
             wo_uv = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_uv = mem_timeline[idx] if idx < len(mem_timeline) else {}
             s_uv = sk_timeline[idx] if idx < len(sk_timeline) else {}
@@ -1010,10 +1018,7 @@ def build_full_session_trajectory(
                 memory=m_uv,
                 skill=s_uv,
             )
-            nid_raw = m.get("nodeId", "")
-            nid = str(nid_raw) if nid_raw is not None else ""
-            act = f"update_verifiers({json.dumps(nid, ensure_ascii=False)})"
-            traj.append(trajectory_row("agent", act, step_env))
+            traj.append(trajectory_row("agent", "edit_verifier()", step_env))
             idx += 1
             continue
 
@@ -1032,7 +1037,7 @@ def build_full_session_trajectory(
             traj.append(trajectory_row("user", "edit_workflow()", step_env))
             idx += 1
             continue
-        if m.get("type") == "edit_verifier":
+        if m.get("role") == "user" and m.get("type") == "edit_verifier":
             wo_ev = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_ev = mem_timeline[idx] if idx < len(mem_timeline) else {}
             s_ev = sk_timeline[idx] if idx < len(sk_timeline) else {}
@@ -1293,7 +1298,7 @@ def normalize_legacy_message(msg: dict) -> dict:
     if msg.get("type") == "edit_verifier":
         return {"role": "user", "type": "edit_verifier"}
     if msg.get("type") == "update_verifiers":
-        return {"role": "agent", "type": "update_verifiers", "nodeId": msg.get("nodeId", ""), "raw": msg}
+        return {"role": "agent", "type": "edit_verifier", "nodeId": msg.get("nodeId", ""), "raw": msg}
     if msg.get("type") == "file_edit":
         return {"role": "user", "type": "file_edit", "path": msg.get("path", "")}
     if msg.get("type") == "brain_edit":
@@ -1338,6 +1343,13 @@ def normalize_pi_message(msg: dict) -> dict:
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
     if msg_type == "node_completed":
         return {"role": "agent", "type": "node_completed", "raw": msg}
+    if msg_type == "verifier_label":
+        return {
+            "role": "agent",
+            "type": "verifier_label",
+            "nodeId": msg.get("nodeId", ""),
+            "raw": msg,
+        }
     if msg_type in ("system_init", "assistant", "tool_result", "run_result"):
         return {"role": "agent", "type": msg_type, "raw": msg}
     return {"role": "agent", "raw": msg}
