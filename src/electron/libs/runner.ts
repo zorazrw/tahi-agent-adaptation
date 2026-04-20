@@ -44,6 +44,9 @@ const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
   "The human operator will trigger each step individually.",
 ].join("\n");
 
+const WORKFLOW_PLAN_APPEND_USER_PROMPT =
+  "Before doing anything else, you MUST call the workflow_plan tool to register the workflow with structured JSON input, then stop.";
+
 function normalizeRoots(tasks: RawWorkflowNode[]): RawWorkflowNode[] {
   let roots = tasks;
   while (roots.length === 1 && roots[0].children && roots[0].children.length > 0) {
@@ -55,6 +58,9 @@ function normalizeRoots(tasks: RawWorkflowNode[]): RawWorkflowNode[] {
 function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): string {
   const trimmed = userPrompt.trim();
   if (!trimmed) return trimmed;
+  if (isFirstMessage) {
+    return `${trimmed}\n\n${WORKFLOW_PLAN_APPEND_USER_PROMPT}`;
+  }
   return trimmed;
 }
 
@@ -594,6 +600,13 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           await piSession.prompt(promptToSend);
         },
       );
+
+      if (shouldForceWorkflowPlan && !planRegistered) {
+        throw new Error(
+          "Workflow plan was not registered. The model did not call workflow_plan, so left-panel modules could not be populated."
+        );
+      }
+
       persistSessionFile();
 
       const runResult = {
