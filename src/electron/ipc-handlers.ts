@@ -32,6 +32,7 @@ import {
 } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 import { createPiSessionManager, getPiSessionsDir } from "./libs/pi-config.js";
+import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -321,6 +322,17 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
 async function finalizeContinueWithVerification(sessionId: string, nodeId: string) {
   await runVerifierLabelingForNode(sessionId, nodeId);
   runPostSolverExport(sessionId, nodeId);
+  const session = initializeSessions().getSession(sessionId);
+  if (!session) return;
+  emit({
+    type: "session.status",
+    payload: {
+      sessionId,
+      status: "completed",
+      title: session.title,
+      cwd: session.cwd,
+    },
+  });
 }
 
 function emit(event: ServerEvent) {
@@ -333,6 +345,15 @@ function emit(event: ServerEvent) {
       event.type === "permission.request") &&
     !hasLiveSession(event.payload.sessionId)
   ) {
+    return;
+  }
+
+  if (
+    event.type === "session.status" &&
+    event.payload.status === "completed" &&
+    (sessionCurrentNodeId.has(event.payload.sessionId) || sessionContinueVerificationNodeId.has(event.payload.sessionId))
+  ) {
+    // Force verifier pass to be the final action for execution runs before surfacing "completed".
     return;
   }
 
@@ -355,6 +376,8 @@ function emit(event: ServerEvent) {
         type: "session.status",
         payload: { sessionId, status: "idle", title: session.title, cwd: session.cwd }
       });
+      // Force verifier refinement from latest user prompts right after initial plan registration.
+      void autoRefineVerifiersFromUserMessages(sessionId, flattenWorkflowNodeIds(workflowTree));
     }
     return;
   }
@@ -494,6 +517,86 @@ function cleanupPiSessionArtifacts(sessionId: string, session: Session | undefin
   } catch (error) {
     console.error(`[ipc] failed deleting pi session dir for ${sessionId}:`, error);
   }
+}
+
+function flattenWorkflowNodeIds(tree: WorkflowNode[]): string[] {
+  const ids: string[] = [];
+  const stack = [...tree];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    ids.push(node.id);
+    for (const child of node.children ?? []) stack.push(child);
+  }
+  return ids;
+}
+
+function gatherUserPromptHistory(sessionId: string): string[] {
+  return initializeSessions()
+    .getMessages(sessionId)
+    .filter((m): m is { type: "user_prompt"; prompt: string } => m.type === "user_prompt")
+    .map((m) => String(m.prompt ?? "").trim())
+    .filter(Boolean);
+}
+
+function verifiersEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNodeIds: string[]): Promise<void> {
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (!session?.workflowTree?.length) return;
+  if (targetNodeIds.length === 0) return;
+
+  const promptHistory = gatherUserPromptHistory(sessionId);
+  if (promptHistory.length === 0) return;
+
+  const byNodeExamples = sessionVerifierExamplesByNodeId.get(sessionId) ?? new Map<string, VerifierExampleState>();
+  let didChangeAny = false;
+
+  for (const nodeId of targetNodeIds) {
+    const node = findNodeById(session.workflowTree, nodeId);
+    if (!node) continue;
+    const examples = byNodeExamples.get(nodeId);
+    try {
+      const updated = await generateUpdatedVerifiersForNode(
+        session,
+        session.workflowTree,
+        node,
+        promptHistory,
+        examples?.removed ?? [],
+        examples?.added ?? []
+      );
+      if (!updated) continue;
+      const nextVerifiers = uniqueByNormalized(updated);
+      if (nextVerifiers.length === 0 || verifiersEqual(node.verifiers, nextVerifiers)) continue;
+      node.verifiers = nextVerifiers;
+      node.verifierMarks = nextVerifiers.map(() => undefined);
+      didChangeAny = true;
+    } catch (error) {
+      console.error(`[ipc] auto verifier refinement failed for node ${nodeId}:`, error);
+    }
+  }
+
+  if (!didChangeAny) return;
+
+  store.updateSession(sessionId, { workflowTree: session.workflowTree });
+  const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
+  broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
+
+  const rowId = store.recordMessage(sessionId, { type: "edit_verifier" });
+  const sessAfter = store.getSession(sessionId);
+  if (sessAfter) {
+    store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sessAfter));
+  }
+  broadcast({
+    type: "stream.message",
+    payload: { sessionId, message: { type: "edit_verifier" } },
+  });
 }
 
 /** Starts a task-solving LLM call for the given workflow node. */
@@ -851,8 +954,14 @@ export function handleClientEvent(event: ClientEvent) {
     if (vNode) {
       sessionLastVerificationNodeId.set(session.id, vNode);
       sessionContinueVerificationNodeId.set(session.id, vNode);
+      // Force verifier refinement on each incoming user message.
+      void autoRefineVerifiersFromUserMessages(session.id, [vNode]);
     } else {
       sessionContinueVerificationNodeId.delete(session.id);
+      const allNodeIds = session.workflowTree?.length ? flattenWorkflowNodeIds(session.workflowTree) : [];
+      if (allNodeIds.length > 0) {
+        void autoRefineVerifiersFromUserMessages(session.id, allNodeIds);
+      }
     }
 
     runClaude({
