@@ -39,6 +39,10 @@ from weight.data.extract import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# When True, assistant top-level ``thinking`` is not merged into content; it is
+# dropped so training matches non-thinking / instruct-style prompts.
+OMIT_ASSISTANT_THINKING = True
+
 
 # ---------------------------------------------------------------------------
 # Tool-call hydration (shared)
@@ -47,14 +51,44 @@ logger = logging.getLogger(__name__)
 def _hydrate_tool_calls(conversation: list[dict]) -> list[dict]:
     """Convert plain-dict tool_calls to ToolCall pydantic objects for the renderer.
 
-    Also normalises ``content: null`` → ``content: ""`` because the qwen3
-    renderer does string concatenation on content and crashes on None.
+    Also:
+    - Normalises ``content: null`` → ``content: ""`` for messages without thinking.
+    - Converts the top-level ``thinking`` field on assistant messages into the
+      list-of-parts format that Qwen3Renderer understands::
+
+          content: [{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "..."}]
+
+      This ensures the renderer encodes ``<think>...</think>`` tokens for the
+      *current* turn while still stripping thinking from historical turns per the
+      default ``strip_thinking_from_history=True`` behaviour.
+
+      If ``thinking`` is absent or empty (e.g. Qwen3-Instruct non-thinking mode)
+      the message is left unchanged so the code gracefully supports both modes.
+
+      If module flag ``OMIT_ASSISTANT_THINKING`` is True, top-level ``thinking`` is
+      ignored (same as absent): only ``content`` is kept for the assistant turn.
     """
     out = []
     for msg in conversation:
-        # Normalise null content (common when a message only has tool_calls)
-        if msg.get("content") is None:
-            msg = {**msg, "content": ""}
+        thinking_text = msg.get("thinking") if msg.get("role") == "assistant" else None
+
+        if thinking_text and not OMIT_ASSISTANT_THINKING:
+            # Build list-of-parts content so Qwen3Renderer sees <think>...</think>
+            parts: list[dict] = [{"type": "thinking", "thinking": thinking_text}]
+            text = msg.get("content") or ""
+            if text:
+                parts.append({"type": "text", "text": text})
+            # Rebuild msg without the original content/thinking keys
+            msg = {k: v for k, v in msg.items() if k not in ("content", "thinking")}
+            msg = {"content": parts, **msg}
+        else:
+            # Normalise null content (common when a message only has tool_calls)
+            if msg.get("content") is None:
+                msg = {**msg, "content": ""}
+            # Drop empty/residual thinking key so downstream code doesn't see it
+            if "thinking" in msg:
+                msg = {k: v for k, v in msg.items() if k != "thinking"}
+
         if msg.get("tool_calls"):
             msg = {
                 **msg,
