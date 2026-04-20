@@ -44,6 +44,7 @@
 		"docx-preview": "^0.3.7",
 		"dotenv": "^17.2.3",
 		"highlight.js": "^11.11.1",
+		"jsonrepair": "^3.14.0",
 		"lucide-react": "^0.574.0",
 		"motion": "^12.34.2",
 		"os-utils": "^0.0.14",

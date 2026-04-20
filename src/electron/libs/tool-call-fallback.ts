@@ -21,11 +21,55 @@ import {
   type StreamFunction,
 } from "@mariozechner/pi-ai";
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
+import { jsonrepair } from "jsonrepair";
 
 interface InlineToolCall {
   name: string;
   arguments: Record<string, unknown>;
   id: string;
+}
+
+/**
+ * Keys that the model is known to output as arrays. Small models sometimes
+ * open them with `{` instead of `[`. We rewrite the first `{` after such a
+ * key to `[{` so jsonrepair can recover the rest.
+ */
+const KNOWN_ARRAY_KEYS = ["tasks", "outputFiles", "verifiers", "children", "questions", "options"];
+
+function fixArrayLikeObjects(raw: string): string {
+  let out = raw;
+  for (const key of KNOWN_ARRAY_KEYS) {
+    const re = new RegExp(`("${key}"\\s*:\\s*)\\{`, "g");
+    out = out.replace(re, "$1[{");
+  }
+  return out;
+}
+
+/**
+ * Try strict JSON.parse, then progressively more lenient repairs:
+ *   1. jsonrepair on the raw text
+ *   2. jsonrepair after rewriting known array-typed keys that were opened with `{`
+ *
+ * This handles the two most common 4B-scale model mistakes:
+ *   - `"tasks": { ... }, { ... }]` (object opened for an array field)
+ *   - missing `]`/`}`, trailing commas, unquoted keys, etc. (jsonrepair)
+ */
+function parseJsonLoose(raw: string): unknown | undefined {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Attempt 2: direct repair
+  }
+  try {
+    return JSON.parse(jsonrepair(raw));
+  } catch {
+    // Attempt 3: rewrite known array-typed keys then repair
+  }
+  try {
+    return JSON.parse(jsonrepair(fixArrayLikeObjects(raw)));
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -41,23 +85,19 @@ function parseInlineToolCalls(text: string): {
 
   let match;
   while ((match = regex.exec(text)) !== null) {
-    try {
-      const parsed = JSON.parse(match[1]) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const obj = parsed as Record<string, unknown>;
-        const name = typeof obj.name === "string" ? obj.name.trim() : "";
-        const args =
-          obj.arguments &&
-          typeof obj.arguments === "object" &&
-          !Array.isArray(obj.arguments)
-            ? (obj.arguments as Record<string, unknown>)
-            : {};
-        if (name) {
-          toolCalls.push({ name, arguments: args, id: crypto.randomUUID() });
-        }
+    const parsed = parseJsonLoose(match[1]);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const obj = parsed as Record<string, unknown>;
+      const name = typeof obj.name === "string" ? obj.name.trim() : "";
+      const args =
+        obj.arguments &&
+        typeof obj.arguments === "object" &&
+        !Array.isArray(obj.arguments)
+          ? (obj.arguments as Record<string, unknown>)
+          : {};
+      if (name) {
+        toolCalls.push({ name, arguments: args, id: crypto.randomUUID() });
       }
-    } catch {
-      // Ignore malformed JSON inside <tool_call> tags
     }
   }
 

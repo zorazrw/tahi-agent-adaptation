@@ -31,11 +31,10 @@ export type RunnerHandle = {
   abort: () => void;
 };
 
-const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
+/** Prompt for first-class models (Claude / OpenAI) that reliably follow tool-calling protocol. */
+const WORKFLOW_PLAN_SYSTEM_PROMPT_DEFAULT = [
   "IMPORTANT: You MUST call the workflow_plan tool as your very first action to register a structured plan.",
-  "You MUST use the actual tool/function calling mechanism provided by the API to invoke workflow_plan.",
-  "Do NOT write tool calls as plain text. Do NOT use <tool_call> XML tags or any other text-based format in your message content.",
-  "The tool call must be a structured function call sent through the API's native tool-use protocol.",
+  "Do NOT write out steps as text. Use the tool with structured JSON input.",
   "Structure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
   "Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
   "You may add children to break a main step into detailed sub-steps when useful.",
@@ -45,6 +44,65 @@ const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
   "After calling workflow_plan, STOP. Do not execute any steps yourself.",
   "The human operator will trigger each step individually.",
 ].join("\n");
+
+/**
+ * Extended prompt for OpenAI-compatible endpoints (e.g. small local models via SGLang/vLLM)
+ * that struggle with tool-call format and JSON structure.
+ */
+const WORKFLOW_PLAN_SYSTEM_PROMPT_OPENAI_COMPAT = [
+  "IMPORTANT: You MUST call the workflow_plan tool as your very first action to register a structured plan.",
+  "You MUST use the actual tool/function calling mechanism provided by the API to invoke workflow_plan.",
+  "Do NOT write tool calls as plain text. Do NOT use <tool_call> XML tags or any other text-based format in your message content.",
+  "The tool call must be a structured function call sent through the API's native tool-use protocol.",
+  "",
+  "ARGUMENT SCHEMA (strict):",
+  '  { "tasks": [ <Node>, <Node>, ... ] }   // tasks is an ARRAY of Node objects',
+  '  <Node> = { "description": string, "outputFiles": string[], "verifiers": string[], "children"?: <Node>[] }',
+  "",
+  "EXAMPLE (this is the exact JSON shape the arguments must have):",
+  "{",
+  '  "tasks": [',
+  "    {",
+  '      "description": "Write a short story about X",',
+  '      "outputFiles": ["story.md"],',
+  '      "verifiers": ["Story is 300-500 words and mentions X"]',
+  "    },",
+  "    {",
+  '      "description": "Ask the user to confirm the story",',
+  '      "outputFiles": [],',
+  '      "verifiers": ["User confirms the story is acceptable"]',
+  "    },",
+  "    {",
+  '      "description": "Generate an HTML intro page for the story",',
+  '      "outputFiles": ["intro.html"],',
+  '      "verifiers": ["HTML renders the story with a title and styling"]',
+  "    }",
+  "  ]",
+  "}",
+  "",
+  "JSON RULES (critical – invalid JSON will be rejected):",
+  "- tasks MUST be an array: opens with [ and closes with ]. NEVER use { to open tasks.",
+  "- Each task object opens with { and closes with }. Match every [ with ] and every { with }.",
+  "- outputFiles and verifiers are ARRAYS of strings ([ \"...\", \"...\" ]), never objects.",
+  "- No trailing commas. Use double quotes for all keys and string values.",
+  "",
+  "PLAN CONTENT:",
+  "- Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.",
+  "- Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
+  "- You may add children to break a main step into detailed sub-steps when useful.",
+  "- Do NOT add separate validation/testing steps. Express checks inside each step's verifiers.",
+  "- Keep descriptions short but complete. Each node needs description, outputFiles, verifiers, and optional children.",
+  "- Prefer .md for document-style outputs when markdown preview is useful.",
+  "",
+  "After calling workflow_plan, STOP. Do not execute any steps yourself.",
+  "The human operator will trigger each step individually.",
+].join("\n");
+
+function getWorkflowPlanSystemPrompt(provider: string | undefined): string {
+  return provider === "openai-compatible"
+    ? WORKFLOW_PLAN_SYSTEM_PROMPT_OPENAI_COMPAT
+    : WORKFLOW_PLAN_SYSTEM_PROMPT_DEFAULT;
+}
 
 function normalizeRoots(tasks: RawWorkflowNode[]): RawWorkflowNode[] {
   let roots = tasks;
@@ -389,7 +447,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     const shouldForceWorkflowPlan = regenerateWorkflow || !hasExistingWorkflowPlan(session);
     const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, shouldForceWorkflowPlan);
     const resourceLoader = await createPiResourceLoader(cwd, {
-      appendSystemPrompt: shouldForceWorkflowPlan ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : undefined,
+      appendSystemPrompt: shouldForceWorkflowPlan
+        ? getWorkflowPlanSystemPrompt(settingsManager.getDefaultProvider())
+        : undefined,
     });
     let planRegistered = false;
     let lastUsage: Record<string, unknown> | undefined;
