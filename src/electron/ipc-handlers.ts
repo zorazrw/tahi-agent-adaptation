@@ -14,7 +14,7 @@ import {
 } from "./libs/workflow-tree-utils.js";
 import { app } from "electron";
 import { join, relative, resolve, isAbsolute as pathIsAbsolute } from "path";
-import { readFileSync } from "fs";
+import { readFileSync, rmSync } from "fs";
 import { ensureMemoriesDir, readAllMemorySections, writeMemorySections, getMemoriesDir } from "./libs/memory-store.js";
 import {
   readAllFlatSkillSections,
@@ -31,7 +31,7 @@ import {
   shouldWriteSnapshotForSdkMessage,
 } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
-import { createPiSessionManager } from "./libs/pi-config.js";
+import { createPiSessionManager, getPiSessionsDir } from "./libs/pi-config.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -473,6 +473,27 @@ function emitLegacyReadonlyError(sessionId: string, action: string) {
       message: `Cannot ${action}: this is a legacy Claude-backed session. Legacy sessions remain viewable but are read-only after the Pi migration.`
     }
   });
+}
+
+/** Remove persisted Pi session artifacts on disk for a deleted session. */
+function cleanupPiSessionArtifacts(sessionId: string, session: Session | undefined): void {
+  // Remove explicit session file if tracked.
+  const piSessionFile = session?.piSessionFile?.trim();
+  if (piSessionFile) {
+    try {
+      rmSync(piSessionFile, { force: true });
+    } catch (error) {
+      console.error(`[ipc] failed deleting pi session file for ${sessionId}:`, error);
+    }
+  }
+
+  // Remove the whole per-session directory (~.../pi-agent/sessions/<sessionId>).
+  try {
+    const sessionDir = getPiSessionsDir(sessionId);
+    rmSync(sessionDir, { recursive: true, force: true });
+  } catch (error) {
+    console.error(`[ipc] failed deleting pi session dir for ${sessionId}:`, error);
+  }
 }
 
 /** Starts a task-solving LLM call for the given workflow node. */
@@ -1009,6 +1030,7 @@ export function handleClientEvent(event: ClientEvent) {
 
   if (event.type === "session.delete") {
     const sessionId = event.payload.sessionId;
+    const session = sessions.getSession(sessionId);
     const handle = runnerHandles.get(sessionId);
     if (handle) {
       handle.abort();
@@ -1020,6 +1042,7 @@ export function handleClientEvent(event: ClientEvent) {
     sessionLastVerificationNodeId.delete(sessionId);
     sessionVerifierExamplesByNodeId.delete(sessionId);
 
+    cleanupPiSessionArtifacts(sessionId, session);
     sessions.deleteSession(sessionId);
     emit({
       type: "session.deleted",
