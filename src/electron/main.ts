@@ -41,7 +41,7 @@ import {
     saveProviderApiKey,
     saveTinkerProviderConfig,
 } from "./libs/pi-config.js";
-import { resolveTinkerCheckpoint } from "./libs/tinker-provider.js";
+import { resolveTinkerCheckpoint, shutdownTinkerBridge } from "./libs/tinker-provider.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -183,6 +183,7 @@ function cleanup(): void {
     globalShortcut.unregisterAll();
     stopPolling();
     cleanupAllSessions();
+    shutdownTinkerBridge("app-shutdown");
     killViteDevServer();
 }
 
@@ -307,6 +308,7 @@ app.on("ready", () => {
     ipcMainHandle("save-agent-settings", async (_: any, settings: any) => {
         try {
             await saveAgentSettings(settings);
+            shutdownTinkerBridge("settings-changed");
             return { success: true };
         } catch (error) {
             return {
@@ -355,6 +357,7 @@ app.on("ready", () => {
     ipcMainHandle("save-tinker-provider", (_: any, config: any) => {
         try {
             saveTinkerProviderConfig(config);
+            shutdownTinkerBridge("settings-changed");
             return { success: true };
         } catch (error) {
             return {
@@ -367,6 +370,7 @@ app.on("ready", () => {
     ipcMainHandle("remove-tinker-provider", () => {
         try {
             removeTinkerProviderConfig();
+            shutdownTinkerBridge("settings-changed");
             return { success: true };
         } catch (error) {
             return {

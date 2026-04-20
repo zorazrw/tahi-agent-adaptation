@@ -31,8 +31,9 @@ import {
   shouldWriteSnapshotForSdkMessage,
 } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
-import { createPiSessionManager, getPiSessionsDir } from "./libs/pi-config.js";
+import { createPiSessionManager, getAgentSettings, getPiAgentDir, getPiSessionsDir } from "./libs/pi-config.js";
 import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
+import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
 
 /** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
 function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
@@ -546,6 +547,10 @@ function verifiersEqual(a: string[], b: string[]): boolean {
   return true;
 }
 
+function getTinkerConfigPath(): string {
+  return join(getPiAgentDir(), "tinker-provider.json");
+}
+
 async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNodeIds: string[]): Promise<void> {
   const store = initializeSessions();
   const session = store.getSession(sessionId);
@@ -878,6 +883,15 @@ export function handleClientEvent(event: ClientEvent) {
       engine: "pi"
     });
 
+    try {
+      const settings = getAgentSettings();
+      if (settings.defaultProvider === "tinker") {
+        void ensureTinkerBridgeWarm(getTinkerConfigPath());
+      }
+    } catch (error) {
+      console.error("[ipc] failed to warm tinker bridge on session start:", error);
+    }
+
     sessions.updateSession(session.id, {
       status: "running",
       lastPrompt: event.payload.prompt
@@ -1153,6 +1167,9 @@ export function handleClientEvent(event: ClientEvent) {
 
     cleanupPiSessionArtifacts(sessionId, session);
     sessions.deleteSession(sessionId);
+    if (sessions.listSessions().length === 0) {
+      shutdownTinkerBridge("session-deleted");
+    }
     emit({
       type: "session.deleted",
       payload: { sessionId }
