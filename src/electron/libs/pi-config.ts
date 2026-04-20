@@ -400,6 +400,66 @@ export function saveOpenAICompatibleProviderConfig(input: OpenAICompatibleProvid
   }
 }
 
+export type OpenAICompatibleModelsResult =
+  | { ok: true; models: string[] }
+  | { ok: false; error: string };
+
+/**
+ * Fetch `GET {baseUrl}/models` from an OpenAI-compatible endpoint and return
+ * the list of model ids. Uses the stored openai-compatible API key if one is
+ * configured and `apiKey` is not explicitly provided.
+ */
+export async function listOpenAICompatibleModels(
+  baseUrl: string,
+  apiKey?: string
+): Promise<OpenAICompatibleModelsResult> {
+  const trimmedBase = baseUrl.trim().replace(/\/+$/, "");
+  if (!trimmedBase) {
+    return { ok: false, error: "Base URL is required" };
+  }
+
+  let effectiveKey = apiKey?.trim() || undefined;
+  if (!effectiveKey) {
+    try {
+      const { authStorage } = createPiManagers(process.cwd());
+      const cred = authStorage.get(OPENAI_COMPATIBLE_PROVIDER);
+      if (cred?.type === "api_key" && cred.key) {
+        effectiveKey = cred.key;
+      }
+    } catch {
+      // ignore auth-lookup errors; we'll just try without a key
+    }
+  }
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (effectiveKey) {
+    headers.Authorization = `Bearer ${effectiveKey}`;
+  }
+
+  try {
+    const res = await fetch(`${trimmedBase}/models`, { method: "GET", headers });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return {
+        ok: false,
+        error: `HTTP ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ""}`,
+      };
+    }
+    const json = (await res.json()) as { data?: Array<{ id?: unknown }> };
+    const ids = Array.isArray(json.data)
+      ? json.data
+          .map((item) => (typeof item?.id === "string" ? item.id.trim() : ""))
+          .filter((id): id is string => Boolean(id))
+      : [];
+    return { ok: true, models: ids };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export function removeOpenAICompatibleProviderConfig(): void {
   const config = readModelsConfig();
   if (config.providers?.[OPENAI_COMPATIBLE_PROVIDER]) {

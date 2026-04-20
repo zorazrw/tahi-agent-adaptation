@@ -1,10 +1,5 @@
 # -- Mode --
-mode: opd  # "dpo", "opd", or "reinforce"
-
-# -- Model --
-model_name: Qwen/Qwen3-4B-Instruct-2507
-renderer_name: qwen3_instruct
-lora_rank: 32
+mode: reinforce  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
 temperature: 0.0
@@ -14,6 +9,7 @@ logprobs: true
 update_every_n_sessions: 1
 
 # -- Training (shared) --
+lora_rank: 32
 dry_run: false
 learning_rate: 5.0e-5
 num_epochs: 1
@@ -41,3 +37,4 @@ wandb_name: null
 # -- Proxy Server --
 proxy_host: localhost
 proxy_port: 8000
+state_path: scripts/state.json

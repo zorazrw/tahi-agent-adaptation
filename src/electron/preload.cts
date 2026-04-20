@@ -45,6 +45,8 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("save-tinker-provider", config),
     removeOpenAICompatibleProvider: () =>
         ipcInvoke("remove-openai-compatible-provider"),
+    listOpenAICompatibleModels: (baseUrl: string, apiKey?: string) =>
+        ipcInvoke("list-openai-compatible-models", baseUrl, apiKey),
     removeTinkerProvider: () =>
         ipcInvoke("remove-tinker-provider"),
     resolveTinkerCheckpoint: (tinkerPath: string, apiKey?: string, baseUrl?: string) =>
@@ -85,6 +87,17 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("save-memory-md", payload),
     saveSkillMd: (payload: { sections: { fileName: string; content: string }[]; deletedFileNames?: string[] }) =>
         ipcInvoke("save-skill-md", payload),
+    onTinkerModelUpdated: (callback: (event: TinkerModelUpdateEvent) => void) => {
+        const cb = (_: Electron.IpcRendererEvent, payload: TinkerModelUpdateEvent) => {
+            try {
+                callback(payload);
+            } catch (error) {
+                console.error("Failed to handle tinker model update:", error);
+            }
+        };
+        electron.ipcRenderer.on("tinker-model-updated", cb);
+        return () => electron.ipcRenderer.off("tinker-model-updated", cb);
+    },
 } satisfies Window['electron'])
 
 // Intercept drop events in the preload context where webUtils has direct

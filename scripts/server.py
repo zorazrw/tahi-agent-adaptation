@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import yaml
 import logging
@@ -20,7 +21,7 @@ from typing import Literal
 import uvicorn
 from openai import AsyncOpenAI
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from contextlib import asynccontextmanager
 
 import session_export_common as s
@@ -40,15 +41,74 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+TINKER_SUPPORTED_MODELS = [
+    "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-3B",
+    "meta-llama/Llama-3.1-8B",
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "meta-llama/Llama-3.1-70B",
+    "meta-llama/Llama-3.3-70B-Instruct",
+    "deepseek-ai/DeepSeek-V3.1",
+    "deepseek-ai/DeepSeek-V3.1-Base",
+    "moonshotai/Kimi-K2-Thinking",
+    "moonshotai/Kimi-K2.5",
+    "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "Qwen/Qwen3-30B-A3B",
+    "Qwen/Qwen3-30B-A3B-Base",
+    "Qwen/Qwen3-32B",
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3-8B-Base",
+    "Qwen/Qwen3-4B-Instruct-2507",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3.5-397B-A17B",
+    "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.5-27B",
+    "Qwen/Qwen3.5-4B",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+]
+
+
+TINKER_MODEL_TO_RENDERER_NAME = {
+    "meta-llama/Llama-3.2-1B": "llama3",
+    "meta-llama/Llama-3.2-3B": "llama3",
+    "meta-llama/Llama-3.1-8B": "llama3",
+    "meta-llama/Llama-3.1-8B-Instruct": "llama3",
+    "meta-llama/Llama-3.1-70B": "llama3",
+    "meta-llama/Llama-3.3-70B-Instruct": "llama3",
+    "deepseek-ai/DeepSeek-V3.1": "deepseekv3_thinking",
+    "deepseek-ai/DeepSeek-V3.1-Base": "deepseekv3_thinking",
+    "moonshotai/Kimi-K2-Thinking": "kimi_k2",
+    "moonshotai/Kimi-K2.5": "kimi_k25",
+    "Qwen/Qwen3-235B-A22B-Instruct-2507": "qwen3_instruct",
+    "Qwen/Qwen3-30B-A3B-Instruct-2507": "qwen3_instruct",
+    "Qwen/Qwen3-30B-A3B": "qwen3",
+    "Qwen/Qwen3-30B-A3B-Base": "qwen3",
+    "Qwen/Qwen3-32B": "qwen3",
+    "Qwen/Qwen3-8B": "qwen3",
+    "Qwen/Qwen3-8B-Base": "qwen3",
+    "Qwen/Qwen3-4B-Instruct-2507": "qwen3_instruct",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct": "qwen3_vl_instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3_vl_instruct",
+    "Qwen/Qwen3.5-397B-A17B": "qwen3_5",
+    "Qwen/Qwen3.5-35B-A3B": "qwen3_5",
+    "Qwen/Qwen3.5-27B": "qwen3_5",
+    "Qwen/Qwen3.5-4B": "qwen3_5",
+    "openai/gpt-oss-120b": "gpt_oss_high_reasoning",
+    "openai/gpt-oss-20b": "gpt_oss_low_reasoning",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron3",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nemotron3",
+}
+
+
 @dataclass
 class Config:
     # -- Mode --
     mode: Literal["dpo", "opd", "reinforce"] = "reinforce"
-    
-    # -- Model --
-    model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
-    renderer_name: str = "qwen3_instruct"
-    lora_rank: int = 32
     
     # -- Inference --
     temperature: float = 0.0
@@ -58,6 +118,7 @@ class Config:
     update_every_n_sessions: int = 1 # update the model after n new sessions are processed
     
     # -- Training --
+    lora_rank: int = 32
     dry_run: bool = False # skip training if enabled
     learning_rate: float = 1e-5
     num_epochs: int = 1
@@ -85,6 +146,7 @@ class Config:
     # -- Proxy Server --
     proxy_host: str = "localhost"
     proxy_port: int = 8000
+    state_path: str = "state.json"
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Config":
@@ -100,7 +162,7 @@ class Config:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    owner = app.state.owner
+    owner = app.state.owner    
     t1 = asyncio.create_task(owner._process_sessions())
     t2 = asyncio.create_task(owner._training_consumer())
     yield
@@ -111,6 +173,7 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
+    owner._save_state()
   
 
 class Server:
@@ -130,16 +193,98 @@ class Server:
         )
         
         self.config = config
-        self.model_path = config.model_name
+        
         self.sessions_queue = asyncio.Queue()
         self.training_queue = asyncio.Queue()
         self.training_event = asyncio.Event()
         self.training_lock = asyncio.Lock()
         
+        # a list of all available models
+        # format: 
+        # 1. base model
+        # 2. checkpoints: maps from a customized name to the checkpoint path
+        self.models: dict[str, str] = {}
+            
+        # initialize variables
+        self.model_path = None
+        
         # event to signal that the model is ready to be used
         self.model_ready = asyncio.Event()
         self.model_ready.set()
+        
+        # latest successful training update, pushed to clients via SSE
+        # None until the first training round completes
+        self.latest_update: dict | None = None
+        # subscribers for /v1/tinker/events; each connection owns an asyncio.Queue
+        self._update_subscribers: set[asyncio.Queue] = set()
+
+        # Restore persisted state last so it overrides the defaults above
+        # rather than being clobbered by them.
+        self._load_state()
+        
+    def _get_provider(self, model_name_suffix: str) -> str:
+        if "Llama" in model_name_suffix:
+            return "meta-llama"
+        elif "DeepSeek" in model_name_suffix:
+            return "deepseek-ai"
+        elif "Kimi" in model_name_suffix:
+            return "moonshotai"
+        elif "Qwen" in model_name_suffix:
+            return "Qwen"
+        elif "gpt" in model_name_suffix:
+            return "openai"
+        elif "NVIDIA" in model_name_suffix:
+            return "nvidia"
+        else:
+            raise ValueError(f"Unknown provider: {model_name_suffix}")
+        
+    def _get_model_renderer_name(self, model_path: str) -> str:
+        if model_path.startswith("tinker://"):
+            model_name_suffix = model_path.split("/")[-1].split("_")[2]
+            model_name = self._get_provider(model_name_suffix) + "/" + model_name_suffix
+        else:
+            model_name = model_path
+        renderer_name = TINKER_MODEL_TO_RENDERER_NAME[model_name]
+        
+        return model_name, renderer_name
+        
+    def _next_model_slug(self) -> str:
+        if self.model_path and self.model_path.startswith("tinker://"):
+            base_model_name, _ = self._get_model_renderer_name(self.model_path)
+            base_short = base_model_name.split("/")[-1]
+        elif self.model_path:
+            base_short = self.model_path.split("/")[-1]
+        else:
+            base_short = "model"
+
+        stem = f"{base_short}-{self.config.mode}"
+
+        pattern = re.compile(rf"^{re.escape(stem)}-v(\d+)$")
+        max_version = 0
+        for existing in self.models.keys():
+            m = pattern.match(existing)
+            if m:
+                max_version = max(max_version, int(m.group(1)))
+
+        slug = f"{stem}-v{max_version + 1}"
+        while slug in self.models:
+            max_version += 1
+            slug = f"{stem}-v{max_version + 1}"
+        return slug
     
+    def _broadcast_model_update(self, event: dict) -> None:
+        """Fan out a model-update event to every active SSE subscriber.
+
+        Subscribers own unbounded queues; we swallow errors so a slow/buggy
+        subscriber can't block training.
+        """
+        self.latest_update = event
+        for q in list(self._update_subscribers):
+            try:
+                q.put_nowait(event)
+            except Exception:
+                log.exception("Failed to enqueue model update for subscriber")
+
     def _build_app(self) -> FastAPI:
         app = FastAPI(title=self._TITLE, lifespan=lifespan)
         app.state.owner = self
@@ -157,7 +302,7 @@ class Server:
             trajectory = body.get("trajectory")
             
             if not isinstance(trajectory, list) or len(trajectory) == 0:
-                return HTTPException(status_code=400, content={"error": "trajectory must be a non-empty list"})
+                raise HTTPException(status_code=400, detail="trajectory must be a non-empty list")
 
             
             await self.sessions_queue.put({
@@ -170,6 +315,70 @@ class Server:
                      session_id, name, len(trajectory), self.sessions_queue.qsize())
             return {"ok": True, "session_id": session_id}
         
+        @app.get("/v1/models")
+        async def _get_models(request: Request):
+            data = []
+            for model_name in self.models.keys():
+                data.append({
+                    "id": model_name,
+                    "object": "model",
+                    "created": None,
+                    "owned_by": "agent-cowork", # TODO: update when we have a proper name for the app
+                })
+            data.sort(key=lambda x: x["id"])
+                
+            return JSONResponse({"object": "list", "data": data})
+        
+        @app.get("/v1/tinker/current")
+        async def _get_tinker_current():
+            """Return the most recent model update (or 204 if none yet).
+
+            Used by the Electron main process to reconcile on startup/reconnect.
+            """
+            if self.latest_update is None:
+                return Response(status_code=204)
+            return JSONResponse(self.latest_update)
+        
+        @app.get("/v1/tinker/events")
+        async def _stream_tinker_events(request: Request):
+            """Server-Sent Events stream of model-update notifications.
+
+            On connect we immediately emit the current latest_update (if any)
+            so late subscribers converge without needing a separate GET.
+            Heartbeat comments keep proxies/load balancers from closing the
+            connection while training is idle.
+            """
+            queue: asyncio.Queue = asyncio.Queue()
+            self._update_subscribers.add(queue)
+            log.info("SSE subscriber connected: total=%d", len(self._update_subscribers))
+
+            async def event_stream():
+                try:
+                    if self.latest_update is not None:
+                        yield f"event: model-update\ndata: {json.dumps(self.latest_update)}\n\n"
+                    while True:
+                        if await request.is_disconnected():
+                            break
+                        try:
+                            event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield ": heartbeat\n\n"
+                            continue
+                        yield f"event: model-update\ndata: {json.dumps(event)}\n\n"
+                finally:
+                    self._update_subscribers.discard(queue)
+                    log.info("SSE subscriber disconnected: total=%d", len(self._update_subscribers))
+
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
+        
         @app.post("/v1/chat/completions")
         async def _handle_chat_completions(request: Request):
             # block until the model is ready to be used
@@ -179,7 +388,16 @@ class Server:
             
             messages = body.pop("messages", [])
             stream = body.pop("stream", True)
-            _ = body.pop("model", None)
+            model_name = body.pop("model", None)
+            if model_name is None:
+                raise HTTPException(status_code=400, detail="model is required")
+            if model_name not in self.models:
+                raise HTTPException(status_code=400, detail=f"model {model_name} not found")
+            
+            # switch the model to be trained to the selected model
+            self.model_path = self.models[model_name]
+            log.info("Switching model to: %s", self.model_path)
+            
             log.info("Chat completion request: model=%s stream=%s messages=%d",
                      self.model_path, stream, len(messages))
             
@@ -188,7 +406,15 @@ class Server:
             body["logprobs"] = self.config.logprobs
             
             if stream:
-                rewrite = func_mapping.get(config.renderer_name)
+                # Derive the renderer from the resolved model, not a nonexistent
+                # config field. Falls back to pass-through if the base model has
+                # no registered rewriter.
+                try:
+                    _, renderer_name = self._get_model_renderer_name(self.model_path)
+                except Exception:
+                    log.exception("Failed to resolve renderer for %s; streaming without rewrite", self.model_path)
+                    renderer_name = None
+                rewrite = func_mapping.get(renderer_name) if renderer_name else None
                 
                 async def generate():
                     chunks = []
@@ -304,7 +530,31 @@ class Server:
                     self.model_ready.clear()
                     try:
                         log.info("Updating model path to %s", checkpoint)
-                        await asyncio.wait_for(self.update_model_path(checkpoint, timeout=600.0), timeout=600.0)
+                        await self.update_model_path(checkpoint, timeout=600.0)
+                        
+                        # update the model name to the next model slug
+                        new_model_name = self._next_model_slug()
+                        self.models[new_model_name] = checkpoint
+                        log.info("Model updated: name=%s path=%s", new_model_name, checkpoint)
+                        
+                        # Broadcast to SSE subscribers so the Electron app can
+                        # atomically rotate the Tinker provider config onto the
+                        # new slug without polling.
+                        try:
+                            base_model_name, renderer_name = self._get_model_renderer_name(checkpoint)
+                        except Exception:
+                            log.exception("Failed to resolve renderer for %s; broadcasting without renderer", checkpoint)
+                            base_model_name, renderer_name = None, None
+                        self._broadcast_model_update({
+                            "slug": new_model_name,
+                            "model_path": checkpoint,
+                            "base_model": base_model_name,
+                            "renderer_name": renderer_name,
+                            "mode": self.config.mode,
+                            "updated_at": time.time(),
+                        })
+                        self._save_state()
+                        
                     except TimeoutError:
                         log.error("Checkpoint %s never became ready, keeping previous model %s",
                                 checkpoint, prev_model)
@@ -358,23 +608,25 @@ class Server:
         return self.model_path.startswith("tinker://")
 
     def _run_dpo_training(self, items: list) -> str:
+        # TODO: improve efficiency
         train_path = self._write_sessions_file(items)
+        model_name, renderer_name = self._get_model_renderer_name(self.model_path)
         try:
             log_path = f"logs/tinker_dpo/{int(time.time())}"
             dataset_builder = DPODataBuilder(
                 train_path=train_path,
                 common_config=ChatDatasetBuilderCommonConfig(
-                    model_name_for_tokenizer=self.config.model_name,
-                    renderer_name=self.config.renderer_name,
+                    model_name_for_tokenizer=model_name,
+                    renderer_name=renderer_name,
                     max_length=None,
                     batch_size=self.config.batch_size,
                 ),
             )
             config = DPOConfig(
                 log_path=log_path,
-                model_name=self.config.model_name,
+                model_name=model_name,
                 dataset_builder=dataset_builder,
-                renderer_name=self.config.renderer_name,
+                renderer_name=renderer_name,
                 learning_rate=self.config.learning_rate,
                 lr_schedule=self.config.lr_schedule,
                 dpo_beta=self.config.dpo_beta,
@@ -392,18 +644,19 @@ class Server:
 
     def _run_opd_training(self, items: list) -> str:
         train_path = self._write_sessions_file(items)
+        model_name, renderer_name = self._get_model_renderer_name(self.model_path)
         try:
             log_path = f"logs/tinker_opd/{int(time.time())}"
-            tokenizer = get_tokenizer(self.config.model_name)
-            renderer = renderers.get_renderer(self.config.renderer_name, tokenizer=tokenizer)
+            tokenizer = get_tokenizer(model_name)
+            renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
             sdft_dataset = OPDSDFTDataset.from_json(
                 data_path=train_path,
                 renderer=renderer,
                 batch_size=self.config.batch_size,
             )
             config = OPDConfig(
-                model_name=self.config.model_name,
-                renderer_name=self.config.renderer_name,
+                model_name=model_name,
+                renderer_name=renderer_name,
                 log_path=log_path,
                 lora_rank=self.config.lora_rank,
                 learning_rate=self.config.learning_rate,
@@ -423,23 +676,24 @@ class Server:
 
     def _run_reinforce_training(self, items: list) -> str:
         train_path = self._write_sessions_file(items)
+        model_name, renderer_name = self._get_model_renderer_name(self.model_path)
         try:
             log_path = f"logs/tinker_reinforce/{int(time.time())}"
             dataset_builder = ReinforceDataBuilder(
                 train_path=train_path,
                 reward_alpha=self.config.reward_alpha,
                 common_config=ChatDatasetBuilderCommonConfig(
-                    model_name_for_tokenizer=self.config.model_name,
-                    renderer_name=self.config.renderer_name,
+                    model_name_for_tokenizer=model_name,
+                    renderer_name=renderer_name,
                     max_length=None,
                     batch_size=self.config.batch_size,
                 ),
             )
             config = ReinforceConfig(
                 log_path=log_path,
-                model_name=self.config.model_name,
+                model_name=model_name,
                 dataset_builder=dataset_builder,
-                renderer_name=self.config.renderer_name,
+                renderer_name=renderer_name,
                 learning_rate=self.config.learning_rate,
                 lr_schedule=self.config.lr_schedule,
                 num_epochs=self.config.num_epochs,
@@ -455,6 +709,46 @@ class Server:
             return self._get_checkpoint_path(log_path)
         finally:
             os.unlink(train_path)
+            
+    def _load_state(self) -> None:
+        for model_name in TINKER_SUPPORTED_MODELS:
+            self.models[model_name.split("/")[-1]] = model_name
+        if os.path.exists(self.config.state_path):
+            try:
+                with open(self.config.state_path) as f:
+                    state = json.load(f)
+                self.models.update(state.get("models", {}))
+                self.latest_update = state.get("latest_update")
+                self.model_path = state.get("model_path")
+                log.info(
+                    "Loaded state from %s: %d model slugs, model_path=%s, latest_update=%s",
+                    self.config.state_path,
+                    len(self.models),
+                    self.model_path,
+                    "present" if self.latest_update is not None else "none",
+                )
+            except Exception:
+                log.exception("Failed to load state from %s", self.config.state_path)
+    
+    def _save_state(self) -> None:
+        Path(self.config.state_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            state = {
+                "models": self.models,
+                "latest_update": self.latest_update,
+                "model_path": self.model_path,
+            }
+            with open(self.config.state_path, "w") as f:
+                json.dump(state, f)
+            log.info(
+                "Saved state to %s: %d model slugs, model_path=%s, latest_update=%s",
+                self.config.state_path,
+                len(self.models),
+                self.model_path,
+                "present" if self.latest_update is not None else "none",
+            )
+        except Exception:
+            log.exception("Failed to save state to %s", self.config.state_path)
     
     
 if __name__ == "__main__":

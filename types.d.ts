@@ -119,6 +119,19 @@ type ResolveTinkerCheckpointResult =
     | { ok: true; base_model: string }
     | { ok: false; error: string };
 
+type TinkerModelUpdateEvent = {
+    slug: string;
+    model_path: string;
+    base_model: string | null;
+    renderer_name: string | null;
+    mode: string;
+    updated_at: number;
+}
+
+type OpenAICompatibleModelsResult =
+    | { ok: true; models: string[] }
+    | { ok: false; error: string };
+
 type EventPayloadMapping = {
     statistics: Statistics;
     getStaticData: StaticData;
@@ -133,6 +146,7 @@ type EventPayloadMapping = {
     "save-openai-compatible-provider": { success: boolean; error?: string };
     "save-tinker-provider": { success: boolean; error?: string };
     "remove-openai-compatible-provider": { success: boolean; error?: string };
+    "list-openai-compatible-models": OpenAICompatibleModelsResult;
     "remove-tinker-provider": { success: boolean; error?: string };
     "resolve-tinker-checkpoint": ResolveTinkerCheckpointResult;
     "get-provider-auth-status": ProviderAuthStatus;
@@ -172,6 +186,7 @@ interface Window {
         saveOpenAICompatibleProvider: (config: OpenAICompatibleProviderInput) => Promise<{ success: boolean; error?: string }>;
         saveTinkerProvider: (config: TinkerProviderInput) => Promise<{ success: boolean; error?: string }>;
         removeOpenAICompatibleProvider: () => Promise<{ success: boolean; error?: string }>;
+        listOpenAICompatibleModels: (baseUrl: string, apiKey?: string) => Promise<OpenAICompatibleModelsResult>;
         removeTinkerProvider: () => Promise<{ success: boolean; error?: string }>;
         resolveTinkerCheckpoint: (tinkerPath: string, apiKey?: string, baseUrl?: string) => Promise<ResolveTinkerCheckpointResult>;
         getProviderAuthStatus: (provider: string) => Promise<ProviderAuthStatus>;
@@ -197,5 +212,6 @@ interface Window {
         getMemoryMd: () => Promise<{ dir: string; sections: MemorySectionDto[]; skillsDir: string; skillSections: MemorySectionDto[] }>;
         saveMemoryMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
         saveSkillMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
+        onTinkerModelUpdated: (callback: (event: TinkerModelUpdateEvent) => void) => UnsubscribeFunction;
     }
 }

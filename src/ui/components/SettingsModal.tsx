@@ -160,6 +160,10 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   const [customApiKey, setCustomApiKey] = useState("");
   const [customConfigured, setCustomConfigured] = useState(false);
   const [removingCustomProvider, setRemovingCustomProvider] = useState(false);
+  const [customEndpointModels, setCustomEndpointModels] = useState<string[]>([]);
+  const [customModelsLoading, setCustomModelsLoading] = useState(false);
+  const [customModelsError, setCustomModelsError] = useState<string | null>(null);
+  const [customModelManualEntry, setCustomModelManualEntry] = useState(false);
   const [tinkerBaseUrl, setTinkerBaseUrl] = useState("");
   const [tinkerBaseModel, setTinkerBaseModel] = useState("");
   const [tinkerModelPath, setTinkerModelPath] = useState("");
@@ -258,6 +262,30 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       .finally(() => {
         setLoading(false);
       });
+  }, []);
+
+  // Auto-sync the UI when the training proxy finishes a model update.
+  //
+  // By the time this fires, the Electron main process has already rewritten
+  // the OpenAI-compatible provider config (and, if applicable, updated the
+  // agent's default model) to point at the new slug. We just pull the fresh
+  // state so the selected model in the dropdown matches what's on disk – we
+  // do NOT force a provider switch.
+  useEffect(() => {
+    const unsubscribe = window.electron.onTinkerModelUpdated(async (event) => {
+      try {
+        const [settings, availableModels] = await Promise.all([
+          window.electron.getAgentSettings(),
+          window.electron.listAvailableModels(),
+          loadOpenAICompatibleProvider(),
+          loadTinkerProvider(),
+        ]);
+        await syncModelState(availableModels, { model: event.slug }, settings);
+      } catch (err) {
+        console.error("Failed to apply tinker model update in UI:", err);
+      }
+    });
+    return unsubscribe;
   }, []);
 
   // Sync authMethod when provider or statuses change.
@@ -419,6 +447,40 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const handleFetchCustomEndpointModels = async () => {
+    if (!customBaseUrl.trim()) {
+      setCustomModelsError("Enter a Base URL first");
+      return;
+    }
+    setCustomModelsError(null);
+    setCustomModelsLoading(true);
+    try {
+      const result = await window.electron.listOpenAICompatibleModels(
+        customBaseUrl.trim(),
+        customApiKey.trim() || undefined,
+      );
+      if (!result.ok) {
+        setCustomEndpointModels([]);
+        setCustomModelsError(result.error || "Failed to load models");
+        return;
+      }
+      setCustomEndpointModels(result.models);
+      if (result.models.length === 0) {
+        setCustomModelsError("Endpoint returned no models");
+      } else {
+        setCustomModelManualEntry(false);
+        if (!customModel.trim() || !result.models.includes(customModel.trim())) {
+          setCustomModel(result.models[0]);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to list endpoint models:", err);
+      setCustomModelsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCustomModelsLoading(false);
+    }
+  };
+
   const handleRemoveOpenAICompatibleProvider = async () => {
     setError(null);
     setRemovingCustomProvider(true);
@@ -434,6 +496,9 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       setCustomModel("");
       setCustomApiFormat("openai-completions");
       setCustomApiKey("");
+      setCustomEndpointModels([]);
+      setCustomModelsError(null);
+      setCustomModelManualEntry(false);
 
       const settings = await window.electron.getAgentSettings();
       const availableModels = await window.electron.listAvailableModels();
@@ -658,21 +723,72 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                   <input
                     type="text"
                     className={`${fieldClass} font-mono text-[13px]`}
-                    placeholder="https://your-endpoint.example.com/v1"
+                    placeholder="http://localhost:8000/v1"
                     value={customBaseUrl}
-                    onChange={(e) => setCustomBaseUrl(e.target.value)}
+                    onChange={(e) => {
+                      setCustomBaseUrl(e.target.value);
+                      setCustomEndpointModels([]);
+                      setCustomModelsError(null);
+                      setCustomModelManualEntry(false);
+                    }}
                   />
                 </label>
                 <div className="grid gap-4 md:grid-cols-2">
                   <label className="grid gap-1.5">
-                    <span className="text-xs font-medium text-muted-foreground">Model Slug</span>
-                    <input
-                      type="text"
-                      className={`${fieldClass} font-mono text-[13px]`}
-                      placeholder="gpt-4.1-mini or local-model"
-                      value={customModel}
-                      onChange={(e) => setCustomModel(e.target.value)}
-                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-muted-foreground">Model</span>
+                      <button
+                        type="button"
+                        className="text-[11px] font-medium text-primary hover:text-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={handleFetchCustomEndpointModels}
+                        disabled={customModelsLoading || !customBaseUrl.trim()}
+                      >
+                        {customModelsLoading ? "Loading..." : customEndpointModels.length > 0 ? "Refresh models" : "Load models"}
+                      </button>
+                    </div>
+                    {customEndpointModels.length > 0 && !customModelManualEntry ? (
+                      <select
+                        className={`${fieldClass} font-mono text-[13px] truncate`}
+                        title={customModel}
+                        value={customEndpointModels.includes(customModel) ? customModel : ""}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          if (value === "__manual__") {
+                            setCustomModelManualEntry(true);
+                            return;
+                          }
+                          setCustomModel(value);
+                        }}
+                      >
+                        {!customEndpointModels.includes(customModel) && (
+                          <option value="" disabled>Select a model…</option>
+                        )}
+                        {customEndpointModels.map((id) => (
+                          <option key={id} value={id}>{id}</option>
+                        ))}
+                        <option value="__manual__">Enter custom slug…</option>
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        className={`${fieldClass} font-mono text-[13px]`}
+                        placeholder="gpt-4.1-mini or local-model"
+                        value={customModel}
+                        onChange={(e) => setCustomModel(e.target.value)}
+                      />
+                    )}
+                    {customModelsError && (
+                      <span className="text-[11px] text-error">{customModelsError}</span>
+                    )}
+                    {customEndpointModels.length > 0 && customModelManualEntry && (
+                      <button
+                        type="button"
+                        className="justify-self-start text-[11px] font-medium text-muted-foreground hover:text-ink-700"
+                        onClick={() => setCustomModelManualEntry(false)}
+                      >
+                        Back to dropdown
+                      </button>
+                    )}
                   </label>
                   <label className="grid gap-1.5">
                     <span className="text-xs font-medium text-muted-foreground">API Format</span>

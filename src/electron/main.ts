@@ -32,6 +32,7 @@ import {
     getProviderAuthStatus,
     getTinkerProviderConfig,
     listAvailableModels,
+    listOpenAICompatibleModels,
     loginProvider,
     logoutProvider,
     removeOpenAICompatibleProviderConfig,
@@ -42,6 +43,7 @@ import {
     saveTinkerProviderConfig,
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint } from "./libs/tinker-provider.js";
+import { startTinkerAutoUpdateWatcher, stopTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -182,6 +184,7 @@ function cleanup(): void {
 
     globalShortcut.unregisterAll();
     stopPolling();
+    stopTinkerAutoUpdateWatcher();
     cleanupAllSessions();
     killViteDevServer();
 }
@@ -238,6 +241,7 @@ app.on("ready", () => {
     });
 
     pollResources(mainWindow);
+    startTinkerAutoUpdateWatcher();
 
     ipcMainHandle("getStaticData", () => {
         return getStaticData();
@@ -336,6 +340,17 @@ app.on("ready", () => {
             return {
                 success: false,
                 error: error instanceof Error ? error.message : String(error)
+            };
+        }
+    });
+
+    ipcMainHandle("list-openai-compatible-models", async (_: any, baseUrl: string, apiKey?: string) => {
+        try {
+            return await listOpenAICompatibleModels(baseUrl, apiKey);
+        } catch (error) {
+            return {
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
             };
         }
     });
