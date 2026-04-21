@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { ClientEvent } from "../types";
+import type { ClientEvent, PredictedUserActionSuggestion } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
@@ -24,6 +24,9 @@ interface PromptInputProps {
   onSendMessage?: () => void;
   disabled?: boolean;
   rightOffset?: string;
+  predictedSuggestion?: PredictedUserActionSuggestion | null;
+  isPredictingSuggestion?: boolean;
+  onClearPredictedSuggestion?: () => void;
 }
 
 export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
@@ -96,7 +99,15 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   return { prompt, setPrompt, isRunning, handleSend, handleStop, handleStartFromModal };
 }
 
-export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightOffset }: PromptInputProps) {
+export function PromptInput({
+  sendEvent,
+  onSendMessage,
+  disabled = false,
+  rightOffset,
+  predictedSuggestion,
+  isPredictingSuggestion = false,
+  onClearPredictedSuggestion,
+}: PromptInputProps) {
   const { prompt, setPrompt, isRunning, handleSend, handleStop } = usePromptActions(sendEvent);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -130,7 +141,44 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
     selectedNode.status !== "running"
   );
 
+  const canSendPredictedSuggestion = Boolean(
+    predictedSuggestion &&
+    predictedSuggestion.actionType === "message" &&
+    predictedSuggestion.draftText.trim() &&
+    !isRunning &&
+    !disabled &&
+    !prompt.trim()
+  );
+
+  const sendPredictedSuggestion = useCallback(() => {
+    if (!predictedSuggestion || predictedSuggestion.actionType !== "message") return;
+    const draftText = predictedSuggestion.draftText.trim();
+    if (!draftText) return;
+    if (!activeSessionId) return;
+    onSendMessage?.();
+    sendEvent({
+      type: "session.continue",
+      payload: {
+        sessionId: activeSessionId,
+        prompt: draftText,
+        ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
+      },
+    });
+    setPrompt("");
+    onClearPredictedSuggestion?.();
+  }, [activeSessionId, onClearPredictedSuggestion, onSendMessage, predictedSuggestion, selectedNodeId, sendEvent, setPrompt]);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape" && predictedSuggestion) {
+      e.preventDefault();
+      onClearPredictedSuggestion?.();
+      return;
+    }
+    if (e.key === "Tab" && canSendPredictedSuggestion) {
+      e.preventDefault();
+      sendPredictedSuggestion();
+      return;
+    }
     // Tab to start next pending step
     if (e.key === "Tab" && hasPendingNode && selectedNodeId && !prompt.trim()) {
       e.preventDefault();
@@ -184,7 +232,59 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
 
   return (
     <section className={`fixed bottom-0 left-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 lg:pb-8 pt-8 lg:ml-[var(--sidebar-width)] ${rightOffset ? "px-4" : "px-2"}`} style={{ right: rightOffset ?? 0 }}>
-      <div className={`mx-auto flex w-full max-w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-white px-4 py-3 shadow-card transition-[border-color,box-shadow] duration-150 ease-out focus-within:border-ink-900/25 focus-within:shadow-[0_4px_16px_rgba(0,0,0,0.08),0_0_0_3px_rgba(217,119,87,0.08)] ${rightOffset ? "" : "lg:max-w-3xl"}`}>
+      <div className={`mx-auto flex w-full max-w-full flex-col gap-2 ${rightOffset ? "" : "lg:max-w-3xl"}`}>
+        {(predictedSuggestion || isPredictingSuggestion) && (
+          <div className="rounded-2xl border border-ink-900/10 bg-white/95 px-4 py-3 shadow-card">
+            {isPredictingSuggestion && !predictedSuggestion ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                  <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+                </svg>
+                <span>Generating next action suggestion…</span>
+              </div>
+            ) : predictedSuggestion ? (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-primary/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-primary">
+                      {predictedSuggestion.actionType}
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">
+                      {(predictedSuggestion.confidence * 100).toFixed(0)}% confidence
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {canSendPredictedSuggestion && (
+                      <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <kbd className="inline-flex items-center rounded border border-ink-900/15 bg-ink-900/5 px-1.5 py-0.5 font-medium leading-none">TAB</kbd>
+                        send suggestion
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => onClearPredictedSuggestion?.()}
+                      className="text-[11px] text-muted-foreground hover:text-ink-800"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+                {predictedSuggestion.draftText && (
+                  <div className="rounded-xl border border-ink-900/8 bg-surface-secondary px-3 py-2 text-sm text-ink-800">
+                    {predictedSuggestion.draftText}
+                  </div>
+                )}
+                {predictedSuggestion.rationale && (
+                  <div className="text-xs text-muted-foreground line-clamp-3">
+                    {predictedSuggestion.rationale}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        )}
+        <div className="flex w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-white px-4 py-3 shadow-card transition-[border-color,box-shadow] duration-150 ease-out focus-within:border-ink-900/25 focus-within:shadow-[0_4px_16px_rgba(0,0,0,0.08),0_0_0_3px_rgba(217,119,87,0.08)]">
         <div className="flex-1 relative">
           <textarea
             rows={1}
@@ -197,7 +297,7 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
             ref={promptRef}
             disabled={disabled && !isRunning}
           />
-          {hasPendingNode && !prompt.trim() && (
+          {hasPendingNode && !prompt.trim() && !canSendPredictedSuggestion && (
             <div className="absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
               <kbd className="inline-flex items-center rounded border border-ink-900/15 bg-ink-900/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground leading-none">TAB</kbd>
               <span className="text-xs text-muted-foreground whitespace-nowrap">to start next step</span>
@@ -216,6 +316,7 @@ export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightO
             <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true"><path d="M3.4 20.6 21 12 3.4 3.4l2.8 7.2L16 12l-9.8 1.4-2.8 7.2Z" fill="currentColor" /></svg>
           )}
         </button>
+        </div>
       </div>
     </section>
   );

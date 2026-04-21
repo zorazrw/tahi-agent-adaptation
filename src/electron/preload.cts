@@ -25,6 +25,8 @@ electron.contextBridge.exposeInMainWorld("electron", {
     },
     generateSessionTitle: (userInput: string | null) => 
         ipcInvoke("generate-session-title", userInput),
+    predictNextUserAction: (sessionId: string) =>
+        ipcInvoke("predict-next-user-action", sessionId),
     getRecentCwds: (limit?: number) => 
         ipcInvoke("get-recent-cwds", limit),
     selectDirectory: () => 

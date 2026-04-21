@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
-import type { AppPermissionResult, ServerEvent } from "./types";
+import type { AppPermissionResult, PredictedUserActionSuggestion, ServerEvent } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
@@ -75,6 +75,8 @@ function App() {
   const shouldRestoreScrollRef = useRef(false);
   const [showPromptInspector, setShowPromptInspector] = useState(false);
   const [showMemoryModal, setShowMemoryModal] = useState(false);
+  const [predictedSuggestion, setPredictedSuggestion] = useState<PredictedUserActionSuggestion | null>(null);
+  const [isPredictingSuggestion, setIsPredictingSuggestion] = useState(false);
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -260,10 +262,52 @@ function App() {
     setHasNewMessages(false);
     prevMessagesLengthRef.current = 0;
     animatedIndicesRef.current = new Set();
+    setPredictedSuggestion(null);
+    setIsPredictingSuggestion(false);
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, 100);
   }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSession || activeSession.status === "running" || messages.length === 0) {
+      setIsPredictingSuggestion(false);
+      if (!activeSessionId || !activeSession || activeSession.status === "running") {
+        setPredictedSuggestion(null);
+      }
+      return;
+    }
+
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage || lastMessage.type === "user_prompt") {
+      setIsPredictingSuggestion(false);
+      setPredictedSuggestion(null);
+      return;
+    }
+
+    let cancelled = false;
+    setIsPredictingSuggestion(true);
+
+    window.electron.predictNextUserAction(activeSessionId)
+      .then((suggestion) => {
+        if (cancelled) return;
+        setPredictedSuggestion(suggestion);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Failed to predict next user action:", error);
+        setPredictedSuggestion(null);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsPredictingSuggestion(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSession, activeSessionId, messages]);
 
   // Track new finalized messages for badge / auto-scroll
   useEffect(() => {
@@ -311,6 +355,7 @@ function App() {
   const handleSendMessage = useCallback(() => {
     setShouldAutoScroll(true);
     setHasNewMessages(false);
+    setPredictedSuggestion(null);
     resetToLatest();
   }, [resetToLatest]);
 
@@ -585,6 +630,9 @@ function App() {
           onSendMessage={handleSendMessage}
           disabled={visibleMessages.length === 0}
           rightOffset={undefined}
+          predictedSuggestion={predictedSuggestion}
+          isPredictingSuggestion={isPredictingSuggestion}
+          onClearPredictedSuggestion={() => setPredictedSuggestion(null)}
         />
         </>
         )}
