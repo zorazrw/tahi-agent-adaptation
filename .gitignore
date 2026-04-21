@@ -37,3 +37,6 @@ trash/*
 
 # Local Tinker bridge environment
 tinker-bridge/.venv/
+
+# Local user profile for prediction experiments
+USER_PROFILE.md
