@@ -43,6 +43,12 @@ import {
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint, shutdownTinkerBridge } from "./libs/tinker-provider.js";
 import { defaultRecordingsZipName, exportRecordingsBundleToZip } from "./libs/recording-bundle.js";
+import {
+    buildTranscriptFromStreamMessages,
+    buildWorkflowSummaryFromTree,
+    resolveAppUserProfileMarkdown,
+    predictNextUserAction,
+} from "./libs/user-predict.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -253,6 +259,36 @@ app.on("ready", () => {
     // Handle session title generation
     ipcMainHandle("generate-session-title", async (_: any, userInput: string | null) => {
         return await generateSessionTitle(userInput);
+    });
+
+    ipcMainHandle("predict-next-user-action", async (_: any, sessionId: string) => {
+        try {
+            const history = sessions.getSessionHistory(sessionId);
+            if (!history) {
+                return null;
+            }
+            const cwd = history.session.cwd ?? process.cwd();
+            const { profileMarkdown, profilePath } = resolveAppUserProfileMarkdown(cwd);
+            if (!profileMarkdown.trim()) {
+                return null;
+            }
+
+            const suggestion = await predictNextUserAction({
+                cwd,
+                userProfileMarkdown: profileMarkdown,
+                transcript: buildTranscriptFromStreamMessages(history.messages, 14),
+                workflowSummary: buildWorkflowSummaryFromTree(history.session.workflowTree),
+                sessionTitle: history.session.title,
+            });
+
+            return {
+                ...suggestion,
+                profilePath,
+            };
+        } catch (error) {
+            console.error("Failed to predict next user action:", error);
+            return null;
+        }
     });
 
     // Handle recent cwds request

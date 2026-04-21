@@ -115,6 +115,23 @@ type ProviderAuthStatus = {
     oauthName?: string;
 }
 
+type PredictedUserActionType =
+    | "message"
+    | "edit_workflow"
+    | "edit_verifier"
+    | "file_edit"
+    | "brain_edit"
+    | "unknown";
+
+type PredictedUserActionSuggestion = {
+    actionType: PredictedUserActionType;
+    draftText: string;
+    confidence: number;
+    rationale: string;
+    rawResponse?: string;
+    profilePath?: string;
+}
+
 type ResolveTinkerCheckpointResult =
     | { ok: true; base_model: string }
     | { ok: false; error: string };
@@ -123,6 +140,7 @@ type EventPayloadMapping = {
     statistics: Statistics;
     getStaticData: StaticData;
     "generate-session-title": string;
+    "predict-next-user-action": PredictedUserActionSuggestion | null;
     "get-recent-cwds": string[];
     "select-directory": string | null;
     "get-agent-settings": AgentSettings;
@@ -165,6 +183,7 @@ interface Window {
         sendClientEvent: (event: any) => void;
         onServerEvent: (callback: (event: any) => void) => UnsubscribeFunction;
         generateSessionTitle: (userInput: string | null) => Promise<string>;
+        predictNextUserAction: (sessionId: string) => Promise<PredictedUserActionSuggestion | null>;
         getRecentCwds: (limit?: number) => Promise<string[]>;
         selectDirectory: () => Promise<string | null>;
         getAgentSettings: () => Promise<AgentSettings>;
