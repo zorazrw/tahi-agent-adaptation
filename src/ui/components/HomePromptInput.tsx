@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClientEvent } from "../types";
 import { useAppStore } from "../store/useAppStore";
+import { PredictionAssistOverrideControl } from "./PredictionAssistOverrideControl";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 8;
@@ -289,6 +290,8 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
           </button>
 
           <div className="flex-1" />
+
+          <PredictionAssistOverrideControl compact />
 
           {/* Send button */}
           <button

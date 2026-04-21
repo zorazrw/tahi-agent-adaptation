@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useAppStore } from "../store/useAppStore";
-import type { WorkflowRunMode } from "../store/useAppStore";
+import type { PredictionAssistMode, WorkflowRunMode } from "../store/useAppStore";
 import { Spinner } from "./Spinner";
 import type {
   AvailableModel,
@@ -18,6 +18,8 @@ type Tab = "api" | "workflow" | "skills";
 function WorkflowPanel() {
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
   const setWorkflowRunMode = useAppStore((s) => s.setWorkflowRunMode);
+  const predictionAssistMode = useAppStore((s) => s.predictionAssistMode);
+  const setPredictionAssistMode = useAppStore((s) => s.setPredictionAssistMode);
 
   const row = (mode: WorkflowRunMode, title: string, description: string) => (
     <label
@@ -40,22 +42,80 @@ function WorkflowPanel() {
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-muted-foreground leading-relaxed">
-        Controls how the app advances through the workflow tree after a step completes successfully.
-      </p>
-      <div className="space-y-2">
-        {row(
-          "manual",
-          "Wait",
-          "Pause after each step. Start the next step yourself with Run in the sidebar."
-        )}
-        {row(
-          "auto",
-          "Auto",
-          "Automatically start the next incomplete step until every step in the plan is finished (default for new installs)."
-        )}
+      <div className="space-y-3">
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Controls how the app advances through the workflow tree after a step completes successfully.
+        </p>
+        <div className="space-y-2">
+          {row(
+            "manual",
+            "Wait",
+            "Pause after each step. Start the next step yourself with Run in the sidebar."
+          )}
+          {row(
+            "auto",
+            "Auto",
+            "Automatically start the next incomplete step until every step in the plan is finished (default for new installs)."
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-3 pt-3 border-t border-ink-900/8">
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Controls whether the app predicts the next user prompt after an agent turn and what happens to that prediction.
+        </p>
+        <div className="space-y-2">
+          {predictionRow(
+            predictionAssistMode,
+            setPredictionAssistMode,
+            "off",
+            "Default",
+            "Do not show or auto-send next-prompt suggestions."
+          )}
+          {predictionRow(
+            predictionAssistMode,
+            setPredictionAssistMode,
+            "suggestion",
+            "Suggestion",
+            "Show the predicted next prompt above the input and let Tab send it."
+          )}
+          {predictionRow(
+            predictionAssistMode,
+            setPredictionAssistMode,
+            "autofill",
+            "Autofill",
+            "When a message suggestion is available, automatically accept and send it once for that agent turn."
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+function predictionRow(
+  current: PredictionAssistMode,
+  setMode: (mode: PredictionAssistMode) => void,
+  mode: PredictionAssistMode,
+  title: string,
+  description: string
+) {
+  return (
+    <label
+      key={mode}
+      className="flex cursor-pointer gap-3 rounded-xl border border-ink-900/10 bg-surface p-4 hover:border-ink-900/20 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary/30"
+    >
+      <input
+        type="radio"
+        name="predictionAssistMode"
+        className="mt-1 border-ink-900/20 text-primary focus:ring-primary/30"
+        checked={current === mode}
+        onChange={() => setMode(mode)}
+      />
+      <div>
+        <div className="text-sm font-medium text-ink-800">{title}</div>
+        <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{description}</p>
+      </div>
+    </label>
   );
 }
 
