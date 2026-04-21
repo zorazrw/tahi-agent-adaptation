@@ -77,6 +77,7 @@ function App() {
   const [showMemoryModal, setShowMemoryModal] = useState(false);
   const [predictedSuggestion, setPredictedSuggestion] = useState<PredictedUserActionSuggestion | null>(null);
   const [isPredictingSuggestion, setIsPredictingSuggestion] = useState(false);
+  const [lastAutofillKey, setLastAutofillKey] = useState<string | null>(null);
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -95,6 +96,10 @@ function App() {
   const previewPanelOpen = useAppStore((s) => s.previewPanelOpen);
   const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
   const contextInductionDepth = useAppStore((s) => s.contextInductionDepth);
+  const predictionAssistMode = useAppStore((s) => s.predictionAssistMode);
+  const predictionAssistOverride = useAppStore((s) => s.predictionAssistOverride);
+  const effectivePredictionAssistMode =
+    predictionAssistOverride === "default" ? predictionAssistMode : predictionAssistOverride;
 
   // Helper function to extract partial message content
   const getPartialMessageContent = (eventMessage: any) => {
@@ -264,12 +269,18 @@ function App() {
     animatedIndicesRef.current = new Set();
     setPredictedSuggestion(null);
     setIsPredictingSuggestion(false);
+    setLastAutofillKey(null);
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, 100);
   }, [activeSessionId]);
 
   useEffect(() => {
+    if (effectivePredictionAssistMode === "off") {
+      setIsPredictingSuggestion(false);
+      setPredictedSuggestion(null);
+      return;
+    }
     if (!activeSessionId || !activeSession || activeSession.status === "running" || messages.length === 0) {
       setIsPredictingSuggestion(false);
       if (!activeSessionId || !activeSession || activeSession.status === "running") {
@@ -307,7 +318,40 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeSession, activeSessionId, messages]);
+  }, [activeSession, activeSessionId, effectivePredictionAssistMode, messages]);
+
+  useEffect(() => {
+    if (effectivePredictionAssistMode !== "autofill") return;
+    if (!predictedSuggestion || predictedSuggestion.actionType !== "message") return;
+    if (!predictedSuggestion.draftText.trim()) return;
+    if (!activeSessionId || !activeSession || activeSession.status === "running") return;
+    const sourceKey = `${activeSessionId}:${messages.length}:${predictedSuggestion.actionType}:${predictedSuggestion.draftText}`;
+    if (lastAutofillKey === sourceKey) return;
+
+    setLastAutofillKey(sourceKey);
+    setPredictedSuggestion(null);
+    setShouldAutoScroll(true);
+    setHasNewMessages(false);
+    resetToLatest();
+    sendEvent({
+      type: "session.continue",
+      payload: {
+        sessionId: activeSessionId,
+        prompt: predictedSuggestion.draftText.trim(),
+        ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
+      },
+    });
+  }, [
+    activeSession,
+    activeSessionId,
+    lastAutofillKey,
+    messages.length,
+    predictedSuggestion,
+    effectivePredictionAssistMode,
+    resetToLatest,
+    selectedNodeId,
+    sendEvent,
+  ]);
 
   // Track new finalized messages for badge / auto-scroll
   useEffect(() => {
@@ -630,7 +674,7 @@ function App() {
           onSendMessage={handleSendMessage}
           disabled={visibleMessages.length === 0}
           rightOffset={undefined}
-          predictedSuggestion={predictedSuggestion}
+          predictedSuggestion={effectivePredictionAssistMode === "off" ? null : predictedSuggestion}
           isPredictingSuggestion={isPredictingSuggestion}
           onClearPredictedSuggestion={() => setPredictedSuggestion(null)}
         />
