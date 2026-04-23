@@ -6,6 +6,18 @@ const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 21;
 const MAX_HEIGHT = MAX_ROWS * LINE_HEIGHT;
+const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
+
+function readStoredAutoInduction(): boolean {
+  try {
+    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
+    if (v === "false") return false;
+    if (v === "true") return true;
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
 
 function fileTypeLabel(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -112,6 +124,7 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
         prompt: fileRefs + prompt,
         cwd: sessionCwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
+        autoContextInduction: readStoredAutoInduction(),
       },
     });
     setPrompt("");

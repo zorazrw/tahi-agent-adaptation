@@ -292,7 +292,7 @@ function runPostSolverExport(sessionId: string, _nodeId: string): void {
 
   const treeAfter = session.workflowTree;
   const planFullyDone = Boolean(treeAfter?.length && treeAfter.every(isNodeFullyComplete));
-  if (planFullyDone) {
+  if (planFullyDone && session.autoContextInduction) {
     runFullSessionExportAndExtract(sessionId);
   }
 }
@@ -880,7 +880,8 @@ export function handleClientEvent(event: ClientEvent) {
       title: event.payload.title,
       allowedTools: event.payload.allowedTools,
       prompt: event.payload.prompt,
-      engine: "pi"
+      engine: "pi",
+      autoContextInduction: event.payload.autoContextInduction,
     });
 
     try {
