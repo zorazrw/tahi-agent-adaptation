@@ -14,6 +14,18 @@ interface SettingsModalProps {
 }
 
 type Tab = "api" | "workflow" | "skills";
+const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
+
+function readStoredAutoInduction(): boolean {
+  try {
+    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
+    if (v === "false") return false;
+    if (v === "true") return true;
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
 
 function WorkflowPanel() {
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
@@ -984,6 +996,15 @@ function SkillsPanel() {
   const [skillContent, setSkillContent] = useState<string | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
+  const [autoContextInduction, setAutoContextInduction] = useState<boolean>(readStoredAutoInduction);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(AUTO_INDUCTION_KEY, autoContextInduction ? "true" : "false");
+    } catch {
+      /* ignore */
+    }
+  }, [autoContextInduction]);
 
   useEffect(() => {
     window.electron.listSkills().then((result) => {
@@ -1032,6 +1053,24 @@ function SkillsPanel() {
 
   return (
     <>
+      <div className="mb-4 rounded-xl border border-ink-900/10 bg-surface px-4 py-3">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 accent-primary"
+            checked={autoContextInduction}
+            onChange={(e) => setAutoContextInduction(e.target.checked)}
+          />
+          <div>
+            <div className="text-sm font-medium text-ink-800">Auto-generate memory and skill</div>
+            <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+              When enabled, the app runs context induction at workflow completion to generate new memory/skill entries.
+              When disabled, no automatic generation runs during task sessions.
+            </p>
+          </div>
+        </label>
+      </div>
+
       <div className="flex items-center justify-between mb-4">
         <p className="text-sm text-muted-foreground">Manage installed skills.</p>
         <button

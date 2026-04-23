@@ -1074,7 +1074,8 @@ export function handleClientEvent(event: ClientEvent) {
         type: "stream.message",
         payload: { sessionId, message: { type: "edit_workflow" } },
       });
-    } else if (sessAfter && verEdit) {
+    }
+    if (sessAfter && verEdit) {
       const rowId = sessions.recordMessage(sessionId, { type: "edit_verifier" });
       sessions.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sessAfter));
       broadcast({
