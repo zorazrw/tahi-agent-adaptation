@@ -99,4 +99,17 @@ bash tinker_opd.sh
 # REINFORCE
 python export_reinforce_data.py out.json -o out_reinforce.json
 bash tinker_reinforce.sh
+
+# Score a redo session's final outputs against final verifiers from baseline export
+python score_redo_against_verifiers.py \
+  --verifiers-json out.json \
+  --outputs-json out_redo.json \
+  --task task2
+
+# Optional: print full request blocks (text + image metadata) before model call
+python score_redo_against_verifiers.py \
+  --verifiers-json out.json \
+  --outputs-json out_redo.json \
+  --task task2 \
+  --debug-prompts
 ```

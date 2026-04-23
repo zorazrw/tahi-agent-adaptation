@@ -1031,7 +1031,7 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
-        if m.get("type") == "edit_workflow":
+        if m.get("type") in ("edit_workflow", "edit_plan"):
             wo_e = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_e = mem_timeline[idx] if idx < len(mem_timeline) else {}
             s_e = sk_timeline[idx] if idx < len(sk_timeline) else {}
@@ -1302,7 +1302,7 @@ def normalize_legacy_message(msg: dict) -> dict:
     """Normalize a stored StreamMessage for JSON output (agent turn vs user message)."""
     if msg.get("type") == "user_prompt":
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
-    if msg.get("type") == "edit_workflow":
+    if msg.get("type") in ("edit_workflow", "edit_plan"):
         return {"role": "user", "type": "edit_workflow"}
     if msg.get("type") == "edit_verifier":
         return {"role": "user", "type": "edit_verifier"}
@@ -1348,8 +1348,17 @@ def _is_export_noise_message(msg: dict) -> bool:
 
 def normalize_pi_message(msg: dict) -> dict:
     msg_type = msg.get("type")
+    role = msg.get("role")
     if msg_type == "user_prompt":
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
+    if msg_type in ("edit_workflow", "edit_plan"):
+        return {"role": "user", "type": "edit_workflow"}
+    if msg_type == "edit_verifier":
+        return {"role": "user", "type": "edit_verifier"}
+    if msg_type == "file_edit":
+        return {"role": "user", "type": "file_edit", "path": msg.get("path", "")}
+    if msg_type == "brain_edit":
+        return {"role": "user", "type": "brain_edit"}
     if msg_type == "node_completed":
         return {"role": "agent", "type": "node_completed", "raw": msg}
     if msg_type == "verifier_label":
@@ -1361,7 +1370,9 @@ def normalize_pi_message(msg: dict) -> dict:
         }
     if msg_type in ("system_init", "assistant", "tool_result", "run_result"):
         return {"role": "agent", "type": msg_type, "raw": msg}
-    return {"role": "agent", "raw": msg}
+    if role == "user":
+        return {"role": "user", "type": msg_type, "raw": msg}
+    return {"role": "agent", "type": msg_type, "raw": msg}
 
 
 def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:

@@ -66,6 +66,9 @@ class Config:
     # REINFORCE-specific
     reward_alpha: float = 0.05
     initial_baseline: float = 0.0
+    # EMA baseline update rate in [0, 1]. 1.0 reproduces previous behavior:
+    # baseline <- current batch mean reward.
+    baseline_ema_beta: float = 0.1
 
     # Infrastructure
     num_replicas: int = 8
@@ -231,8 +234,8 @@ def do_update(
 ) -> tuple[dict[str, int | float | str], float]:
     """Perform a single REINFORCE training step.
 
-    Returns ``(metrics, new_baseline)`` where *new_baseline* is the mean
-    reward of the current batch (used as the baseline for the next step).
+    Returns ``(metrics, new_baseline)`` where *new_baseline* is the EMA
+    baseline updated from the current batch mean reward.
     """
     step = epoch_idx * n_batches + batch_idx
     metrics: dict[str, int | float | str] = {"epoch": epoch_idx}
@@ -290,8 +293,11 @@ def do_update(
             reinforce_metrics = backward_result.metrics
             training_client.optim_step(adam_params).result()
 
-        # Update baseline to the mean reward of this batch
-        new_baseline = sum(rewards) / len(rewards) if rewards else baseline
+        # Update running baseline with EMA:
+        #   b_t <- (1 - beta) * b_{t-1} + beta * mean_reward_t
+        batch_mean_reward = sum(rewards) / len(rewards) if rewards else baseline
+        beta = config.baseline_ema_beta
+        new_baseline = (1.0 - beta) * baseline + beta * batch_mean_reward
 
         metrics.update(
             num_trajectories=len(data),
@@ -299,7 +305,9 @@ def do_update(
             learning_rate=learning_rate,
             progress=step / total_steps,
             baseline=new_baseline,
-            mean_reward=sum(rewards) / len(rewards) if rewards else 0.0,
+            baseline_prev=baseline,
+            baseline_beta=beta,
+            mean_reward=batch_mean_reward if rewards else 0.0,
             **reinforce_metrics,
         )
 
@@ -370,6 +378,8 @@ def main(config: Config):
         f"Training for {n_batches} batches x {config.num_epochs} epochs = "
         f"{n_batches * config.num_epochs} steps"
     )
+    if not (0.0 <= config.baseline_ema_beta <= 1.0):
+        raise ValueError(f"baseline_ema_beta must be in [0, 1], got {config.baseline_ema_beta}")
 
     # Initialize running baseline
     baseline = _load_baseline_state(config.log_path, resume_info)
@@ -462,6 +472,12 @@ if __name__ == "__main__":
     parser.add_argument("--reward-alpha", type=float, default=0.05)
     parser.add_argument("--initial-baseline", type=float, default=0.0)
     parser.add_argument(
+        "--baseline-ema-beta",
+        type=float,
+        default=0.1,
+        help="EMA rate for baseline update in [0,1]; 1.0 matches old per-batch baseline",
+    )
+    parser.add_argument(
         "--num-epochs",
         "--epochs",
         type=int,
@@ -496,6 +512,7 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         reward_alpha=args.reward_alpha,
         initial_baseline=args.initial_baseline,
+        baseline_ema_beta=args.baseline_ema_beta,
         num_epochs=args.num_epochs,
         lora_rank=args.lora_rank,
         load_checkpoint_path=args.load_checkpoint_path,
