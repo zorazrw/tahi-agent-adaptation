@@ -72,6 +72,7 @@ Usage:
 """
 
 import argparse
+import base64
 import copy
 import json
 import os
@@ -158,21 +159,26 @@ def build_workflow_steps(
     return result
 
 
-def _read_text_limited(abs_path: Path, max_bytes: int) -> Tuple[Optional[str], Optional[str]]:
-    """Read up to max_bytes of UTF-8 text. Returns (text, error_message)."""
+def _read_file_content_limited(
+    abs_path: Path, max_bytes: int
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Read up to ``max_bytes`` and return (content, content_encoding, error_message)."""
     try:
         if not abs_path.is_file():
-            return None, "not_a_file"
+            return None, None, "not_a_file"
         with abs_path.open("rb") as f:
             raw = f.read(max_bytes + 1)
         truncated = len(raw) > max_bytes
         chunk = raw[:max_bytes]
-        text = chunk.decode("utf-8", errors="replace")
-        if truncated:
-            text += "\n[... export truncated: file larger than max bytes ...]"
-        return text, None
+        try:
+            text = chunk.decode("utf-8", errors="strict")
+            if truncated:
+                text += "\n[... export truncated: file larger than max bytes ...]"
+            return text, "utf8", None
+        except UnicodeDecodeError:
+            return base64.b64encode(chunk).decode("ascii"), "base64", None
     except OSError as e:
-        return None, str(e)
+        return None, None, str(e)
 
 
 def _collect_original_outputs_map(tree: Any) -> Dict[str, str]:
@@ -232,17 +238,18 @@ def _build_output_file_entries(
     base = Path(cwd).expanduser() if cwd else None
     entries: List[dict] = []
     for rel in rel_paths:
-        item: dict = {"path": rel, "content": None, "content_source": None, "error": None}
+        item: dict = {"path": rel, "content": None, "content_source": None, "content_encoding": None, "error": None}
         read_ok = False
         rel_path = Path(str(rel).strip()).expanduser() if rel else None
         if rel_path is not None and rel_path.is_absolute():
             try:
                 abs_p = rel_path.resolve()
                 if abs_p.is_file():
-                    text, err = _read_text_limited(abs_p, max_bytes)
-                    if text is not None:
-                        item["content"] = text
+                    content, content_encoding, err = _read_file_content_limited(abs_p, max_bytes)
+                    if content is not None:
+                        item["content"] = content
                         item["content_source"] = "filesystem"
+                        item["content_encoding"] = content_encoding
                         read_ok = True
                     elif err:
                         item["error"] = err
@@ -255,10 +262,11 @@ def _build_output_file_entries(
                 abs_p = (base / rel).resolve()
                 base_r = base.resolve()
                 if os.path.commonpath([str(base_r), str(abs_p)]) == str(base_r):
-                    text, err = _read_text_limited(abs_p, max_bytes)
-                    if text is not None:
-                        item["content"] = text
+                    content, content_encoding, err = _read_file_content_limited(abs_p, max_bytes)
+                    if content is not None:
+                        item["content"] = content
                         item["content_source"] = "filesystem"
+                        item["content_encoding"] = content_encoding
                         read_ok = True
                     elif err:
                         item["error"] = err
@@ -267,6 +275,7 @@ def _build_output_file_entries(
         if not read_ok and rel in originals:
             item["content"] = originals[rel]
             item["content_source"] = "originalOutputs"
+            item["content_encoding"] = "utf8"
             item["error"] = None
         elif not read_ok and item["content"] is None and item["error"] is None:
             item["error"] = "no_cwd_or_missing_file" if base is None else "missing_or_unreadable"
@@ -738,7 +747,7 @@ def _files_realigned_to_workflow(prior_files: Any, target_wf: list, cwd: Optiona
             row["path"] = p
             out.append(row)
         else:
-            out.append({"path": p, "content": None, "content_source": None, "error": None})
+            out.append({"path": p, "content": None, "content_source": None, "content_encoding": None, "error": None})
     return out
 
 
