@@ -525,6 +525,7 @@ class Config:
     wandb_name: str | None = None
     load_checkpoint_path: str | None = None
     max_steps: int | None = None
+    epochs: int = 1
 
     enable_trace: bool = False
     span_chart_every: int = 0
@@ -609,10 +610,10 @@ async def main(
     assert cfg.renderer_name is not None, "renderer_name must be set (resolve before calling main)"
     renderer = renderers.get_renderer(cfg.renderer_name, tokenizer=tokenizer)
 
-    num_batches = len(sdft_dataset)
+    num_batches = len(sdft_dataset) * max(1, cfg.epochs)
     if cfg.max_steps is not None:
         num_batches = min(cfg.max_steps, num_batches)
-    logger.info(f"Will train on {num_batches} batches")
+    logger.info(f"Will train on {num_batches} batches (epochs={max(1, cfg.epochs)})")
 
     # Evaluators
     evaluators: list[SamplingClientEvaluator] = [e() for e in cfg.evaluator_builders]
@@ -819,6 +820,7 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-project", default=None)
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=1, help="Number of full passes over the dataset")
     parser.add_argument("--eval-every", type=int, default=20)
     parser.add_argument("--save-every", type=int, default=20)
     args = parser.parse_args()
@@ -848,6 +850,7 @@ if __name__ == "__main__":
         wandb_project=args.wandb_project,
         wandb_name=args.wandb_name,
         max_steps=args.max_steps,
+        epochs=args.epochs,
         eval_every=args.eval_every,
         save_every=args.save_every,
     )

@@ -60,6 +60,7 @@ class Config:
     # Training
     learning_rate: float = 1e-5
     lr_schedule: LRSchedule = "linear"
+    # Number of full passes over the dataset (CLI: ``--num-epochs`` or ``--epochs``).
     num_epochs: int = 1
 
     # REINFORCE-specific
@@ -460,7 +461,14 @@ if __name__ == "__main__":
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--reward-alpha", type=float, default=0.05)
     parser.add_argument("--initial-baseline", type=float, default=0.0)
-    parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument(
+        "--num-epochs",
+        "--epochs",
+        type=int,
+        default=1,
+        dest="num_epochs",
+        help="Number of full passes over the training set",
+    )
     parser.add_argument("--lora-rank", type=int, default=32)
     parser.add_argument("--load-checkpoint-path", default=None)
     parser.add_argument("--wandb-project", default=None)
