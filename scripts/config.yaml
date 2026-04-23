@@ -1,9 +1,9 @@
 # -- Mode --
-mode: reinforce  # "dpo", "opd", or "reinforce"
+mode: opd  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
-temperature: 0.0
-logprobs: true
+temperature: 1.0
+logprobs: false
 
 # -- Update --
 update_every_n_sessions: 1

@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
 
-const BACKEND_BASE_URL = "http://localhost:30000";
+const BACKEND_BASE_URL = "http://localhost:8000";
 
 const LOG_BASENAME = "context-export.log";
 
