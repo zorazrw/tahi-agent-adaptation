@@ -133,3 +133,13 @@ python3 scripts/server.py --config scripts/config.yaml
 Point your provider at this proxy (base URL and port from `proxy_host` / `proxy_port`). Example layout:
 
 ![](assets/serverconfig.png)
+
+**Training**
+
+Training is triggered from the frontend with the **Train on this session** button in the lower-left corner. The frontend posts the current session to the server, and the server converts it into the format required by the configured training mode (`dpo`, `opd`, or `reinforce`).
+
+The session is queued for training. Once `update_every_n_sessions` sessions have been processed, the server runs one Tinker update unless `dry_run` is enabled. During the checkpoint swap, inference waits until the new checkpoint is ready.
+
+After training completes, the server broadcasts a `model-update` SSE event to the frontend. The frontend automatically points at the new checkpoint, so you normally do not need to switch models manually. If the new checkpoint is not visible in the model picker, click **Load models** to refresh the list.
+
+The server persists the model registry, latest model path, and latest model-update event to `state_path` (default: `scripts/state.json`). On restart, this state is loaded so trained checkpoint slugs and the active model pointer are restored.

@@ -35,7 +35,6 @@ from tinker_opd import Config as OPDConfig
 from tinker_dpo import Config as DPOConfig
 from tinker_reinforce import Config as ReinforceConfig
 from tinker_formatter import DPODataBuilder, OPDSDFTDataset, ReinforceDataBuilder
-from toolcall_parser import *
 
 from model_manager import ModelManager, ModelUpdate
 from trainer import DPOTrainer, OPDTrainer, REINFORCETrainer, Trainer
@@ -293,93 +292,6 @@ class Server:
             client = self.model_manager.inference_client
 
             if stream:
-                rewrite = func_mapping.get(renderer_name) if renderer_name else None
-
-                # Tinker's OAI streaming gateway drops the tool-call `arguments`
-                # chunk for Qwen3-Instruct models (reproducible 100% with a
-                # single user turn + `tool_choice`). Non-streaming works fine.
-                # When the request advertises tools, fall back to a
-                # non-streaming call and synthesize an SSE stream so clients
-                # still see `text/event-stream` and get correct arguments.
-                has_tools = bool(body.get("tools"))
-
-                if has_tools:
-                    non_stream_body = dict(body)
-                    non_stream_body.pop("stream_options", None)
-
-                    async def generate_from_nonstream():
-                        try:
-                            resp = await client.chat.completions.create(
-                                model=model_path,
-                                messages=messages,
-                                **non_stream_body,
-                            )
-                        except Exception:
-                            log.exception("Non-streaming fallback (tools) failed")
-                            err = {"error": {"message": "upstream chat completion failed", "type": "upstream_error"}}
-                            yield f"data: {json.dumps(err)}\n\n"
-                            yield "data: [DONE]\n\n"
-                            return
-
-                        resp_dict = resp.model_dump()
-                        log.info("Non-streaming tool-call response: %s", json.dumps(resp_dict, indent=4))
-
-                        resp_id = resp_dict.get("id")
-                        created = resp_dict.get("created")
-                        model_echo = resp_dict.get("model", model_path)
-                        choices = resp_dict.get("choices") or [{}]
-                        choice0 = choices[0] or {}
-                        message = choice0.get("message") or {}
-                        finish_reason = choice0.get("finish_reason")
-
-                        def base_chunk(delta, fr=None):
-                            return {
-                                "id": resp_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model_echo,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": delta,
-                                        "finish_reason": fr,
-                                        "logprobs": None,
-                                    }
-                                ],
-                            }
-
-                        yield f"data: {json.dumps(base_chunk({'role': 'assistant', 'content': None}))}\n\n"
-
-                        reasoning = message.get("reasoning_content")
-                        if reasoning:
-                            yield f"data: {json.dumps(base_chunk({'reasoning_content': reasoning}))}\n\n"
-
-                        content = message.get("content")
-                        if content:
-                            yield f"data: {json.dumps(base_chunk({'content': content}))}\n\n"
-
-                        tool_calls = message.get("tool_calls") or []
-                        for idx, tc in enumerate(tool_calls):
-                            fn = tc.get("function") or {}
-                            delta_tc = {
-                                "tool_calls": [
-                                    {
-                                        "index": idx,
-                                        "id": tc.get("id"),
-                                        "type": tc.get("type", "function"),
-                                        "function": {
-                                            "name": fn.get("name", ""),
-                                            "arguments": fn.get("arguments", ""),
-                                        },
-                                    }
-                                ]
-                            }
-                            yield f"data: {json.dumps(base_chunk(delta_tc))}\n\n"
-
-                        yield f"data: {json.dumps(base_chunk({}, fr=finish_reason))}\n\n"
-                        yield "data: [DONE]\n\n"
-
-                    return StreamingResponse(generate_from_nonstream(), media_type="text/event-stream")
 
                 async def generate():
                     chunks = []
@@ -395,15 +307,8 @@ class Server:
                     async for chunk in response:
                         log.info("Received chat completion chunk: %s", json.dumps(chunk.model_dump(), indent=4))
                         chunk_dict = chunk.model_dump()
-                        if rewrite:
-                            rewritten = rewrite(chunk_dict, state)
-                        else:
-                            rewritten = chunk_dict
-                        chunks.append(chunk_dict)
-                        if rewritten is not None:
-                            yield f"data: {json.dumps(rewritten)}\n\n"
+                        yield f"data: {json.dumps(chunk_dict)}\n\n"
                     yield "data: [DONE]\n\n"
-                    # log.info("Streamed chat completion chunks: %s", json.dumps(chunks, indent=4))
                 return StreamingResponse(generate(), media_type="text/event-stream")
 
             response = await client.chat.completions.create(

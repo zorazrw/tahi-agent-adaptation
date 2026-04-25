@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Literal
 
 import tinker
-from openai import AsyncOpenAI
 
+from bridge_inference_client import BridgeInferenceClient
 from trainer import Trainer
 
 log = logging.getLogger(__name__)
@@ -165,9 +165,10 @@ class ModelManager:
         self._supported_models = list(supported_models)
         self._model_to_renderer = dict(model_to_renderer or TINKER_MODEL_TO_RENDERER_NAME)
 
-        self._inference_client = AsyncOpenAI(
+        self._inference_client = BridgeInferenceClient(
             base_url=self._inference_base_url,
             api_key=tinker_api_key,
+            resolve_renderer=self.resolve_renderer,
         )
         # Lazily built on first training-client request so unit tests and
         # dry-run usage don't force a network hop.
@@ -244,7 +245,7 @@ class ModelManager:
     # Inference client (OpenAI-compatible, pointed at Tinker)
     # ------------------------------------------------------------------
     @property
-    def inference_client(self) -> AsyncOpenAI:
+    def inference_client(self) -> BridgeInferenceClient:
         return self._inference_client
 
     # ------------------------------------------------------------------

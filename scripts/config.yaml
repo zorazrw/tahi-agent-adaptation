@@ -1,5 +1,5 @@
 # -- Mode --
-mode: opd  # "dpo", "opd", or "reinforce"
+mode: reinforce  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
 temperature: 0.0
