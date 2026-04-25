@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { extname, join } from "path";
 import type { VerifierMark } from "../types.js";
 import type { WorkflowNode } from "../types.js";
 import type { Session } from "./session-store.js";
@@ -40,10 +40,34 @@ export async function labelVerifiersForNode(
 
   const cwd = session.cwd ?? process.cwd();
   const fileBlocks: string[] = [];
+  const imageBlocks: Array<{ type: "image"; source: { type: "base64"; media_type: string; data: string } }> = [];
+  const mimeByExt: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+  };
   for (const rel of node.outputFiles) {
     const abs = join(cwd, rel);
     if (existsSync(abs)) {
       try {
+        const ext = extname(rel).toLowerCase();
+        const imageMime = mimeByExt[ext];
+        if (imageMime) {
+          const bytes = readFileSync(abs);
+          fileBlocks.push(`### ${rel}\n(image attached as base64 ${imageMime})`);
+          imageBlocks.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: imageMime,
+              data: bytes.toString("base64"),
+            },
+          });
+          continue;
+        }
+
         let t = readFileSync(abs, "utf8");
         if (t.length > 14_000) {
           t = t.slice(0, 14_000) + "\n... [truncated]";
@@ -79,6 +103,11 @@ export async function labelVerifiersForNode(
     fileBlocks.length > 0 ? fileBlocks.join("\n\n---\n\n") : "(no output files listed)",
   ].join("\n");
 
+  const userContent: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+  > = [{ type: "text", text: systemContext }, ...imageBlocks];
+
   const res = await fetch(messagesApiUrl(config.baseURL), {
     method: "POST",
     headers: {
@@ -89,7 +118,7 @@ export async function labelVerifiersForNode(
     body: JSON.stringify({
       model: config.model,
       max_tokens: 1024,
-      messages: [{ role: "user", content: systemContext }],
+      messages: [{ role: "user", content: userContent }],
     }),
   });
 

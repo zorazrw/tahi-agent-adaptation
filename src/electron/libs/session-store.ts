@@ -88,6 +88,7 @@ export type Session = {
   lastPrompt?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
+  autoContextInduction: boolean;
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -104,6 +105,7 @@ export type StoredSession = {
   piSessionFile?: string;
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
+  autoContextInduction: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -129,6 +131,7 @@ export class SessionStore {
     prompt?: string;
     title: string;
     engine?: SessionEngine;
+    autoContextInduction?: boolean;
   }): Session {
     const id = crypto.randomUUID();
     const now = Date.now();
@@ -142,14 +145,15 @@ export class SessionStore {
       lastPrompt: options.prompt,
       workflowTree: [],
       verificationDepth: 0,
+      autoContextInduction: options.autoContextInduction !== false,
       pendingPermissions: new Map()
     };
     this.sessions.set(id, session);
     this.db
       .prepare(
         `insert into sessions
-          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, auto_context_induction, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -163,6 +167,7 @@ export class SessionStore {
         session.lastPrompt ?? null,
         serializeWorkflowTree(session.workflowTree),
         session.verificationDepth ?? 0,
+        session.autoContextInduction ? 1 : 0,
         now,
         now
       );
@@ -177,7 +182,7 @@ export class SessionStore {
     const rows = this.db
       .prepare(
         `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
-                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+                workflow_tree, verification_depth, auto_context_induction, steps, verification_criteria, output_files,
                 completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
          order by updated_at desc`
@@ -212,6 +217,7 @@ export class SessionStore {
         piSessionFile: row.pi_session_file ? String(row.pi_session_file) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
+        autoContextInduction: row.auto_context_induction == null ? true : Number(row.auto_context_induction) !== 0,
         createdAt: Number(row.created_at),
         updatedAt: Number(row.updated_at)
       };
@@ -236,7 +242,7 @@ export class SessionStore {
     const sessionRow = this.db
       .prepare(
         `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
-                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+                workflow_tree, verification_depth, auto_context_induction, steps, verification_criteria, output_files,
                 completed_step_indices, verifier_marks, created_at, updated_at
          from sessions
          where id = ?`
@@ -279,6 +285,8 @@ export class SessionStore {
         piSessionFile: sessionRow.pi_session_file ? String(sessionRow.pi_session_file) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: sessionRow.verification_depth != null ? Number(sessionRow.verification_depth) : 0,
+        autoContextInduction:
+          sessionRow.auto_context_induction == null ? true : Number(sessionRow.auto_context_induction) !== 0,
         createdAt: Number(sessionRow.created_at),
         updatedAt: Number(sessionRow.updated_at)
       },
@@ -439,6 +447,8 @@ export class SessionStore {
       lastPrompt: "last_prompt",
       workflowTree: "workflow_tree",
       verificationDepth: "verification_depth"
+      ,
+      autoContextInduction: "auto_context_induction"
     } as const;
 
     const jsonKeys = new Set<string>(["workflowTree"]);
@@ -452,6 +462,8 @@ export class SessionStore {
         values.push(value != null ? JSON.stringify(value) : null);
       } else if (key === "verificationDepth") {
         values.push(value != null ? Number(value) : 0);
+      } else if (key === "autoContextInduction") {
+        values.push(value === false ? 0 : 1);
       } else {
         values.push(value === undefined ? null : (value as string));
       }
@@ -497,6 +509,7 @@ export class SessionStore {
     try { this.db.exec(`alter table sessions add column workflow_tree text`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column verification_depth integer default 0`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column pi_session_file text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column auto_context_induction integer default 1`); } catch { /* exists */ }
     try { this.db.exec(`update sessions set engine = 'legacy-claude' where engine is null or trim(engine) = ''`); } catch { /* ignore */ }
 
     this.db.exec(
@@ -520,7 +533,7 @@ export class SessionStore {
     const rows = this.db
       .prepare(
         `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
-                workflow_tree, verification_depth, steps, verification_criteria, output_files,
+                workflow_tree, verification_depth, auto_context_induction, steps, verification_criteria, output_files,
                 verifier_marks, completed_step_indices
          from sessions`
       )
@@ -552,6 +565,7 @@ export class SessionStore {
         lastPrompt: row.last_prompt ? String(row.last_prompt) : undefined,
         workflowTree: tree ?? [],
         verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
+        autoContextInduction: row.auto_context_induction == null ? true : Number(row.auto_context_induction) !== 0,
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);

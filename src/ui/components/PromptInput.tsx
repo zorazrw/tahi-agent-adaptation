@@ -6,6 +6,18 @@ const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 12;
 const LINE_HEIGHT = 21;
 const MAX_HEIGHT = MAX_ROWS * LINE_HEIGHT;
+const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
+
+function readStoredAutoInduction(): boolean {
+  try {
+    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
+    if (v === "false") return false;
+    if (v === "true") return true;
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
 
 interface PromptInputProps {
   sendEvent: (event: ClientEvent) => void;
@@ -43,7 +55,13 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
       }
       sendEvent({
         type: "session.start",
-        payload: { title, prompt, cwd: cwd.trim() || undefined, allowedTools: DEFAULT_ALLOWED_TOOLS }
+        payload: {
+          title,
+          prompt,
+          cwd: cwd.trim() || undefined,
+          allowedTools: DEFAULT_ALLOWED_TOOLS,
+          autoContextInduction: readStoredAutoInduction(),
+        }
       });
     } else {
       if (activeSession?.status === "running") {

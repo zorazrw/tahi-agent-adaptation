@@ -111,7 +111,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 }`}
                 onClick={() => setTab("workflow")}
               >
-                Workflow
+                Execution
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
@@ -630,25 +630,12 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
 
         <div className="mt-5">
           <section className={cardClass}>
-            <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-4">
               <div className="min-w-0">
                 <div className="text-base font-semibold text-ink-800">Default Provider</div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
                   Choose the provider and model used for new Pi sessions, then keep credentials in sync for that provider.
                 </p>
-              </div>
-              <div className={`max-w-full truncate rounded-full px-3 py-1 text-[11px] font-medium shadow-sm ${
-                provider === "tinker"
-                  ? tinkerConfigured ? "bg-primary/10 text-primary" : "bg-white text-ink-500"
-                  : provider === "openai-compatible"
-                    ? customConfigured ? "bg-primary/10 text-primary" : "bg-white text-ink-500"
-                    : "bg-white text-ink-600"
-              }`}>
-                {provider === "tinker"
-                  ? tinkerConfigured ? "Configured" : "Not Configured"
-                  : provider === "openai-compatible"
-                    ? customConfigured ? "Configured" : "Not Configured"
-                    : (PROVIDER_LABELS[provider] ?? provider) || "No provider"}
               </div>
             </div>
 

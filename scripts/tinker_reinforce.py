@@ -60,6 +60,7 @@ class Config:
     # Training
     learning_rate: float = 1e-5
     lr_schedule: LRSchedule = "linear"
+    # Number of full passes over the dataset (CLI: ``--num-epochs`` or ``--epochs``).
     num_epochs: int = 1
 
     # REINFORCE-specific

@@ -526,6 +526,7 @@ class Config:
     wandb_name: str | None = None
     load_checkpoint_path: str | None = None
     max_steps: int | None = None
+    epochs: int = 1
 
     enable_trace: bool = False
     span_chart_every: int = 0

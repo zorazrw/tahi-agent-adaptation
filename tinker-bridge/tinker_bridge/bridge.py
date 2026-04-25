@@ -17,6 +17,11 @@ from tinker_cookbook.third_party.openai_compat import (
 )
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
+_SERVICE_CLIENT_CACHE: dict[tuple[str, str], tinker.ServiceClient] = {}
+_SAMPLING_CLIENT_CACHE: dict[tuple[str, str, str, str], Any] = {}
+_TOKENIZER_CACHE: dict[str, Any] = {}
+_RENDERER_CACHE: dict[tuple[str, str], Any] = {}
+
 
 def _pick_renderer_name(base_model: str, requested: str | None, reasoning: str | None) -> str:
     if requested:
@@ -52,14 +57,54 @@ def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _build_service_client(provider: dict[str, Any]) -> tinker.ServiceClient:
-    service_kwargs: dict[str, Any] = {}
     base_url = str(provider.get("base_url") or "").strip()
     api_key = str(provider.get("api_key") or "").strip()
+    key = (base_url, api_key)
+    if key in _SERVICE_CLIENT_CACHE:
+        return _SERVICE_CLIENT_CACHE[key]
+
+    service_kwargs: dict[str, Any] = {}
     if base_url:
         service_kwargs["base_url"] = base_url
     if api_key:
         service_kwargs["api_key"] = api_key
-    return tinker.ServiceClient(**service_kwargs)
+    client = tinker.ServiceClient(**service_kwargs)
+    _SERVICE_CLIENT_CACHE[key] = client
+    return client
+
+
+def _get_sampling_client(service_client: tinker.ServiceClient, base_model: str, model_path: str) -> Any:
+    # Cache key intentionally excludes API key/base URL because those are already bound to the service client.
+    provider_key = ""
+    try:
+        provider_key = str(getattr(service_client, "base_url", "") or "")
+    except Exception:
+        provider_key = ""
+    key = (provider_key, base_model, model_path, "sampling")
+    if key in _SAMPLING_CLIENT_CACHE:
+        return _SAMPLING_CLIENT_CACHE[key]
+
+    sampling_kwargs: dict[str, Any] = {"base_model": base_model}
+    if model_path:
+        sampling_kwargs["model_path"] = model_path
+    sampling_client = service_client.create_sampling_client(**sampling_kwargs)
+    _SAMPLING_CLIENT_CACHE[key] = sampling_client
+    return sampling_client
+
+
+def _get_renderer(base_model: str, renderer_name: str) -> Any:
+    renderer_key = (base_model, renderer_name)
+    if renderer_key in _RENDERER_CACHE:
+        return _RENDERER_CACHE[renderer_key]
+
+    tokenizer = _TOKENIZER_CACHE.get(base_model)
+    if tokenizer is None:
+        tokenizer = get_tokenizer(base_model)
+        _TOKENIZER_CACHE[base_model] = tokenizer
+
+    renderer = renderers.get_renderer(renderer_name, tokenizer)
+    _RENDERER_CACHE[renderer_key] = renderer
+    return renderer
 
 
 async def resolve_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -99,19 +144,14 @@ async def run_request(payload: dict[str, Any]) -> dict[str, Any]:
 
     service_client = _build_service_client(provider)
 
-    sampling_kwargs: dict[str, Any] = {"base_model": base_model}
     model_path = str(model_path_raw or "").strip()
-    if model_path:
-        sampling_kwargs["model_path"] = model_path
-    sampling_client = service_client.create_sampling_client(**sampling_kwargs)
-
-    tokenizer = get_tokenizer(base_model)
+    sampling_client = _get_sampling_client(service_client, base_model, model_path)
     renderer_name = _pick_renderer_name(
         base_model,
         str(renderer_name_raw).strip() if renderer_name_raw else None,
         str(reasoning).strip() if reasoning else None,
     )
-    renderer = renderers.get_renderer(renderer_name, tokenizer)
+    renderer = _get_renderer(base_model, renderer_name)
 
     openai_messages = _normalize_messages(context.get("messages") or [])
     tinker_messages = openai_messages_to_tinker(openai_messages)
