@@ -87,6 +87,8 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("save-memory-md", payload),
     saveSkillMd: (payload: { sections: { fileName: string; content: string }[]; deletedFileNames?: string[] }) =>
         ipcInvoke("save-skill-md", payload),
+    postSessionToTrainer: (sessionId: string) =>
+        ipcInvoke("post-session-to-trainer", sessionId),
     onTinkerModelUpdated: (callback: (event: TinkerModelUpdateEvent) => void) => {
         const cb = (_: Electron.IpcRendererEvent, payload: TinkerModelUpdateEvent) => {
             try {

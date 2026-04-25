@@ -2,7 +2,7 @@
 mode: opd  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
-temperature: 1.0
+temperature: 0.0
 logprobs: false
 
 # -- Update --

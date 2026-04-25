@@ -166,6 +166,7 @@ type EventPayloadMapping = {
     "get-memory-md": { dir: string; sections: MemorySectionDto[]; skillsDir: string; skillSections: MemorySectionDto[] };
     "save-memory-md": { success: boolean; error?: string };
     "save-skill-md": { success: boolean; error?: string };
+    "post-session-to-trainer": { success: boolean; error?: string };
 }
 
 interface Window {
@@ -212,6 +213,7 @@ interface Window {
         getMemoryMd: () => Promise<{ dir: string; sections: MemorySectionDto[]; skillsDir: string; skillSections: MemorySectionDto[] }>;
         saveMemoryMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
         saveSkillMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
+        postSessionToTrainer: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
         onTinkerModelUpdated: (callback: (event: TinkerModelUpdateEvent) => void) => UnsubscribeFunction;
     }
 }

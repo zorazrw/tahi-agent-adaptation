@@ -591,6 +591,33 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const currentVerifierMarks = selectedNode?.verifierMarks ?? [];
   const [newVerifierDraft, setNewVerifierDraft] = useState("");
   const [addingVerifier, setAddingVerifier] = useState(false);
+  const [trainingUploadState, setTrainingUploadState] = useState<
+    | { kind: "idle" }
+    | { kind: "uploading" }
+    | { kind: "success" }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  const handleTriggerTraining = useCallback(async () => {
+    if (!activeSessionId) return;
+    setTrainingUploadState({ kind: "uploading" });
+    try {
+      const res = await window.electron.postSessionToTrainer(activeSessionId);
+      if (res.success) {
+        setTrainingUploadState({ kind: "success" });
+        setTimeout(() => {
+          setTrainingUploadState((prev) => (prev.kind === "success" ? { kind: "idle" } : prev));
+        }, 2500);
+      } else {
+        setTrainingUploadState({ kind: "error", message: res.error ?? "Upload failed" });
+      }
+    } catch (e) {
+      setTrainingUploadState({
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, [activeSessionId]);
 
   const toggleVerifierMark = (index: number) => {
     if (!activeSessionId || !selectedNodeId) return;
@@ -1132,6 +1159,44 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                 </div>
               );
             })}
+          </div>
+          <div className="shrink-0 mt-2 pt-2 border-t border-ink-900/5">
+            <button
+              type="button"
+              onClick={handleTriggerTraining}
+              disabled={!activeSessionId || trainingUploadState.kind === "uploading"}
+              className="w-full flex items-center justify-center gap-1.5 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-xs font-medium text-primary hover:bg-primary/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Upload this session to the training proxy"
+            >
+              {trainingUploadState.kind === "uploading" ? (
+                <>
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
+                    <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
+                  </svg>
+                  Training…
+                </>
+              ) : trainingUploadState.kind === "success" ? (
+                <>
+                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M13 4L6 11 3 8" />
+                  </svg>
+                  Sent for training
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M8 2v8M4.5 6.5L8 10l3.5-3.5M3 13h10" />
+                  </svg>
+                  Train on this session
+                </>
+              )}
+            </button>
+            {trainingUploadState.kind === "error" && (
+              <p className="mt-1 text-[11px] text-error leading-snug break-words">
+                {trainingUploadState.message}
+              </p>
+            )}
           </div>
         </div>
       )}

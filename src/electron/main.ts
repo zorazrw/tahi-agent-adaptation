@@ -44,6 +44,7 @@ import {
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint } from "./libs/tinker-provider.js";
 import { startTinkerAutoUpdateWatcher, stopTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
+import { postSessionToTrainer } from "./libs/context-export.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -641,5 +642,15 @@ app.on("ready", () => {
         } catch {
             // silently ignore
         }
+    });
+
+    ipcMainHandle("post-session-to-trainer", async (_: any, sessionId: string) => {
+        if (!sessionId || typeof sessionId !== "string") {
+            return { success: false, error: "sessionId required" };
+        }
+        const result = await postSessionToTrainer(sessionId);
+        return result.ok
+            ? { success: true }
+            : { success: false, error: result.error };
     });
 })
