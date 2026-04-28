@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
-import type { AppPermissionResult, PredictedUserActionSuggestion, ServerEvent } from "./types";
+import type { AppPermissionResult, ClientEvent, PredictedUserActionSuggestion, ServerEvent } from "./types";
+import { findNextRunnableWorkflowNodeId } from "./lib/workflow-run";
 import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
@@ -78,6 +79,7 @@ function App() {
   const [predictedSuggestion, setPredictedSuggestion] = useState<PredictedUserActionSuggestion | null>(null);
   const [isPredictingSuggestion, setIsPredictingSuggestion] = useState(false);
   const [lastAutofillKey, setLastAutofillKey] = useState<string | null>(null);
+  const explicitlyStoppedSessionIdsRef = useRef(new Set<string>());
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -152,10 +154,27 @@ function App() {
   }, [handleServerEvent, handlePartialMessages, activeSessionId]);
 
   const { connected, sendEvent } = useIPC(onEvent);
+  const sendClientEvent = useCallback((event: ClientEvent) => {
+    if (event.type === "session.stop") {
+      explicitlyStoppedSessionIdsRef.current.add(event.payload.sessionId);
+    } else if (
+      event.type === "session.continue" ||
+      event.type === "session.solveNode" ||
+      event.type === "session.regenerateWorkflow"
+    ) {
+      explicitlyStoppedSessionIdsRef.current.delete(event.payload.sessionId);
+    }
+    sendEvent(event);
+  }, [sendEvent]);
+
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
+  const hasNextRunnableWorkflowNode = Boolean(
+    activeSession?.workflowTree?.length &&
+    findNextRunnableWorkflowNodeId(activeSession.workflowTree, activeSession.verificationDepth ?? 0)
+  );
 
   const showChatPanel = previewPanelOpen;
 
@@ -281,16 +300,26 @@ function App() {
       setPredictedSuggestion(null);
       return;
     }
-    if (!activeSessionId || !activeSession || activeSession.status === "running" || messages.length === 0) {
+    const isNaturalStop =
+      activeSessionId &&
+      activeSession &&
+      activeSession.status === "completed" &&
+      !hasNextRunnableWorkflowNode &&
+      !explicitlyStoppedSessionIdsRef.current.has(activeSessionId);
+
+    if (!isNaturalStop || messages.length === 0) {
       setIsPredictingSuggestion(false);
-      if (!activeSessionId || !activeSession || activeSession.status === "running") {
-        setPredictedSuggestion(null);
-      }
+      setPredictedSuggestion(null);
       return;
     }
+    const sessionId = activeSessionId;
 
     const lastMessage = messages[messages.length - 1];
-    if (!lastMessage || lastMessage.type === "user_prompt") {
+    if (
+      !lastMessage ||
+      lastMessage.type === "user_prompt" ||
+      (lastMessage.type === "run_result" && lastMessage.status !== "success")
+    ) {
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
       return;
@@ -299,7 +328,7 @@ function App() {
     let cancelled = false;
     setIsPredictingSuggestion(true);
 
-    window.electron.predictNextUserAction(activeSessionId)
+    window.electron.predictNextUserAction(sessionId)
       .then((suggestion) => {
         if (cancelled) return;
         setPredictedSuggestion(suggestion);
@@ -318,13 +347,14 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeSession, activeSessionId, effectivePredictionAssistMode, messages]);
+  }, [activeSession, activeSessionId, effectivePredictionAssistMode, hasNextRunnableWorkflowNode, messages]);
 
   useEffect(() => {
     if (effectivePredictionAssistMode !== "autofill") return;
     if (!predictedSuggestion || predictedSuggestion.actionType !== "message") return;
     if (!predictedSuggestion.draftText.trim()) return;
-    if (!activeSessionId || !activeSession || activeSession.status === "running") return;
+    if (!activeSessionId || !activeSession || activeSession.status !== "completed") return;
+    if (hasNextRunnableWorkflowNode || explicitlyStoppedSessionIdsRef.current.has(activeSessionId)) return;
     const sourceKey = `${activeSessionId}:${messages.length}:${predictedSuggestion.actionType}:${predictedSuggestion.draftText}`;
     if (lastAutofillKey === sourceKey) return;
 
@@ -333,7 +363,7 @@ function App() {
     setShouldAutoScroll(true);
     setHasNewMessages(false);
     resetToLatest();
-    sendEvent({
+    sendClientEvent({
       type: "session.continue",
       payload: {
         sessionId: activeSessionId,
@@ -348,9 +378,10 @@ function App() {
     messages.length,
     predictedSuggestion,
     effectivePredictionAssistMode,
+    hasNextRunnableWorkflowNode,
     resetToLatest,
     selectedNodeId,
-    sendEvent,
+    sendClientEvent,
   ]);
 
   // Track new finalized messages for badge / auto-scroll
@@ -435,7 +466,7 @@ function App() {
     <div className="flex h-screen bg-surface">
       <Sidebar
         connected={connected}
-        sendEvent={sendEvent}
+        sendEvent={sendClientEvent}
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
       />
@@ -496,7 +527,7 @@ function App() {
             <p className="text-3xl sm:text-4xl font-semibold text-ink-900 tracking-tight max-w-2xl leading-snug">
               What&apos;s on your mind?
             </p>
-            <HomePromptInput sendEvent={sendEvent} />
+            <HomePromptInput sendEvent={sendClientEvent} />
           </div>
         ) : (
         <>
@@ -670,7 +701,7 @@ function App() {
         </div>
 
         <PromptInput
-          sendEvent={sendEvent}
+          sendEvent={sendClientEvent}
           onSendMessage={handleSendMessage}
           disabled={visibleMessages.length === 0}
           rightOffset={undefined}
