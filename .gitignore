@@ -37,3 +37,6 @@ trash/*
 
 # Local Tinker bridge environment
 tinker-bridge/.venv/
+
+# Server state
+**state.json**
