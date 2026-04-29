@@ -132,7 +132,11 @@ class WeightDPODataBuilder(ChatDatasetBuilder):
 
     def _load(self, path: str) -> list[dict]:
         sessions = _load_sessions(path)
-        return extract_dpo_pairs(sessions)
+        # Pass the renderer so tool schemas are injected into the system prefix
+        # via ``Renderer.create_conversation_prefix_with_tools`` rather than
+        # hand-rolled into the system prompt text. Falls back to plain system
+        # prompt when the renderer doesn't support tools (e.g. RoleColon).
+        return extract_dpo_pairs(sessions, renderer=self.renderer)
 
     def __call__(self) -> tuple[SupervisedDataset, SupervisedDataset | None]:
         train_rows = self._load(self.train_path)
@@ -211,7 +215,7 @@ class WeightReinforceDataBuilder(ChatDatasetBuilder):
 
     def _build_dataset(self, path: str, batch_size: int) -> _ReinforceDataset:
         sessions = _load_sessions(path)
-        examples = extract_reinforce_examples(sessions)
+        examples = extract_reinforce_examples(sessions, renderer=self.renderer)
         logger.info("Loaded %d REINFORCE examples from %s", len(examples), path)
 
         datums: list[tinker.Datum] = []
@@ -267,7 +271,7 @@ class OfflineOPDDataset:
         batch_size: int,
     ) -> "OfflineOPDDataset":
         sessions = _load_sessions(path)
-        examples = extract_opd_examples(sessions)
+        examples = extract_opd_examples(sessions, renderer=renderer)
         logger.info("Loaded %d OPD examples from %s", len(examples), path)
 
         student_datums: list[tinker.Datum] = []

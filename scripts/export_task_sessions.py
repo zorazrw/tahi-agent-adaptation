@@ -2292,6 +2292,153 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
     return oai
 
 
+def _collect_written_paths_from_segment(seg: List[dict]) -> set[str]:
+    """Return paths the agent **successfully** invoked ``write`` / ``edit`` on.
+
+    Two filters are applied:
+    1. Only ``write`` / ``edit`` tool_use calls (not ``read``, ``bash``, etc.).
+    2. Only calls whose corresponding ``tool_result`` did NOT have ``isError=true``.
+       If a ``write``/``edit`` failed (e.g. "Could not find the exact text"), the
+       path is excluded so a stale on-disk file is not mistakenly treated as a
+       produced artifact.
+
+    The ``toolUseId`` from the assistant block is matched against the nearest
+    ``tool_result`` message in the segment.
+    """
+    # Pass 1: collect (toolUseId → path) for write/edit calls
+    id_to_path: Dict[str, str] = {}
+    for e in seg:
+        raw = e.get("raw") if isinstance(e, dict) else None
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("type") != "assistant":
+            continue
+        blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
+        for b in blocks:
+            if not isinstance(b, dict) or b.get("type") != "tool_use":
+                continue
+            name = str(b.get("name") or "").lower()
+            if name not in ("write", "edit"):
+                continue
+            inp = b.get("input")
+            if inp is None:
+                inp = b.get("arguments")
+            if isinstance(inp, str):
+                try:
+                    inp = json.loads(inp)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(inp, dict):
+                continue
+            p = inp.get("path")
+            tid = b.get("id") or b.get("toolUseId")
+            if isinstance(p, str) and p.strip():
+                if isinstance(tid, str) and tid:
+                    id_to_path[tid] = p.strip()
+                else:
+                    # No id tracking possible; still collect but can't filter by error
+                    id_to_path[f"_noid_{p.strip()}"] = p.strip()
+
+    # Pass 2: remove paths whose tool_result has isError=true
+    failed_ids: set[str] = set()
+    for e in seg:
+        raw = e.get("raw") if isinstance(e, dict) else None
+        if not isinstance(raw, dict):
+            continue
+        # Pi format: standalone tool_result message
+        if raw.get("type") == "tool_result":
+            if raw.get("isError"):
+                tid = raw.get("toolUseId") or raw.get("tool_use_id") or ""
+                if tid:
+                    failed_ids.add(tid)
+        # Legacy format: user message wrapping tool_result blocks
+        elif raw.get("type") == "user":
+            for block in (raw.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                # Legacy tool_results mark errors via non-empty "is_error" or content prefix
+                if block.get("is_error"):
+                    tid = block.get("tool_use_id") or ""
+                    if tid:
+                        failed_ids.add(tid)
+
+    paths: set[str] = {
+        path for tid, path in id_to_path.items()
+        if tid not in failed_ids
+    }
+    return paths
+
+
+def _output_files_for_segment(
+    written_paths: set[str],
+    snap_start: Optional[dict],
+    snap_end: Optional[dict],
+) -> List[dict]:
+    """Filter ``snapshot.file`` rows to files that changed during this segment.
+
+    Two conditions must both hold:
+    1. The path is in ``written_paths`` (agent called write/edit on it successfully).
+    2. The file content at segment-end differs from content at segment-start.
+       This excludes corner cases where ``write`` succeeded but wrote the same bytes
+       (content unchanged). Segment-start snapshot is taken from the **previous**
+       segment's end, or None for the first segment.
+
+    Matches by exact path or basename to handle cwd-relative vs absolute mix.
+    Skips rows without text content.
+    """
+    if not written_paths or not isinstance(snap_end, dict):
+        return []
+    files_end = snap_end.get("file")
+    if not isinstance(files_end, list):
+        return []
+
+    # Build lookup for start-of-segment content; None means "file didn't exist before"
+    start_content: Dict[str, Optional[str]] = {}
+    if isinstance(snap_start, dict):
+        for f in (snap_start.get("file") or []):
+            if not isinstance(f, dict):
+                continue
+            fp = str(f.get("path", "")).strip()
+            if fp:
+                start_content[fp] = f.get("content") if isinstance(f.get("content"), str) else None
+
+    wanted_basenames = {os.path.basename(p.replace("\\", "/")) for p in written_paths}
+    out: List[dict] = []
+    for f in files_end:
+        if not isinstance(f, dict):
+            continue
+        fp = str(f.get("path", "")).strip()
+        if not fp:
+            continue
+        if fp not in written_paths and os.path.basename(fp.replace("\\", "/")) not in wanted_basenames:
+            continue
+        content = f.get("content")
+        if not isinstance(content, str):
+            continue
+        # Skip if content is identical to what it was at segment start
+        prev = start_content.get(fp)
+        if prev is not None and prev == content:
+            continue
+        entry: Dict[str, Any] = {"path": fp, "content": content}
+        cs = f.get("content_source")
+        if isinstance(cs, str):
+            entry["content_source"] = cs
+        out.append(entry)
+    return out
+
+
+def _last_snapshot_in_range(
+    snapshots: List[Optional[dict]], start: int, end: int
+) -> Optional[dict]:
+    """Return the latest non-null snapshot in ``snapshots[start:end]``."""
+    end = min(end, len(snapshots))
+    for i in range(end - 1, max(start, 0) - 1, -1):
+        snap = snapshots[i]
+        if isinstance(snap, dict):
+            return snap
+    return None
+
+
 WORKFLOW_PLAN_INSTRUCTION = "\n".join([
     "",
     "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
@@ -2501,6 +2648,12 @@ def build_weight_based_session(
         node_desc = node.get("description", "")
 
         agent_traj_raw: List[dict] = []
+        # Parallel to ``agent_traj_raw``: per-message ``state_snapshot`` (or None).
+        # Used to recover the segment-end on-disk file state for artifact-only
+        # completion construction. Pi: indices align with ``agent_traj`` since no
+        # merging happens; Legacy: indices may shift after merging — we therefore
+        # only emit ``output_files`` for Pi sessions (gated below).
+        agent_traj_snapshots: List[Optional[dict]] = []
         human_traj: List[dict] = []
         round_counter = 0
         node_prompt_consumed = False
@@ -2539,17 +2692,21 @@ def build_weight_based_session(
             if t in ALL_AGENT_MSG_TYPES:
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
                 agent_traj_raw.append({"raw": raw_clean})
+                snap = m.get("state_snapshot")
+                agent_traj_snapshots.append(snap if isinstance(snap, dict) else None)
                 if t == "system" and m.get("subtype") == "init":
                     round_counter += 1
                 if t == "system_init":
                     round_counter += 1
-                if m.get("state_snapshot"):
+                if isinstance(snap, dict):
                     last_snapshot_msg = m
 
             elif t == "verifier_label" or t == "update_verifiers":
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
                 agent_traj_raw.append({"raw": raw_clean})
-                if m.get("state_snapshot"):
+                snap = m.get("state_snapshot")
+                agent_traj_snapshots.append(snap if isinstance(snap, dict) else None)
+                if isinstance(snap, dict):
                     last_snapshot_msg = m
 
             elif t == "file_edit":
@@ -2630,16 +2787,22 @@ def build_weight_based_session(
         ]
 
         # Build raw (prompt, segment) pairs first so we can align vl → traj by
-        # time window before building entries.
+        # time window before building entries. Track each segment's [start, end)
+        # range over ``agent_traj_raw`` so the parallel ``agent_traj_snapshots``
+        # array (Pi only) and tool_use scan can be sliced consistently.
         raw_segments: List[Tuple[str, List[dict]]] = []
+        seg_ranges: List[Tuple[int, int]] = []
         if not follow_up_splits:
             raw_segments.append((node_first_turn_prompt or "", agent_traj))
+            seg_ranges.append((0, len(agent_traj)))
         else:
             first_end = follow_up_splits[0][0]
             raw_segments.append((node_first_turn_prompt or "", agent_traj[:first_end]))
+            seg_ranges.append((0, first_end))
             for si, (split_idx, follow_prompt) in enumerate(follow_up_splits):
                 next_end = follow_up_splits[si + 1][0] if si + 1 < len(follow_up_splits) else len(agent_traj)
                 raw_segments.append((follow_prompt, agent_traj[split_idx:next_end]))
+                seg_ranges.append((split_idx, next_end))
 
         # For each segment, compute the max Pi ``timestamp`` among its
         # assistant / tool_result entries.  This is the real LLM call time
@@ -2705,10 +2868,29 @@ def build_weight_based_session(
                 entry["verifiers"] = v
             return entry
 
-        agent_trajectories: List[dict] = [
-            _build_traj_entry(prompt, seg, vl_for_segment[i])
-            for i, (prompt, seg) in enumerate(raw_segments)
-        ]
+        agent_trajectories: List[dict] = []
+        prev_seg_snap: Optional[dict] = None  # end-of-previous-segment snapshot for diff
+        for i, (prompt, seg) in enumerate(raw_segments):
+            entry = _build_traj_entry(prompt, seg, vl_for_segment[i])
+            # Artifact-only completion support (Pi only — Legacy merge shifts
+            # ``agent_traj`` indices relative to the snapshot array). For each
+            # segment:
+            #  - ``snap_start``: last snapshot from the *previous* segment (None for k=0)
+            #  - ``snap_end``: last snapshot within this segment
+            #  - ``written_paths``: only paths the agent called write/edit on **successfully**
+            #    (isError calls are excluded); combined with a content-diff vs snap_start
+            #    to avoid including files that didn't actually change.
+            if is_pi:
+                s_start, s_end = seg_ranges[i]
+                snap_end = _last_snapshot_in_range(agent_traj_snapshots, s_start, s_end)
+                written = _collect_written_paths_from_segment(agent_traj_raw[s_start:s_end])
+                output_files = _output_files_for_segment(written, prev_seg_snap, snap_end)
+                if output_files:
+                    entry["output_files"] = output_files
+                # Advance the "previous" snapshot so the next segment can diff against it
+                if snap_end is not None:
+                    prev_seg_snap = snap_end
+            agent_trajectories.append(entry)
 
         unit: Dict[str, Any] = {
             "intent": node_desc,
