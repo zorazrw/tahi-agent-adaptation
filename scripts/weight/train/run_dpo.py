@@ -14,8 +14,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import tinker
 import torch
@@ -40,7 +41,42 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Reference logprob helpers (work around SkyRL's missing prompt_logprobs)
+# .env loader (shared with run_opd / run_reinforce)
+# ---------------------------------------------------------------------------
+
+def _load_env() -> None:
+    """Load key=value pairs from scripts/weight/.env into os.environ.
+
+    No-op if the file is missing. Existing env vars take precedence so an
+    explicit ``TINKER_API_KEY=... python -m ...`` invocation overrides .env.
+    """
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+# ---------------------------------------------------------------------------
+# Reference logprob helpers
+# ---------------------------------------------------------------------------
+#
+# Two paths, selected by ``--use-skyrl``:
+#
+# 1. SkyRL path (``--use-skyrl``): SkyRL's vLLM backend does not yet expose
+#    ``prompt_logprobs`` via the sampling API, so ``compute_logprobs_async``
+#    silently returns None.  We pre-compute every datum's reference logprobs
+#    once via ``training_client.forward()`` BEFORE any ``optim_step`` and
+#    cache them by content fingerprint.
+#
+# 2. Tinker path (default): on the real Tinker cloud API we snapshot
+#    the initial weights into a frozen ``SamplingClient`` once, then call
+#    ``reference_client.compute_logprobs_async`` per batch.  This is the
+#    canonical DPO recipe (see ``scripts/tinker_dpo.py``).
 # ---------------------------------------------------------------------------
 
 def _datum_fingerprint(datum: tinker.Datum) -> tuple:
@@ -113,6 +149,40 @@ def precompute_ref_logprob_cache(
     return cache
 
 
+def _live_ref_logprobs(
+    reference_client: tinker.SamplingClient,
+    data: list[tinker.Datum],
+) -> list[torch.Tensor]:
+    """Tinker path: fetch reference logprobs for one batch via the sampling client.
+
+    Builds the full sequence (model_input + last target token) for each datum
+    and calls ``compute_logprobs_async`` in parallel.  Returns one tensor per
+    datum aligned with ``target_tokens`` (length = model_input.length).
+    """
+    full_sequences = []
+    for datum in data:
+        targets = datum.loss_fn_inputs["target_tokens"].data
+        if targets:
+            full_seq = datum.model_input.append_int(int(targets[-1]))
+        else:
+            full_seq = datum.model_input
+        full_sequences.append(full_seq)
+
+    async def _gather():
+        return await asyncio.gather(
+            *[reference_client.compute_logprobs_async(seq) for seq in full_sequences]
+        )
+
+    raw = asyncio.run(_gather())
+    # raw[i][0] is None (no prior context); raw[i][1:] are the per-target logprobs.
+    return [
+        torch.tensor(
+            [lp if lp is not None else 0.0 for lp in r[1:]], dtype=torch.float32,
+        )
+        for r in raw
+    ]
+
+
 # ---------------------------------------------------------------------------
 # DPO loss
 # ---------------------------------------------------------------------------
@@ -183,7 +253,7 @@ def do_update(
     eval_every: int,
     infrequent_eval_every: int,
     training_client: tinker.TrainingClient,
-    ref_logprob_cache: dict[tuple, torch.Tensor],
+    get_ref_logprobs: Callable[[list[tinker.Datum]], list[torch.Tensor]],
     evaluators: list[Any],
     infrequent_evaluators: list[Any],
     dataset: SupervisedDataset,
@@ -248,7 +318,7 @@ def do_update(
                 _print_example(rejected_data[i], tokenizer, "Rejected")
 
         with trace.scope_span_sync("get_ref_logprobs"):
-            all_ref_logprob_seqs = [ref_logprob_cache[_datum_fingerprint(d)] for d in data]
+            all_ref_logprob_seqs = get_ref_logprobs(data)
             chosen_ref_logprob_seqs = [all_ref_logprob_seqs[i] for i in range(0, len(data), 2)]
             rejected_ref_logprob_seqs = [all_ref_logprob_seqs[i] for i in range(1, len(data), 2)]
 
@@ -310,6 +380,8 @@ def do_update(
 
 
 def main() -> None:
+    _load_env()
+
     parser = argparse.ArgumentParser(description="DPO training (weight-format)")
     parser.add_argument("--train-path", required=True)
     parser.add_argument("--test-path", default=None)
@@ -338,6 +410,16 @@ def main() -> None:
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--base-url", default=None)
+    parser.add_argument(
+        "--use-skyrl", action="store_true",
+        help=(
+            "Use the SkyRL-compatible path that pre-computes ref logprobs "
+            "via training_client.forward(). Default (off) uses the Tinker "
+            "cloud path: snapshot a frozen reference SamplingClient via "
+            "save_weights_and_get_sampling_client and fetch ref logprobs "
+            "per batch with compute_logprobs_async."
+        ),
+    )
     args = parser.parse_args()
 
     log_path = str(Path(args.log_path).expanduser())
@@ -430,11 +512,25 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # Pre-compute reference logprobs (before any optim_step)              #
+    # Reference logprob provider (set up BEFORE any optim_step)           #
     # ------------------------------------------------------------------ #
-    ref_logprob_cache = precompute_ref_logprob_cache(
-        training_client, dataset, args.num_epochs,
-    )
+    if not args.use_skyrl:
+        # Tinker cloud path: snapshot the initial weights once.
+        # The returned SamplingClient is frozen and cheap to query per batch.
+        reference_client = training_client.save_weights_and_get_sampling_client()
+        logger.info("Tinker mode: created frozen reference SamplingClient")
+
+        def get_ref_logprobs(data: list[tinker.Datum]) -> list[torch.Tensor]:
+            return _live_ref_logprobs(reference_client, data)
+    else:
+        # SkyRL path: pre-compute ref logprobs for every datum we will see,
+        # using training_client.forward() at the initial weights.
+        ref_logprob_cache = precompute_ref_logprob_cache(
+            training_client, dataset, args.num_epochs,
+        )
+
+        def get_ref_logprobs(data: list[tinker.Datum]) -> list[torch.Tensor]:
+            return [ref_logprob_cache[_datum_fingerprint(d)] for d in data]
 
     # ------------------------------------------------------------------ #
     # Training loop                                                        #
@@ -468,7 +564,7 @@ def main() -> None:
                 eval_every=args.eval_every,
                 infrequent_eval_every=args.infrequent_eval_every,
                 training_client=training_client,
-                ref_logprob_cache=ref_logprob_cache,
+                get_ref_logprobs=get_ref_logprobs,
                 evaluators=[],
                 infrequent_evaluators=[],
                 dataset=dataset,

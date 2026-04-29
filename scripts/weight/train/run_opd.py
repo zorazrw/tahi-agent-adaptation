@@ -27,10 +27,12 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import chz
 import tinker
@@ -46,6 +48,27 @@ from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_
 from .formatter import OfflineOPDDataset
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# .env loader (shared with run_dpo / run_reinforce)
+# ---------------------------------------------------------------------------
+
+def _load_env() -> None:
+    """Load key=value pairs from scripts/weight/.env into os.environ.
+
+    No-op if the file is missing. Existing env vars take precedence so an
+    explicit ``TINKER_API_KEY=... python -m ...`` invocation overrides .env.
+    """
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
 
 @chz.chz
@@ -74,6 +97,11 @@ class Config:
     wandb_name: str | None = None
     max_steps: int | None = None
     enable_trace: bool = False
+
+    # Backend selection: True → SkyRL-compatible path that pre-computes teacher
+    # logprobs via training_client.forward(); False (default) → real Tinker
+    # cloud API (live teacher_client.compute_logprobs_async per batch).
+    use_skyrl: bool = False
 
 
 def _extract_completion_info(
@@ -215,6 +243,52 @@ def _lookup_teacher_logprobs(
     ]
 
 
+async def _live_teacher_logprobs_async(
+    teacher_client: tinker.SamplingClient,
+    student_datums: list[tinker.Datum],
+    teacher_datums: list[tinker.Datum],
+) -> list[torch.Tensor]:
+    """Tinker path: fetch teacher logprobs for one batch via a sampling client.
+
+    Builds the full teacher-forced sequence (teacher prompt + completion
+    tokens) for each datum and calls ``compute_logprobs_async`` in parallel.
+    Returns one tensor per datum, aligned to the student's completion mask
+    (so it can be consumed by the same ``do_update`` as the cached path).
+    """
+    full_sequences: list[tinker.ModelInput] = []
+    for td in teacher_datums:
+        targets = td.loss_fn_inputs["target_tokens"].data
+        if targets:
+            full_seq = td.model_input.append_int(int(targets[-1]))
+        else:
+            full_seq = td.model_input
+        full_sequences.append(full_seq)
+
+    raw_all = await asyncio.gather(
+        *[teacher_client.compute_logprobs_async(seq) for seq in full_sequences]
+    )
+
+    aligned: list[torch.Tensor] = []
+    for sd, td, raw in zip(student_datums, teacher_datums, raw_all, strict=True):
+        # raw[0] is None; raw[1:][k] = lp(model_input[k+1] | model_input[0..k]).
+        per_pos = torch.tensor(
+            [lp if lp is not None else 0.0 for lp in raw[1:]], dtype=torch.float32,
+        )
+        aligned.append(_align_teacher_to_student(sd, td, per_pos))
+    return aligned
+
+
+def _live_teacher_logprobs(
+    teacher_client: tinker.SamplingClient,
+    student_datums: list[tinker.Datum],
+    teacher_datums: list[tinker.Datum],
+) -> list[torch.Tensor]:
+    """Synchronous wrapper around :func:`_live_teacher_logprobs_async`."""
+    return asyncio.run(
+        _live_teacher_logprobs_async(teacher_client, student_datums, teacher_datums)
+    )
+
+
 def do_update(
     step: int,
     total_steps: int,
@@ -352,14 +426,41 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
         f"= {n_batches * config.num_epochs} steps"
     )
 
-    # Pre-compute teacher logprobs for every (student, teacher) pair we will
-    # train on. This MUST happen before any optim_step so the "teacher" is
-    # the initial policy (base + zero-init LoRA, or the loaded checkpoint).
-    # See precompute_teacher_logprob_cache for details on why we route
-    # through training_client.forward() instead of the sampling client.
-    teacher_cache = precompute_teacher_logprob_cache(
-        training_client, dataset, config.num_epochs,
-    )
+    # ------------------------------------------------------------------ #
+    # Teacher logprob provider (set up BEFORE any optim_step)             #
+    # ------------------------------------------------------------------ #
+    get_teacher_lps: Callable[
+        [list[tinker.Datum], list[tinker.Datum]], list[torch.Tensor]
+    ]
+    if not config.use_skyrl:
+        # Tinker cloud path: a frozen base-model SamplingClient acts as the
+        # teacher.  Per-batch compute_logprobs_async is cheap and avoids
+        # materialising a full cache up front.
+        teacher_client = service_client.create_sampling_client(
+            base_model=config.model_name,
+        )
+        logger.info(
+            "Tinker mode: created frozen teacher SamplingClient for %s",
+            config.model_name,
+        )
+
+        def get_teacher_lps(
+            student_datums: list[tinker.Datum],
+            teacher_datums: list[tinker.Datum],
+        ) -> list[torch.Tensor]:
+            return _live_teacher_logprobs(teacher_client, student_datums, teacher_datums)
+    else:
+        # SkyRL path: pre-compute teacher logprobs for every (student, teacher)
+        # pair via training_client.forward() at the initial weights.
+        teacher_cache = precompute_teacher_logprob_cache(
+            training_client, dataset, config.num_epochs,
+        )
+
+        def get_teacher_lps(
+            student_datums: list[tinker.Datum],
+            teacher_datums: list[tinker.Datum],
+        ) -> list[torch.Tensor]:
+            return _lookup_teacher_logprobs(student_datums, teacher_datums, teacher_cache)
 
     for epoch_idx in range(config.num_epochs):
         dataset.set_epoch(seed=epoch_idx)
@@ -371,9 +472,7 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
                 break
 
             student_datums, teacher_datums = dataset.get_batch(batch_idx)
-            teacher_lps = _lookup_teacher_logprobs(
-                student_datums, teacher_datums, teacher_cache,
-            )
+            teacher_lps = get_teacher_lps(student_datums, teacher_datums)
 
             if step == 0:
                 for i in range(min(2, len(student_datums))):
@@ -417,6 +516,8 @@ if __name__ == "__main__":
     if str(_scripts) not in sys.path:
         sys.path.insert(0, str(_scripts))
 
+    _load_env()
+
     parser = argparse.ArgumentParser(description="Offline OPD training (weight-format)")
     parser.add_argument("--train-path", required=True)
     parser.add_argument("--model-name", required=True)
@@ -431,6 +532,16 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-project", default=None)
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--base-url", default=None)
+    parser.add_argument(
+        "--use-skyrl", action="store_true",
+        help=(
+            "Use the SkyRL-compatible path that pre-computes teacher "
+            "logprobs via training_client.forward(). Default (off) uses the "
+            "Tinker cloud path: query a frozen teacher SamplingClient per "
+            "batch via compute_logprobs_async."
+        ),
+    )
     args = parser.parse_args()
 
     tokenizer = get_tokenizer(args.model_name)
@@ -454,6 +565,8 @@ if __name__ == "__main__":
         wandb_project=args.wandb_project,
         wandb_name=args.wandb_name,
         max_steps=args.max_steps,
+        base_url=args.base_url,
+        use_skyrl=args.use_skyrl,
     )
 
     main(cfg, dataset)
