@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import type { ChildProcessWithoutNullStreams } from "child_process";
 import {
   calculateCost,
   createAssistantMessageEventStream,
@@ -99,6 +100,141 @@ type BridgeResolveCheckpointResult =
     };
 
 const bridgeProjectPath = fileURLToPath(new URL("../../../tinker-bridge", import.meta.url));
+const TINKER_BRIDGE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+type BridgePendingRequest = {
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
+};
+
+let persistentBridgeChild: ChildProcessWithoutNullStreams | null = null;
+let persistentBridgeIdleTimer: NodeJS.Timeout | null = null;
+let persistentBridgeBuffer = "";
+let persistentBridgePending: BridgePendingRequest[] = [];
+
+function clearPersistentBridgeIdleTimer(): void {
+  if (persistentBridgeIdleTimer) {
+    clearTimeout(persistentBridgeIdleTimer);
+    persistentBridgeIdleTimer = null;
+  }
+}
+
+function schedulePersistentBridgeIdleShutdown(): void {
+  clearPersistentBridgeIdleTimer();
+  persistentBridgeIdleTimer = setTimeout(() => {
+    shutdownTinkerBridge("idle-timeout");
+  }, TINKER_BRIDGE_IDLE_TIMEOUT_MS);
+}
+
+function resetPersistentBridgeState(): void {
+  clearPersistentBridgeIdleTimer();
+  persistentBridgeChild = null;
+  persistentBridgeBuffer = "";
+  const pending = persistentBridgePending;
+  persistentBridgePending = [];
+  for (const req of pending) {
+    req.reject(new Error("Tinker bridge exited before completing request"));
+  }
+}
+
+function ensurePersistentBridgeServer(): ChildProcessWithoutNullStreams {
+  if (persistentBridgeChild && !persistentBridgeChild.killed) {
+    schedulePersistentBridgeIdleShutdown();
+    return persistentBridgeChild;
+  }
+
+  const child = spawn("uv", ["run", "--project", bridgeProjectPath, "python", "-m", "tinker_bridge", "--serve"], {
+    cwd: bridgeProjectPath,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  persistentBridgeChild = child;
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    persistentBridgeBuffer += chunk;
+    while (true) {
+      const newlineIdx = persistentBridgeBuffer.indexOf("\n");
+      if (newlineIdx === -1) break;
+      const line = persistentBridgeBuffer.slice(0, newlineIdx).trim();
+      persistentBridgeBuffer = persistentBridgeBuffer.slice(newlineIdx + 1);
+      if (!line) continue;
+      const next = persistentBridgePending.shift();
+      if (!next) continue;
+      try {
+        next.resolve(JSON.parse(line));
+      } catch (error) {
+        next.reject(
+          new Error(
+            `Failed to parse Tinker bridge server response: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+      }
+    }
+  });
+
+  child.on("error", (error) => {
+    const pending = persistentBridgePending;
+    persistentBridgePending = [];
+    for (const req of pending) req.reject(error);
+    resetPersistentBridgeState();
+  });
+
+  child.on("close", (code) => {
+    if (code !== 0) {
+      const pending = persistentBridgePending;
+      persistentBridgePending = [];
+      for (const req of pending) {
+        req.reject(new Error(`Tinker bridge server exited with code ${code}`));
+      }
+    }
+    resetPersistentBridgeState();
+  });
+
+  schedulePersistentBridgeIdleShutdown();
+  return child;
+}
+
+async function invokeBridgePersistent<T>(payload: unknown, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) {
+    throw new Error("Tinker request aborted");
+  }
+  const child = ensurePersistentBridgeServer();
+  schedulePersistentBridgeIdleShutdown();
+
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("Tinker request aborted"));
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    persistentBridgePending.push({
+      resolve: (value) => {
+        signal?.removeEventListener("abort", onAbort);
+        schedulePersistentBridgeIdleShutdown();
+        resolve(value as T);
+      },
+      reject: (reason) => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(reason);
+      },
+    });
+
+    child.stdin.write(`${JSON.stringify(payload)}\n`);
+  });
+}
+
+export async function ensureTinkerBridgeWarm(configPath: string): Promise<void> {
+  const config = readStoredTinkerProviderConfig(configPath);
+  if (!config) return;
+  ensurePersistentBridgeServer();
+  schedulePersistentBridgeIdleShutdown();
+}
+
+export function shutdownTinkerBridge(_reason?: "idle-timeout" | "session-deleted" | "settings-changed" | "app-shutdown"): void {
+  const child = persistentBridgeChild;
+  if (child && !child.killed) {
+    child.kill();
+  }
+  resetPersistentBridgeState();
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -351,49 +487,7 @@ function emitResolvedMessage(stream: AssistantMessageEventStream, message: Assis
 }
 
 async function invokeBridge<T>(payload: unknown, signal?: AbortSignal): Promise<T> {
-  return await new Promise<T>((resolve, reject) => {
-    const child = spawn(
-      "uv",
-      ["run", "--project", bridgeProjectPath, "python", "-m", "tinker_bridge"],
-      {
-        cwd: bridgeProjectPath,
-        stdio: ["pipe", "pipe", "pipe"],
-        signal,
-      }
-    );
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => {
-      reject(error);
-    });
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `Tinker bridge exited with code ${code}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout) as T);
-      } catch (error) {
-        reject(
-          new Error(
-            `Failed to parse Tinker bridge response: ${error instanceof Error ? error.message : String(error)}`
-          )
-        );
-      }
-    });
-
-    child.stdin.end(JSON.stringify(payload));
-  });
+  return await invokeBridgePersistent<T>(payload, signal);
 }
 
 function buildBridgeRequest(

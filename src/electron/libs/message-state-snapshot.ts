@@ -11,6 +11,16 @@ import { readAllFlatSkillSections } from "./skill-store.js";
 
 const MAX_OUTPUT_FILE_BYTES = 500_000;
 
+type OutputContentEncoding = "utf8" | "base64";
+
+type OutputFileEntry = {
+  path: string;
+  content: string | null;
+  content_source: string | null;
+  content_encoding?: OutputContentEncoding | null;
+  error: string | null;
+};
+
 export type ExportEnvironmentSnapshot = {
   workflow: ReturnType<typeof workflowNestedForExport>;
   file: ReturnType<typeof buildOutputFileEntries>;
@@ -90,17 +100,29 @@ function collectOriginalOutputsMap(tree: WorkflowNode[]): Record<string, string>
   return out;
 }
 
-function readTextLimited(absPath: string, maxBytes: number): { text: string | null; err: string | null } {
+function isValidUtf8(buf: Buffer): boolean {
+  const decoded = buf.toString("utf8");
+  const roundTrip = Buffer.from(decoded, "utf8");
+  return roundTrip.equals(buf);
+}
+
+function readFileContentLimited(
+  absPath: string,
+  maxBytes: number
+): { content: string | null; contentEncoding: OutputContentEncoding | null; err: string | null } {
   try {
-    if (!existsSync(absPath)) return { text: null, err: "not_a_file" };
+    if (!existsSync(absPath)) return { content: null, contentEncoding: null, err: "not_a_file" };
     const buf = readFileSync(absPath);
     const truncated = buf.length > maxBytes;
     const chunk = buf.subarray(0, maxBytes);
-    let text = chunk.toString("utf8");
-    if (truncated) text += "\n[... export truncated: file larger than max bytes ...]";
-    return { text, err: null };
+    if (isValidUtf8(chunk)) {
+      let text = chunk.toString("utf8");
+      if (truncated) text += "\n[... export truncated: file larger than max bytes ...]";
+      return { content: text, contentEncoding: "utf8", err: null };
+    }
+    return { content: chunk.toString("base64"), contentEncoding: "base64", err: null };
   } catch (e) {
-    return { text: null, err: e instanceof Error ? e.message : String(e) };
+    return { content: null, contentEncoding: null, err: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -108,13 +130,8 @@ function buildOutputFileEntries(
   cwd: string | undefined,
   relPaths: string[],
   originals: Record<string, string>
-): Array<{ path: string; content: string | null; content_source: string | null; error: string | null }> {
-  const entries: Array<{
-    path: string;
-    content: string | null;
-    content_source: string | null;
-    error: string | null;
-  }> = [];
+): OutputFileEntry[] {
+  const entries: OutputFileEntry[] = [];
   let base: string | undefined;
   try {
     if (cwd?.trim()) base = resolve(cwd);
@@ -123,10 +140,11 @@ function buildOutputFileEntries(
   }
 
   for (const rel of relPaths) {
-    const item: { path: string; content: string | null; content_source: string | null; error: string | null } = {
+    const item: OutputFileEntry = {
       path: rel,
       content: null,
       content_source: null,
+      content_encoding: null,
       error: null,
     };
     let readOk = false;
@@ -134,10 +152,11 @@ function buildOutputFileEntries(
       try {
         const absP = resolve(rel);
         if (existsSync(absP)) {
-          const { text, err } = readTextLimited(absP, MAX_OUTPUT_FILE_BYTES);
-          if (text != null) {
-            item.content = text;
+          const { content, contentEncoding, err } = readFileContentLimited(absP, MAX_OUTPUT_FILE_BYTES);
+          if (content != null) {
+            item.content = content;
             item.content_source = "filesystem";
+            item.content_encoding = contentEncoding;
             readOk = true;
           } else if (err) item.error = err;
         } else {
@@ -150,10 +169,11 @@ function buildOutputFileEntries(
       try {
         const absP = resolve(join(base, rel));
         if (isPathInsideDir(base, absP)) {
-          const { text, err } = readTextLimited(absP, MAX_OUTPUT_FILE_BYTES);
-          if (text != null) {
-            item.content = text;
+          const { content, contentEncoding, err } = readFileContentLimited(absP, MAX_OUTPUT_FILE_BYTES);
+          if (content != null) {
+            item.content = content;
             item.content_source = "filesystem";
+            item.content_encoding = contentEncoding;
             readOk = true;
           } else if (err) item.error = err;
         } else item.error = "path_outside_cwd";
@@ -164,6 +184,7 @@ function buildOutputFileEntries(
     if (!readOk && originals[rel]) {
       item.content = originals[rel];
       item.content_source = "originalOutputs";
+      item.content_encoding = "utf8";
       item.error = null;
     } else if (!readOk && item.content == null && item.error == null) {
       item.error = !base ? "no_cwd_or_missing_file" : "missing_or_unreadable";
@@ -246,6 +267,7 @@ export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
     path: displayPath,
     content,
     content_source: "preview_write",
+    content_encoding: "utf8",
     error: null,
   };
   if (idx >= 0) {

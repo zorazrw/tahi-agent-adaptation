@@ -417,13 +417,20 @@ class OPDSDFTDataset:
             group_size=group_size,
         )
 
-    def __len__(self) -> int:
+    def _num_batch_slots(self) -> int:
+        """Number of distinct batches covering ``_questions`` (at least 1 for empty data)."""
         return max(1, (len(self._questions) + self._batch_size - 1) // self._batch_size)
+
+    def __len__(self) -> int:
+        return self._num_batch_slots()
 
     def get_batch(
         self, index: int
     ) -> tuple[Sequence[EnvGroupBuilder], list[str], list[str]]:
-        start = index * self._batch_size
+        # Wrap so training can run multiple epochs (``tinker_opd`` uses ``index`` up to
+        # ``len(dataset) * epochs - 1``) without empty batches past the first epoch.
+        idx = index % self._num_batch_slots()
+        start = idx * self._batch_size
         end = min(start + self._batch_size, len(self._questions))
 
         batch_questions = self._questions[start:end]

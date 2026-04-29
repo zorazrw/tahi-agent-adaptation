@@ -339,7 +339,16 @@ export type ServerEvent =
   | { type: "skills.writeResult"; payload: { requestId: string; success: boolean; error?: string } };
 
 export type ClientEvent =
-  | { type: "session.start"; payload: { title: string; prompt: string; cwd?: string; allowedTools?: string } }
+  | {
+      type: "session.start";
+      payload: {
+        title: string;
+        prompt: string;
+        cwd?: string;
+        allowedTools?: string;
+        autoContextInduction?: boolean;
+      };
+    }
   | { type: "session.continue"; payload: { sessionId: string; prompt: string; verificationNodeId?: string } }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }
