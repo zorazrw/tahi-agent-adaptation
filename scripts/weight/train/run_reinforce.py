@@ -158,7 +158,7 @@ def do_update(
     ml_logger: ml_log.Logger,
     log_path: str,
     tokenizer: Tokenizer,
-    rolling_mgr: checkpoint_utils.RollingCheckpointManager | None = None,
+    rolling_mgr: checkpoint_utils.CheckpointManager | None = None,
 ) -> tuple[dict, float]:
     """Single REINFORCE training step. Returns (metrics, new_baseline)."""
     step = epoch_idx * n_batches + batch_idx
@@ -332,7 +332,7 @@ def main() -> None:
         )
 
     tokenizer = get_tokenizer(args.model_name)
-    rolling_mgr = checkpoint_utils.RollingCheckpointManager(
+    rolling_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
         service_client=service_client,
         log_path=log_path,

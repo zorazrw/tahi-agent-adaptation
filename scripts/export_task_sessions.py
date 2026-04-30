@@ -65,8 +65,9 @@ Formats
 
 Usage:
   conda activate code   # optional: use "code" env
-  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
+  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID ...] \\
     [--format {default,weight}]
+  # Multiple sessions: repeat --session-id for each UUID (weight format writes one JSON array).
   # Use AGENT_COWORK_DB to override DB path:
   AGENT_COWORK_DB=/path/to/sessions.db python export_task_sessions.py
 """
@@ -2971,7 +2972,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Export Agent Cowork task sessions to JSON")
     parser.add_argument("--db", type=Path, help="Path to sessions.db (default: Electron userData location)")
     parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout)")
-    parser.add_argument("--session-id", type=str, help="Export only this session ID")
+    parser.add_argument(
+        "--session-id",
+        action="append",
+        dest="session_ids",
+        metavar="UUID",
+        help="Export only this session ID (repeat for multiple; order preserved)",
+    )
     parser.add_argument(
         "--format",
         type=str,
@@ -2996,12 +3003,14 @@ def main() -> int:
 
     try:
         if args.format == "weight":
-            if args.session_id:
-                sess = build_weight_based_session(cursor, args.session_id)
-                if not sess:
-                    print(f"Error: session not found: {args.session_id}", file=sys.stderr)
-                    return 1
-                payload = [sess]
+            if args.session_ids:
+                payload = []
+                for sid in args.session_ids:
+                    sess = build_weight_based_session(cursor, sid)
+                    if not sess:
+                        print(f"Error: session not found: {sid}", file=sys.stderr)
+                        return 1
+                    payload.append(sess)
             else:
                 payload = extract_all_sessions_weight_based(cursor)
             json_str = json.dumps(payload, indent=2, ensure_ascii=False)
@@ -3013,11 +3022,20 @@ def main() -> int:
                 print(json_str)
             return 0
 
-        if args.session_id:
-            payload = extract_session(cursor, args.session_id)
-            if not payload:
-                print(f"Error: session not found: {args.session_id}", file=sys.stderr)
-                return 1
+        if args.session_ids:
+            if len(args.session_ids) == 1:
+                payload = extract_session(cursor, args.session_ids[0])
+                if not payload:
+                    print(f"Error: session not found: {args.session_ids[0]}", file=sys.stderr)
+                    return 1
+            else:
+                payload = []
+                for sid in args.session_ids:
+                    sess = extract_session(cursor, sid)
+                    if not sess:
+                        print(f"Error: session not found: {sid}", file=sys.stderr)
+                        return 1
+                    payload.append(sess)
         else:
             payload = extract_all_sessions(cursor)
 
