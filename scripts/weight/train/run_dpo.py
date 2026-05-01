@@ -193,11 +193,38 @@ def compute_dpo_loss(
     chosen_ref_logprobs: list[torch.Tensor],
     rejected_ref_logprobs: list[torch.Tensor],
     dpo_beta: float,
+    rpo_alpha: float = 0.0,
+    use_ipo: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """DPO loss from Rafailov et al. (2023).
+    """Preference loss (DPO / IPO), optionally with RPO SFT anchor.
 
-    L = -log sigmoid(beta * (log_ratio_chosen - log_ratio_rejected))
-    where log_ratio = log pi_policy - log pi_ref.
+    **Vanilla DPO** (Rafailov et al. 2023)::
+
+        L = -log sigmoid(beta * h)      h = log_ratio_chosen - log_ratio_rejected
+
+    where ``log_ratio = log pi_policy - log pi_ref``.
+
+    **IPO** (Azar et al. 2023, ``use_ipo=True``)::
+
+        L = (h - 1 / (2 * beta)) ** 2
+
+    Replaces logsigmoid with a squared loss.  The gradient is proportional to
+    ``(h - 1/(2β))``, so it decays to zero when the gap reaches the target
+    value ``1/(2β)``.  This prevents reward hacking (the gap cannot grow
+    to ±∞) while still driving the model to prefer chosen.
+
+    **RPO anchor** (Pang et al. 2024, ``rpo_alpha > 0``)::
+
+        L = base_loss + rpo_alpha * (-mean(chosen_logprob))
+
+    Applicable on top of either DPO or IPO.  The SFT term anchors
+    ``log pi_policy(chosen)`` absolutely upward so the optimizer cannot
+    satisfy the pairwise objective by driving both completions down
+    (likelihood displacement).  Typical values: 0.1 (mild) – 0.5 (strong).
+
+    The two mechanisms are orthogonal:
+    - IPO controls the *shape* of the reward gap (bounded vs unbounded).
+    - RPO controls the *absolute* position of chosen logp.
     """
     chosen_log_ratio = torch.stack(
         [lp - rlp for lp, rlp in zip(chosen_logprobs, chosen_ref_logprobs, strict=True)]
@@ -205,8 +232,19 @@ def compute_dpo_loss(
     rejected_log_ratio = torch.stack(
         [lp - rlp for lp, rlp in zip(rejected_logprobs, rejected_ref_logprobs, strict=True)]
     )
-    losses = -F.logsigmoid(dpo_beta * (chosen_log_ratio - rejected_log_ratio))
-    loss = losses.mean()
+
+    h = chosen_log_ratio - rejected_log_ratio   # gap, shape (batch,)
+
+    if use_ipo:
+        # IPO: squared loss targeting h = 1/(2β)
+        # Gradient ∝ (h - target), naturally zeros at optimum.
+        target = 1.0 / (2.0 * dpo_beta)
+        losses = (h - target) ** 2
+    else:
+        # DPO: -log σ(β·h)
+        losses = -F.logsigmoid(dpo_beta * h)
+
+    base_loss = losses.mean()
 
     accuracy = (chosen_log_ratio > rejected_log_ratio).float().mean().item()
     chosen_rewards = dpo_beta * chosen_log_ratio
@@ -214,12 +252,29 @@ def compute_dpo_loss(
     margin = (chosen_rewards - rejected_rewards).mean().item()
 
     metrics = {
-        "dpo_loss": loss.item(),
+        "dpo_loss": base_loss.item(),   # base pairwise loss (DPO or IPO term)
         "accuracy": accuracy,
         "margin": margin,
         "chosen_reward": chosen_rewards.mean().item(),
         "rejected_reward": rejected_rewards.mean().item(),
     }
+
+    if use_ipo:
+        target_val = 1.0 / (2.0 * dpo_beta)
+        metrics["ipo_target"] = target_val
+        metrics["ipo_gap_error"] = (h.mean() - target_val).item()
+
+    if rpo_alpha > 0.0:
+        # SFT anchor on chosen: -mean log pi_policy(chosen).
+        # Grows positive when policy assigns low prob to chosen.
+        sft_anchor = -torch.stack(chosen_logprobs).mean()
+        loss = base_loss + rpo_alpha * sft_anchor
+        metrics["sft_anchor"] = sft_anchor.item()
+        metrics["rpo_alpha"] = rpo_alpha
+    else:
+        loss = base_loss
+
+    metrics["loss"] = loss.item()
     return loss, metrics
 
 
@@ -240,6 +295,8 @@ def do_update(
     n_batches: int,
     total_steps: int,
     dpo_beta: float,
+    rpo_alpha: float,
+    use_ipo: bool,
     learning_rate_base: float,
     lr_schedule: LRSchedule,
     adam_beta1: float,
@@ -355,6 +412,8 @@ def do_update(
                 chosen_ref_logprobs=chosen_ref_logprobs,
                 rejected_ref_logprobs=rejected_ref_logprobs,
                 dpo_beta=dpo_beta,
+                rpo_alpha=rpo_alpha,
+                use_ipo=use_ipo,
             )
 
         with trace.scope_span_sync("step"):
@@ -420,6 +479,44 @@ def main() -> None:
             "per batch with compute_logprobs_async."
         ),
     )
+    parser.add_argument(
+        "--pair-mode",
+        choices=["adjacent", "first_last"],
+        default="adjacent",
+        help=(
+            "DPO preference pair construction. "
+            "'adjacent' (default): every (R_k, R_{k+1}) within a unit, prompt "
+            "accumulates prior rounds + their follow-ups (tacit-preference "
+            "design). "
+            "'first_last': single (R_0, R_last) per execution unit with "
+            "prompt = base only (system + tools + initial user). Recommended "
+            "for sanity / overfit experiments — zero role conflict, shortest "
+            "prompts, fewest pairs."
+        ),
+    )
+    parser.add_argument(
+        "--rpo-alpha",
+        type=float,
+        default=0.0,
+        help=(
+            "If > 0, add an RPO-style SFT anchor on the chosen completion: "
+            "loss = base_loss + rpo_alpha * (-mean(chosen_logprob)). Directly "
+            "mitigates likelihood displacement (chosen reward drifting "
+            "negative). Typical values: 0.1 (mild) to 0.5 (strong). 0 "
+            "disables. Compatible with both DPO (default) and --ipo."
+        ),
+    )
+    parser.add_argument(
+        "--ipo",
+        action="store_true",
+        help=(
+            "Use IPO loss (Azar et al. 2023) instead of DPO. Replaces "
+            "-log sigmoid(β·h) with (h - 1/(2β))². The squared loss targets "
+            "a finite reward gap 1/(2β), preventing reward hacking and "
+            "keeping the gap from growing to ±∞. Can be combined with "
+            "--rpo-alpha for an anchored IPO variant."
+        ),
+    )
     args = parser.parse_args()
 
     log_path = str(Path(args.log_path).expanduser())
@@ -442,6 +539,7 @@ def main() -> None:
     dataset_builder = WeightDPODataBuilder(
         train_path=args.train_path,
         test_path=args.test_path,
+        pair_mode=args.pair_mode,
         common_config=ChatDatasetBuilderCommonConfig(
             model_name_for_tokenizer=args.model_name,
             renderer_name=args.renderer_name,
@@ -551,6 +649,8 @@ def main() -> None:
                 n_batches=n_batches,
                 total_steps=total_steps,
                 dpo_beta=args.dpo_beta,
+                rpo_alpha=args.rpo_alpha,
+                use_ipo=args.ipo,
                 learning_rate_base=args.learning_rate,
                 lr_schedule=args.lr_schedule,
                 adam_beta1=args.adam_beta1,

@@ -129,6 +129,7 @@ class WeightDPODataBuilder(ChatDatasetBuilder):
 
     train_path: str
     test_path: str | None = None
+    pair_mode: str = "adjacent"
 
     def _load(self, path: str) -> list[dict]:
         sessions = _load_sessions(path)
@@ -136,23 +137,34 @@ class WeightDPODataBuilder(ChatDatasetBuilder):
         # via ``Renderer.create_conversation_prefix_with_tools`` rather than
         # hand-rolled into the system prompt text. Falls back to plain system
         # prompt when the renderer doesn't support tools (e.g. RoleColon).
-        return extract_dpo_pairs(sessions, renderer=self.renderer)
+        return extract_dpo_pairs(
+            sessions, renderer=self.renderer, pair_mode=self.pair_mode,
+        )
 
     def __call__(self) -> tuple[SupervisedDataset, SupervisedDataset | None]:
         train_rows = self._load(self.train_path)
-        logger.info("Loaded %d DPO pairs from %s", len(train_rows), self.train_path)
+        logger.info(
+            "Loaded %d DPO pairs from %s (pair_mode=%s)",
+            len(train_rows), self.train_path, self.pair_mode,
+        )
         train_ds = datasets.Dataset.from_list(train_rows)
 
         def flatmap_fn(row: dict) -> list:
             chosen_convo = _hydrate_tool_calls(row["prompt"] + row["chosen"])
             rejected_convo = _hydrate_tool_calls(row["prompt"] + row["rejected"])
+            # LAST_ASSISTANT_MESSAGE: only the final artifact write is masked
+            # for the loss. Historical assistant turns in the prompt context
+            # cancel exactly in the DPO log-ratio (chosen / rejected share the
+            # prompt token-for-token), so masking them out is mathematically
+            # equivalent to ALL_ASSISTANT_MESSAGES while satisfying the
+            # qwen3_5 renderer's extension property and matching Tinker default.
             chosen_datum = conversation_to_datum(
                 chosen_convo, self.renderer, self.common_config.max_length,
-                train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
             )
             rejected_datum = conversation_to_datum(
                 rejected_convo, self.renderer, self.common_config.max_length,
-                train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
             )
             return [chosen_datum, rejected_datum]
 
@@ -222,9 +234,14 @@ class WeightReinforceDataBuilder(ChatDatasetBuilder):
         rewards: list[float] = []
         for ex in examples:
             conversation = _hydrate_tool_calls(ex["prompt"] + ex["completion"])
+            # LAST_ASSISTANT_MESSAGE: train only on the final artifact write
+            # (the action whose reward we computed). Historical assistant turns
+            # in the prompt come from prior rounds and were not sampled under
+            # the current reward signal, so they shouldn't contribute to the
+            # REINFORCE gradient.
             datum = conversation_to_datum(
                 conversation, self.renderer, self.common_config.max_length,
-                train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
             )
             datums.append(datum)
             rewards.append(ex["reward"])
@@ -281,13 +298,20 @@ class OfflineOPDDataset:
             student_convo = _hydrate_tool_calls(ex["student_prompt"] + ex["completion"])
             teacher_convo = _hydrate_tool_calls(ex["teacher_prompt"] + ex["completion"])
 
+            # LAST_ASSISTANT_MESSAGE: critical here because student vs teacher
+            # prompts differ (teacher has privileged human feedback appended),
+            # so historical assistant turns render to *different* token prefixes
+            # in the two datums. With ALL_ASSISTANT_MESSAGES the prior-turn
+            # logprobs would contaminate the OPD KL on tokens that aren't
+            # the actual student/teacher action. LAST scopes the loss to the
+            # one artifact write, which is what we actually want to align.
             student_datum = conversation_to_datum(
                 student_convo, renderer, max_length,
-                train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
             )
             teacher_datum = conversation_to_datum(
                 teacher_convo, renderer, max_length,
-                train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
             )
             student_datums.append(student_datum)
             teacher_datums.append(teacher_datum)

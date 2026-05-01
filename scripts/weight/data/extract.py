@@ -243,25 +243,40 @@ def _augment_with_feedback(
 def extract_dpo_pairs(
     sessions: list[dict],
     renderer: Any | None = None,
+    pair_mode: str = "adjacent",
 ) -> list[dict[str, Any]]:
     """Extract DPO preference pairs from weight-format sessions.
 
-    For each execution task_unit with >=2 rounds and >=1 follow_up, pairs round
-    k (rejected) with round k+1 (chosen). Completions are artifact-only: each
-    round's chosen / rejected is reconstructed from ``round.output_files`` as a
-    single ``write`` tool_call per file. Pairs where either side has no
-    artifact (e.g. agent only ran ``read`` / ``bash``) are skipped.
+    Two construction modes (selected via ``pair_mode``):
 
-    Prompt accumulation is unchanged: for pair k, the prompt includes the
-    system + tools prefix, initial user message, and all prior rounds' **full
-    original** completions plus the follow-ups that triggered them (up to but
-    not including round k). Only round k's own completion is replaced with the
-    artifact form when it's used as the chosen / rejected target.
+    - ``"adjacent"`` (default): for each execution task_unit, pair round k
+      (rejected) with round k+1 (chosen) for every k in [0, n_rounds-1).
+      Prompt for pair k includes system + tools + initial user + prior
+      rounds' full messages + follow-ups for rounds 0..k-1. Tacit-preference
+      design: the follow-up that triggered chosen R_{k+1} is intentionally
+      withheld from the prompt so the model learns the implicit "later
+      iteration is better" signal.
+
+    - ``"first_last"``: produce **one** pair per execution unit with rejected
+      = R_0's artifact and chosen = R_last's artifact. Prompt is just the
+      base prompt (system + tools + initial user) — no history, no
+      follow-ups. This is the cleanest sanity-overfit setup: 1 pair per
+      unit, zero role conflict, shortest prompts.
+
+    Completions are artifact-only in both modes: each round's chosen /
+    rejected is reconstructed from ``round.output_files`` as a single
+    ``write`` tool_call per file. Pairs where either side has no artifact
+    (e.g. agent only ran ``read`` / ``bash``) are skipped.
 
     Returns list of::
 
         {prompt, chosen, rejected, chosen_is_agent, rejected_is_agent}
     """
+    if pair_mode not in {"adjacent", "first_last"}:
+        raise ValueError(
+            f"pair_mode must be 'adjacent' or 'first_last', got {pair_mode!r}"
+        )
+
     pairs: list[dict[str, Any]] = []
 
     for session in sessions:
@@ -279,6 +294,20 @@ def extract_dpo_pairs(
 
             first_user = rounds[0]["messages"][0]["content"] if rounds[0].get("messages") else ""
             base_prompt = _build_base_prompt(system_prompt, tool_schemas, first_user, renderer)
+
+            if pair_mode == "first_last":
+                rej_msgs, rej_is_agent = _build_artifact_completion(rounds[0].get("output_files"))
+                cho_msgs, cho_is_agent = _build_artifact_completion(rounds[-1].get("output_files"))
+                if not rej_msgs or not cho_msgs:
+                    continue
+                pairs.append({
+                    "prompt": list(base_prompt),
+                    "chosen": cho_msgs,
+                    "rejected": rej_msgs,
+                    "chosen_is_agent": cho_is_agent,
+                    "rejected_is_agent": rej_is_agent,
+                })
+                continue
 
             for k in range(len(rounds) - 1):
                 rej_msgs, rej_is_agent = _build_artifact_completion(rounds[k].get("output_files"))
@@ -456,6 +485,14 @@ def main() -> None:
     parser.add_argument("mode", choices=["dpo", "opd", "reinforce"])
     parser.add_argument("input", help="Path to weight JSON file")
     parser.add_argument("-o", "--output", default=None, help="Write JSON output to file")
+    parser.add_argument(
+        "--pair-mode",
+        choices=["adjacent", "first_last"],
+        default="adjacent",
+        help="DPO pair construction (ignored for opd/reinforce). "
+             "'adjacent' = (R_k, R_{k+1}) with accumulated history (default); "
+             "'first_last' = single (R_0, R_last) per unit, prompt = base only.",
+    )
     args = parser.parse_args()
 
     with open(args.input, encoding="utf-8") as f:
@@ -464,7 +501,7 @@ def main() -> None:
         sessions = [sessions]
 
     if args.mode == "dpo":
-        units = extract_dpo_pairs(sessions)
+        units = extract_dpo_pairs(sessions, pair_mode=args.pair_mode)
         print(f"Extracted {len(units)} DPO pairs")
         for i, u in enumerate(units):
             print(f"\n── Pair {i} ──")
