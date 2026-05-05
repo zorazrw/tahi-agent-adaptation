@@ -481,20 +481,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--pair-mode",
-        choices=["adjacent", "first_last", "by_file", "by_file_adjacent"],
-        default="adjacent",
+        choices=["adjacent", "first_last"],
+        default="first_last",
         help=(
-            "DPO preference pair construction. "
-            "'adjacent' (default): every (R_k, R_{k+1}) within each unit, prompt "
-            "accumulates prior rounds + follow-ups (tacit-preference design). "
-            "'first_last': one pair per unit — first-artifact vs last-artifact — "
-            "with prompt = base only (system + tools + initial user). "
-            "'by_file': cross-unit file-centric — scans the whole session, groups "
-            "rounds by output filename, one pair per file (first write vs final "
-            "write); prompt = full context at time of first write. Cleanest signal "
-            "for sessions with a create-then-polish workflow. "
-            "'by_file_adjacent': same cross-unit scan but adjacent semantics "
-            "(one pair per consecutive version step per file)."
+            "DPO preference pair construction. Both modes scan the whole session "
+            "by output filename (cross-unit). "
+            "'first_last' (default): one pair per file, first write vs last write. "
+            "'adjacent': one pair per consecutive version step per file."
         ),
     )
     parser.add_argument(

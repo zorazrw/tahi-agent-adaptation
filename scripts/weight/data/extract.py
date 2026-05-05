@@ -240,9 +240,6 @@ def _augment_with_feedback(
 # DPO extraction
 # ---------------------------------------------------------------------------
 
-_VALID_PAIR_MODES = {"adjacent", "first_last", "by_file", "by_file_adjacent"}
-
-
 def _build_file_version_index(
     session: dict,
     system_prompt: str,
@@ -339,51 +336,6 @@ def _build_file_version_index(
     return file_index
 
 
-def _pairs_from_versions(
-    versions: list[dict],
-    sub_mode: str,
-) -> list[dict[str, Any]]:
-    """Build DPO pairs from an ordered list of file versions.
-
-    ``sub_mode`` is either ``"first_last"`` (one pair: first vs last) or
-    ``"adjacent"`` (one pair per consecutive version step).
-
-    Prompt for each pair = the prompt at the time the *rejected* version was
-    written (tacit-preference: the chosen version's improvement context is
-    withheld).
-    """
-    pairs: list[dict[str, Any]] = []
-
-    def _make_pair(rej: dict, cho: dict) -> dict | None:
-        rej_msgs, rej_is_agent = _build_artifact_completion(
-            [{"path": rej["path"], "content": rej["content"]}],
-        )
-        cho_msgs, cho_is_agent = _build_artifact_completion(
-            [{"path": cho["path"], "content": cho["content"]}],
-        )
-        if not rej_msgs or not cho_msgs:
-            return None
-        return {
-            "prompt": list(rej["prompt"]),
-            "chosen": cho_msgs,
-            "rejected": rej_msgs,
-            "chosen_is_agent": cho_is_agent,
-            "rejected_is_agent": rej_is_agent,
-        }
-
-    if sub_mode == "first_last":
-        p = _make_pair(versions[0], versions[-1])
-        if p:
-            pairs.append(p)
-    else:  # adjacent
-        for k in range(len(versions) - 1):
-            p = _make_pair(versions[k], versions[k + 1])
-            if p:
-                pairs.append(p)
-
-    return pairs
-
-
 def extract_dpo_pairs(
     sessions: list[dict],
     renderer: Any | None = None,
@@ -391,105 +343,64 @@ def extract_dpo_pairs(
 ) -> list[dict[str, Any]]:
     """Extract DPO preference pairs from weight-format sessions.
 
-    Construction modes (``pair_mode``):
+    Both modes use a **cross-unit, file-centric** strategy: the entire session
+    is scanned across all task_units, rounds are grouped by output filename
+    (basename), and pairs are built from the ordered version history of each
+    file. This means a file created in unit 1 and polished in unit 3 is handled
+    correctly — the prompt for the first version is the natural
+    ``system + initial_user`` context, with no "Proceed with: Verify…" noise.
 
-    - ``"adjacent"`` (default): within each execution task_unit, pair round k
-      (rejected) with round k+1 (chosen) for every k in [0, n_rounds-1).
-      Prompt for pair k = system + tools + initial user + prior rounds' full
-      messages + follow-ups. Tacit-preference design: the follow-up that
-      triggered chosen R_{k+1} is withheld.
+    Modes (``pair_mode``):
 
-    - ``"first_last"``: one pair per execution unit — rejected = first round
-      with an artifact, chosen = last round with an artifact. Prompt = base
-      prompt only (system + tools + initial user).
+    - ``"first_last"`` (default): one pair per file — rejected = first version
+      written, chosen = last version written. Cleanest overfit / sanity setup.
 
-    - ``"by_file"``: cross-unit, file-centric. Scans the **entire session**,
-      groups all rounds by output filename, and builds one pair per file:
-      rejected = the first version ever written, chosen = the final version.
-      Prompt = the full accumulated conversation context at the time of the
-      first write — so if the file was created in unit 1 and polished in
-      unit 3, the prompt for the pair is ``system + initial_user`` (clean,
-      no "Proceed with: Verify…" noise). Works across unit boundaries
-      naturally.
+    - ``"adjacent"``: one pair per consecutive version step — rejected = version
+      k, chosen = version k+1, prompt = context at the time version k was
+      written. Produces more pairs and preserves fine-grained preference signal.
 
-    - ``"by_file_adjacent"``: same file-centric cross-unit scan, but produces
-      one pair per consecutive version step (adjacent semantics).
-
-    Completions are artifact-only in all modes.
+    Completions are artifact-only: each version is reconstructed as a single
+    ``write`` tool_call. Pairs where either side has no string content are
+    skipped. Files with only one version (no revisions) are skipped.
 
     Returns list of::
 
         {prompt, chosen, rejected, chosen_is_agent, rejected_is_agent}
     """
-    if pair_mode not in _VALID_PAIR_MODES:
+    if pair_mode not in {"adjacent", "first_last"}:
         raise ValueError(
-            f"pair_mode must be one of {sorted(_VALID_PAIR_MODES)}, got {pair_mode!r}"
+            f"pair_mode must be 'adjacent' or 'first_last', got {pair_mode!r}"
         )
 
     pairs: list[dict[str, Any]] = []
 
-    # ── by_file modes: cross-unit, file-centric scan ──────────────────────
-    if pair_mode in {"by_file", "by_file_adjacent"}:
-        sub_mode = "first_last" if pair_mode == "by_file" else "adjacent"
-        for session in sessions:
-            system_prompt = session.get("system_prompt", "")
-            tool_schemas = session.get("tool_schemas")
-            file_index = _build_file_version_index(
-                session, system_prompt, tool_schemas, renderer,
-            )
-            for versions in file_index.values():
-                if len(versions) < 2:
-                    continue
-                pairs.extend(_pairs_from_versions(versions, sub_mode))
-        return pairs
-
-    # ── unit-local modes ──────────────────────────────────────────────────
     for session in sessions:
-        system_prompt = session.get("system_prompt", "")
-        tool_schemas = session.get("tool_schemas")
-
-        for unit in session.get("task_units", []):
-            if unit.get("intent") == "planning":
+        file_index = _build_file_version_index(
+            session,
+            session.get("system_prompt", ""),
+            session.get("tool_schemas"),
+            renderer,
+        )
+        for versions in file_index.values():
+            if len(versions) < 2:
                 continue
-            rounds = unit.get("agent_trajectories", [])
-            human_traj = unit.get("human_trajectories", [])
-            has_follow_up = any(h.get("type") == "follow_up" for h in human_traj)
-            if len(rounds) < 2 or not has_follow_up:
-                continue
-
-            first_user = rounds[0]["messages"][0]["content"] if rounds[0].get("messages") else ""
-            base_prompt = _build_base_prompt(system_prompt, tool_schemas, first_user, renderer)
 
             if pair_mode == "first_last":
-                # Relaxed: use first round with an artifact (not necessarily R0).
-                first_with = next((r for r in rounds if r.get("output_files")), None)
-                last_with = next((r for r in reversed(rounds) if r.get("output_files")), None)
-                if first_with is None or last_with is None or first_with is last_with:
-                    continue
-                rej_msgs, rej_is_agent = _build_artifact_completion(first_with.get("output_files"))
-                cho_msgs, cho_is_agent = _build_artifact_completion(last_with.get("output_files"))
-                if not rej_msgs or not cho_msgs:
-                    continue
-                pairs.append({
-                    "prompt": list(base_prompt),
-                    "chosen": cho_msgs,
-                    "rejected": rej_msgs,
-                    "chosen_is_agent": cho_is_agent,
-                    "rejected_is_agent": rej_is_agent,
-                })
-                continue
+                candidates = [(versions[0], versions[-1])]
+            else:  # adjacent
+                candidates = [(versions[k], versions[k + 1]) for k in range(len(versions) - 1)]
 
-            # adjacent
-            for k in range(len(rounds) - 1):
-                rej_msgs, rej_is_agent = _build_artifact_completion(rounds[k].get("output_files"))
-                cho_msgs, cho_is_agent = _build_artifact_completion(rounds[k + 1].get("output_files"))
+            for rej, cho in candidates:
+                rej_msgs, rej_is_agent = _build_artifact_completion(
+                    [{"path": rej["path"], "content": rej["content"]}],
+                )
+                cho_msgs, cho_is_agent = _build_artifact_completion(
+                    [{"path": cho["path"], "content": cho["content"]}],
+                )
                 if not rej_msgs or not cho_msgs:
                     continue
-                prompt = _build_conversation_context(
-                    base_prompt, rounds, human_traj, up_to_round=k,
-                )
                 pairs.append({
-                    "prompt": prompt,
+                    "prompt": list(rej["prompt"]),
                     "chosen": cho_msgs,
                     "rejected": rej_msgs,
                     "chosen_is_agent": cho_is_agent,
@@ -655,14 +566,13 @@ def main() -> None:
     parser.add_argument("-o", "--output", default=None, help="Write JSON output to file")
     parser.add_argument(
         "--pair-mode",
-        choices=sorted(_VALID_PAIR_MODES),
-        default="adjacent",
+        choices=["adjacent", "first_last"],
+        default="first_last",
         help=(
             "DPO pair construction (ignored for opd/reinforce). "
-            "'adjacent' = (R_k, R_{k+1}) within each unit with accumulated history (default); "
-            "'first_last' = one pair per unit, first-artifact vs last-artifact, base prompt only; "
-            "'by_file' = cross-unit file-centric, one pair per filename (first write vs last write); "
-            "'by_file_adjacent' = cross-unit file-centric, one pair per consecutive version step."
+            "Both modes scan the whole session by file (cross-unit). "
+            "'first_last' = one pair per file, first write vs last write (default). "
+            "'adjacent' = one pair per consecutive version step per file."
         ),
     )
     args = parser.parse_args()
