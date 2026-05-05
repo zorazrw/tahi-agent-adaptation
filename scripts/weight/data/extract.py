@@ -240,6 +240,14 @@ def _augment_with_feedback(
 # DPO extraction
 # ---------------------------------------------------------------------------
 
+# File extensions that carry no training signal (data files, binaries).
+# output_files with these extensions are skipped when building pairs.
+_SKIP_EXTENSIONS: frozenset[str] = frozenset({
+    ".json", ".jsonl", ".csv", ".tsv", ".xml", ".yaml", ".yml",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".ico",
+    ".zip", ".tar", ".gz",
+})
+
 def _build_file_version_index(
     session: dict,
     system_prompt: str,
@@ -315,6 +323,10 @@ def _build_file_version_index(
                     continue
                 # Key by basename so cross-unit edits to the same file are grouped.
                 key = path.split("/")[-1].split("\\")[-1]
+                # Skip data files and binaries — not useful as training completions.
+                ext = ("." + key.rsplit(".", 1)[-1].lower()) if "." in key else ""
+                if ext in _SKIP_EXTENSIONS:
+                    continue
                 if key not in file_index:
                     file_index[key] = []
                 file_index[key].append({

@@ -77,6 +77,7 @@ import base64
 import copy
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -2314,6 +2315,107 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
     return oai
 
 
+# ---------------------------------------------------------------------------
+# Bash-artifact fallback for sessions where the snapshot system captured nothing
+# ---------------------------------------------------------------------------
+
+# cat [>|>>] FILENAME << ['"]DELIM['"]
+_BASH_CAT_HEREDOC_RE = re.compile(
+    r"""cat\s+>>?\s+['"]?([^'"\s<>\n]+)['"]?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\2(?:\n|$)""",
+    re.DOTALL,
+)
+
+# python[3] << ['"]DELIM['"]  (inline script never written to a named file)
+_BASH_PYTHON_HEREDOC_RE = re.compile(
+    r"""python3?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\1(?:\n|$)""",
+    re.DOTALL,
+)
+
+
+def _apply_edits_simple(content: str, edits: list) -> str:
+    """Apply ``{oldText, newText}`` edits sequentially; skip unapplicable ones."""
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        old = edit.get("oldText", "")
+        new = edit.get("newText", "")
+        if old and old in content:
+            content = content.replace(old, new, 1)
+    return content
+
+
+def _fallback_output_files_for_messages(
+    messages: List[dict],
+    write_edit_state: Dict[str, str],
+) -> List[dict]:
+    """Synthesize ``output_files`` from message tool-calls when the snapshot
+    system captured nothing for a segment.
+
+    Handles three patterns found in the wild:
+
+    - ``write(path, content)`` tool call without a matching DB snapshot.
+    - ``edit(path, edits)`` chained after an earlier write (state persists via
+      ``write_edit_state`` across calls so multi-round edit chains work).
+    - ``cat > file << 'EOF'...`` bash heredoc that creates a named file without
+      going through the ``write`` tool.
+    - ``python3 << 'EOF'...`` inline script stored under the synthetic key
+      ``<inline_script>.py``.
+
+    ``write_edit_state`` is mutated in-place; callers should initialise it once
+    per node and pass it unchanged across segments.
+
+    Priority (highest wins): write/edit reconstruction > bash cat/python heredoc.
+    Returns a list of ``{path, content}`` dicts (may be empty).
+    """
+    bash_files: Dict[str, str] = {}     # last-write-wins within this round
+    write_edit_touched: Dict[str, str] = {}
+
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            args_str = fn.get("arguments", "")
+            try:
+                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(args, dict):
+                continue
+
+            if name == "bash":
+                command = args.get("command", "")
+                if not command:
+                    continue
+                for m in _BASH_CAT_HEREDOC_RE.finditer(command):
+                    path = m.group(1).strip()
+                    if path:
+                        bash_files[path] = m.group(3)
+                for m in _BASH_PYTHON_HEREDOC_RE.finditer(command):
+                    bash_files["<inline_script>.py"] = m.group(2)
+
+            elif name == "write":
+                path = args.get("path", "")
+                content = args.get("content", "")
+                if path:
+                    write_edit_state[path] = content
+                    write_edit_touched[path] = content
+
+            elif name == "edit":
+                path = args.get("path", "")
+                if path and path in write_edit_state:
+                    new_content = _apply_edits_simple(
+                        write_edit_state[path], args.get("edits", []),
+                    )
+                    write_edit_state[path] = new_content
+                    write_edit_touched[path] = new_content
+
+    # Merge: write/edit overrides bash (more explicit source)
+    merged: Dict[str, str] = {**bash_files, **write_edit_touched}
+    return [{"path": p, "content": c} for p, c in merged.items() if c]
+
+
 def _collect_written_paths_from_segment(seg: List[dict]) -> set[str]:
     """Return paths the agent **successfully** invoked ``write`` / ``edit`` on.
 
@@ -2892,6 +2994,9 @@ def build_weight_based_session(
 
         agent_trajectories: List[dict] = []
         prev_seg_snap: Optional[dict] = None  # end-of-previous-segment snapshot for diff
+        # Tracks file content for the write/edit fallback; persists across
+        # segments so edit chains in later rounds have a valid base.
+        write_edit_state: Dict[str, str] = {}
         for i, (prompt, seg) in enumerate(raw_segments):
             entry = _build_traj_entry(prompt, seg, vl_for_segment[i])
             # Artifact-only completion support (Pi only — Legacy merge shifts
@@ -2907,6 +3012,18 @@ def build_weight_based_session(
                 snap_end = _last_snapshot_in_range(agent_traj_snapshots, s_start, s_end)
                 written = _collect_written_paths_from_segment(agent_traj_raw[s_start:s_end])
                 output_files = _output_files_for_segment(written, prev_seg_snap, snap_end)
+                if output_files:
+                    # Keep write_edit_state in sync so future edit rounds have a base.
+                    for f in output_files:
+                        p = f.get("path") or ""
+                        c = f.get("content") or ""
+                        if p:
+                            write_edit_state[p] = c
+                else:
+                    # Fallback: synthesize from bash heredoc / write-edit tool args.
+                    output_files = _fallback_output_files_for_messages(
+                        entry["messages"], write_edit_state,
+                    )
                 if output_files:
                     entry["output_files"] = output_files
                 # Advance the "previous" snapshot so the next segment can diff against it
