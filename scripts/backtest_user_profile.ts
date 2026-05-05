@@ -75,7 +75,11 @@ function pickRepresentativeCases(session: SessionBlob, count: number): BacktestC
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
-  const sessionsPath = resolve(cwd, "assets/zora_chats.json");
+  const datasetPath = process.argv[2] ?? process.env.USER_PREDICTION_DATASET;
+  if (!datasetPath) {
+    throw new Error("Pass a trajectory export path as argv[2] or set USER_PREDICTION_DATASET.");
+  }
+  const sessionsPath = resolve(cwd, datasetPath);
   const reportMdPath = resolve(cwd, "docs/backtests/zora-user-profile-backtest.md");
   const reportJsonPath = resolve(cwd, "docs/backtests/zora-user-profile-backtest.json");
   const sessions = loadSessions(sessionsPath);

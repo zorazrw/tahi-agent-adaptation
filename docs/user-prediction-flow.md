@@ -253,9 +253,9 @@ The backtest entry point is [scripts/backtest_user_profile.ts](/Users/jettchen/d
 
 ### Dataset
 
-Current backtesting uses:
+Backtesting expects a local trajectory export JSON. The data file is not committed to the repo.
 
-- [assets/zora_chats.json](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/assets/zora_chats.json)
+Pass the export path as the first script argument or set `USER_PREDICTION_DATASET`.
 
 ### Replay method
 

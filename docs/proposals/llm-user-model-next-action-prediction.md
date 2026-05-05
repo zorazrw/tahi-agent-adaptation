@@ -7,7 +7,7 @@ Status: Draft
 
 I recommend starting with a **structured user-state model plus next user action predictor**, while also allowing an intentionally overfit **prototype next-message model** for fast iteration.
 
-`assets/zora_chats.json` is a good seed dataset for problem framing. It is too small for a robust production user simulator, but it is still usable for a deliberately overfit prototype if the goal is to:
+A small local trajectory export is a good seed dataset for problem framing. It is too small for a robust production user simulator, but it is still usable for a deliberately overfit prototype if the goal is to:
 
 - validate the product surface
 - identify useful state representations
@@ -28,9 +28,9 @@ This proposal fits the current codebase because Agent Cowork already has:
 - persistent memory primitives in `src/electron/libs/memory-store.ts`
 - existing context-based and weight-based adaptation scripts under `scripts/`
 
-## What `assets/zora_chats.json` Tells Us
+## What a Seed Export Tells Us
 
-The file currently contains **3 sessions** and **227 total trajectory steps**.
+A representative small seed export contains only a few sessions and a few hundred trajectory steps.
 
 Observed user action types:
 
@@ -452,7 +452,7 @@ That order is important because:
 
 ## Overfitting Is Acceptable for the Prototype
 
-With the current `zora_chats` seed alone, a trained next-message model will almost certainly overfit. For an initial prototype, that is acceptable.
+With a small seed export alone, a trained next-message model will almost certainly overfit. For an initial prototype, that is acceptable.
 
 That overfitting is tolerable if the immediate goal is:
 
@@ -505,7 +505,7 @@ Do not train on raw strings like `message("...")`. Convert trajectory events int
 - `workflow_delta`
 - `verifier_delta`
 
-### 3. Expand beyond `assets/zora_chats.json`
+### 3. Expand beyond the initial seed export
 
 Use `scripts/export_task_sessions.py` across the local session database and retain:
 
@@ -684,7 +684,6 @@ That is the highest-leverage path supported by the current data and codebase: us
 
 ## References
 
-- `assets/zora_chats.json`
 - [`scripts/README.md`](../../scripts/README.md)
 - [`docs/new-providers.md`](../new-providers.md)
 - [User Behavior Simulation with Large Language Model based Agents (arXiv 2023)](https://arxiv.org/abs/2306.02552)
