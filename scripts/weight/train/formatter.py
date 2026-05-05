@@ -32,6 +32,7 @@ from tinker_cookbook.supervised.data import (
 from tinker_cookbook.supervised.types import ChatDatasetBuilder, SupervisedDataset
 
 from weight.data.extract import (  # noqa: E402
+    _VALID_PAIR_MODES,
     extract_dpo_pairs,
     extract_opd_examples,
     extract_reinforce_examples,
@@ -130,6 +131,12 @@ class WeightDPODataBuilder(ChatDatasetBuilder):
     train_path: str
     test_path: str | None = None
     pair_mode: str = "adjacent"
+
+    def __post_init__(self) -> None:
+        if self.pair_mode not in _VALID_PAIR_MODES:
+            raise ValueError(
+                f"pair_mode must be one of {sorted(_VALID_PAIR_MODES)}, got {self.pair_mode!r}"
+            )
 
     def _load(self, path: str) -> list[dict]:
         sessions = _load_sessions(path)

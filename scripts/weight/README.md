@@ -199,15 +199,25 @@ Same module entry points; no extra flag needed for Tinker (and drop the `TINKER_
 ```bash
 cd $REPO_ROOT/scripts
 
-# DPO on Tinker
+# DPO on Tinker (recommended starting point for Qwen3.5-35B-A3B, small dataset)
+# β=0.5 is intentionally high: with <10 pairs the DPO gradient is too weak at β=0.1
+# Use --use-skyrl to avoid per-batch Tinker ref-logprob calls (~55% wall-clock savings)
+# epoch: 8 is a conservative middle ground — less verbatim memorisation than 20-40,
+#          but enough signal to learn style preferences (border removal, font size)
 python -m weight.train.run_dpo \
   --train-path $TRAIN_DATA \
-  --model-name Qwen/Qwen3-4B \
-  --renderer-name qwen3 \
+  --model-name Qwen/Qwen3.5-35B-A3B \
+  --renderer-name qwen3_5 \
   --log-path ./logs/dpo_run \
+  --pair-mode first_last \
   --batch-size 2 \
-  --num-epochs 5 \
-  --lora-rank 16
+  --num-epochs 8 \
+  --learning-rate 5e-5 \
+  --lr-schedule cosine \
+  --dpo-beta 0.5 \
+  --lora-rank 32 \
+  --rpo-alpha 0.1 \
+  --use-skyrl
 
 # OPD on Tinker
 python -m weight.train.run_opd \
