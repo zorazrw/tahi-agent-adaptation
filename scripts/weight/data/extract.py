@@ -38,6 +38,7 @@ model has been trained on (e.g. Qwen3 ``# Tools / <tools>``).
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import logging
 import sys
@@ -47,6 +48,9 @@ from typing import Any
 from .reward import compute_llm_rubric_file_scores
 
 logger = logging.getLogger(__name__)
+
+# Max chars of the unified diff injected into OPD teacher prompts (avoid blow-ups).
+_MAX_FILE_EDIT_DIFF_CHARS = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -212,8 +216,7 @@ def _augment_with_feedback(
     Captured action types:
     - ``follow_up``     → '- Human feedback: "..."'
     - ``file_edit``     → "- Human edited file '...'"
-    - ``edit_workflow`` → "- Human revised the workflow plan"
-    - ``edit_verifier`` → "- Human edited verification criteria"
+    - ``edit_workflow`` / ``edit_verifier`` — intentionally not injected (commented out).
 
     When ``gt_content`` is provided (``use_gt=True``), the final accepted version
     of the file is appended as a reference block after the feedback text.
@@ -228,12 +231,25 @@ def _augment_with_feedback(
             if text:
                 parts.append(f'- Human feedback: "{text}"')
         elif atype == "file_edit":
-            path = action.get("path", "")
-            parts.append(f"- Human edited file '{path}'")
-        elif atype == "edit_workflow":
-            parts.append("- Human revised the workflow plan")
-        elif atype == "edit_verifier":
-            parts.append("- Human edited verification criteria")
+            original = action.get("original") or ""
+            edited = action.get("edited") or ""
+            if edited.strip():
+                diff_lines = list(difflib.unified_diff(
+                    original.splitlines(keepends=True),
+                    edited.splitlines(keepends=True),
+                    fromfile="before",
+                    tofile="after",
+                    lineterm="",
+                ))
+                if diff_lines:
+                    diff_text = "".join(diff_lines)
+                    if len(diff_text) > _MAX_FILE_EDIT_DIFF_CHARS:
+                        diff_text = diff_text[:_MAX_FILE_EDIT_DIFF_CHARS] + "\n... [truncated]"
+                    parts.append("- Human edited file (diff):\n```diff\n" + diff_text + "\n```")
+        # elif atype == "edit_workflow":
+        #     parts.append("(workflow edit omitted)")
+        # elif atype == "edit_verifier":
+        #     parts.append("(verifier edit omitted)")
 
     if not parts and gt_content is None:
         return prompt
@@ -552,8 +568,7 @@ def extract_opd_examples(
     Teacher prompt construction: ALL human action types are included:
     - ``follow_up`` → "Human feedback: \"...\""
     - ``file_edit`` → "Human edited file '...'"
-    - ``edit_workflow`` → "Human revised the workflow plan"
-    - ``edit_verifier`` → "Human edited verification criteria"
+    - ``edit_workflow`` / ``edit_verifier`` — intentionally not injected.
 
     Cross-unit feedback: for each version v at (unit_idx=U, round_idx=R),
     future feedback = actions with round_index ≥ R in unit U, plus ALL actions
