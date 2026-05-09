@@ -284,20 +284,28 @@ class WeightReinforceDataBuilder(ChatDatasetBuilder):
 class OfflineOPDDataset:
     """Dataset for offline OPD: pre-built student/teacher Datum pairs.
 
-    Each batch returns ``(student_datums, teacher_model_inputs)`` where
-    the teacher model inputs share completion tokens with the student but
-    have a different (augmented) prompt prefix.
+    Each batch returns ``(student_datums, teacher_datums)`` where the teacher
+    datums share the same completion tokens but have an augmented prompt prefix
+    containing privileged human feedback (and optionally the ground-truth
+    artifact when ``use_gt=True``).
+
+    Additionally stores ``teacher_prompt_inputs`` — tokenized teacher prompts
+    WITHOUT the completion appended — for the top-K KD path in
+    :mod:`run_opd`. These are built by calling
+    ``renderer.build_generation_prompt`` on just the teacher prompt messages.
     """
 
     def __init__(
         self,
         student_datums: list[tinker.Datum],
         teacher_datums: list[tinker.Datum],
+        teacher_prompt_inputs: list[tinker.ModelInput],
         batch_size: int,
     ):
-        assert len(student_datums) == len(teacher_datums)
+        assert len(student_datums) == len(teacher_datums) == len(teacher_prompt_inputs)
         self._student = student_datums
         self._teacher = teacher_datums
+        self._teacher_prompt_inputs = teacher_prompt_inputs
         self._batch_size = batch_size
         self._indices = list(range(len(student_datums)))
 
@@ -308,13 +316,21 @@ class OfflineOPDDataset:
         renderer: renderers.Renderer,
         max_length: int | None,
         batch_size: int,
+        pair_mode: str = "first_last",
+        use_gt: bool = False,
     ) -> "OfflineOPDDataset":
         sessions = _load_sessions(path)
-        examples = extract_opd_examples(sessions, renderer=renderer)
-        logger.info("Loaded %d OPD examples from %s", len(examples), path)
+        examples = extract_opd_examples(
+            sessions, renderer=renderer, pair_mode=pair_mode, use_gt=use_gt,
+        )
+        logger.info(
+            "Loaded %d OPD examples from %s (pair_mode=%s, use_gt=%s)",
+            len(examples), path, pair_mode, use_gt,
+        )
 
         student_datums: list[tinker.Datum] = []
         teacher_datums: list[tinker.Datum] = []
+        teacher_prompt_inputs: list[tinker.ModelInput] = []
 
         for ex in examples:
             student_convo = _hydrate_tool_calls(ex["student_prompt"] + ex["completion"])
@@ -335,10 +351,19 @@ class OfflineOPDDataset:
                 teacher_convo, renderer, max_length,
                 train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
             )
+            # Build teacher prompt ModelInput (no completion) for top-K KD.
+            # build_generation_prompt produces a left-pad-ready ModelInput from
+            # the teacher prompt messages only; completion tokens are appended
+            # per-datum by the top-K pre-computation step in run_opd.
+            teacher_prompt_input = renderer.build_generation_prompt(
+                _hydrate_tool_calls(ex["teacher_prompt"])
+            )
+
             student_datums.append(student_datum)
             teacher_datums.append(teacher_datum)
+            teacher_prompt_inputs.append(teacher_prompt_input)
 
-        return cls(student_datums, teacher_datums, batch_size)
+        return cls(student_datums, teacher_datums, teacher_prompt_inputs, batch_size)
 
     def __len__(self) -> int:
         if not self._student:
@@ -358,3 +383,20 @@ class OfflineOPDDataset:
         s = [self._student[self._indices[i]] for i in range(start, end)]
         t = [self._teacher[self._indices[i]] for i in range(start, end)]
         return s, t
+
+    def get_all_teacher_prompt_inputs(self) -> list[tinker.ModelInput]:
+        """Return all teacher prompt ModelInputs in dataset order (not shuffled).
+
+        Used by the top-K pre-computation step in run_opd to build teacher-forced
+        sequences. Note: these are in original (un-shuffled) order; the mapping
+        back to student datums uses self._indices set by set_epoch.
+        """
+        return list(self._teacher_prompt_inputs)
+
+    def get_batch_teacher_prompt_inputs(
+        self, index: int,
+    ) -> list[tinker.ModelInput]:
+        """Return teacher prompt inputs for the current batch (respects set_epoch shuffle)."""
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        return [self._teacher_prompt_inputs[self._indices[i]] for i in range(start, end)]

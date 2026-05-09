@@ -219,15 +219,24 @@ python -m weight.train.run_dpo \
   --rpo-alpha 0.1 \
   --use-skyrl
 
-# OPD on Tinker
+# OPD on Tinker (recommended: top-K=20 distillation, first_last pairs)
+# --topk 20     → forward KL over top-20 teacher vocab candidates (default)
+# --pair-mode   → "first_last" (one example per file, cleanest signal)
+#                 or "adjacent" (one example per version step, more data)
+# --use-gt      → append final accepted version to teacher prompt (SDFT trick)
+# --use-skyrl   → fallback IS path; disables top-K (SkyRL lacks prompt_logprobs)
 python -m weight.train.run_opd \
   --train-path $TRAIN_DATA \
-  --model-name Qwen/Qwen3-4B \
-  --renderer-name qwen3 \
+  --model-name Qwen/Qwen3.5-35B-A3B \
+  --renderer-name qwen3_5 \
   --log-path ./logs/opd_run \
+  --pair-mode first_last \
   --batch-size 2 \
-  --num-epochs 5 \
-  --lora-rank 16
+  --num-epochs 4 \
+  --learning-rate 1e-4 \
+  --lr-schedule cosine \
+  --lora-rank 32 \
+  --topk 20
 
 # REINFORCE on Tinker (no flag — algorithm has no ref/teacher dependency)
 python -m weight.train.run_reinforce \
@@ -243,7 +252,7 @@ python -m weight.train.run_reinforce \
 | Algorithm | Default (Tinker) | `--use-skyrl` |
 |---|---|---|
 | DPO | Snapshot once: `reference_client = training_client.save_weights_and_get_sampling_client()`. Per batch: `reference_client.compute_logprobs_async`. Canonical DPO recipe. | Pre-compute every datum's reference logprobs once via `training_client.forward()`, cache by content fingerprint. Workaround for SkyRL's missing `prompt_logprobs`. |
-| OPD | Frozen base-model `teacher_client = service_client.create_sampling_client(base_model=...)`. Per batch: `teacher_client.compute_logprobs_async`. | Pre-compute teacher logprobs for every (student, teacher) pair via `training_client.forward()`. |
+| OPD | Frozen base-model `SamplingClient`. Default (`--topk 20`): pre-compute top-K teacher vocab distributions once for all examples via `sample_async(topk_prompt_logprobs=K)`, then train with Tinker's built-in `cross_entropy` loss — forward KL over top-K tokens. With `--topk 0`: per-batch scalar logprobs via `compute_logprobs_async`, IS fallback. | Pre-compute teacher logprobs for every (student, teacher) pair via `training_client.forward()`. Top-K distillation **not available** (SkyRL lacks `topk_prompt_logprobs`). |
 | REINFORCE | No ref/teacher dependency — same code path on both backends. | Same. |
 
 The two paths produce mathematically equivalent training: both fix the reference / teacher distribution at the initial weights and use it to score student outputs. The Tinker path just does it batch-by-batch instead of caching everything up front.

@@ -103,6 +103,17 @@ class Config:
     # cloud API (live teacher_client.compute_logprobs_async per batch).
     use_skyrl: bool = False
 
+    # Data construction
+    pair_mode: str = "first_last"   # "first_last" | "adjacent" (file-centric)
+    use_gt: bool = False            # append last-version artifact to teacher prompt
+
+    # Top-K distillation (Tinker only; ignored when use_skyrl=True).
+    # topk > 0 → forward KL distillation with K teacher vocabulary candidates
+    #   per position; loss = -sum_k p_teacher(v_k) * log p_student(v_k).
+    # topk = 0 → importance-sampling fallback (advantage = teacher_lp - student_lp).
+    # K=20 matches full-vocabulary KL in practice (Shenfeld et al., 2026).
+    topk: int = 20
+
 
 def _extract_completion_info(
     datum: tinker.Datum,
@@ -289,6 +300,263 @@ def _live_teacher_logprobs(
     )
 
 
+# ---------------------------------------------------------------------------
+# Top-K distillation helpers (Tinker only)
+# ---------------------------------------------------------------------------
+
+async def _build_offline_topk_datums_async(
+    student_datums: list[tinker.Datum],
+    teacher_prompt_inputs: list[tinker.ModelInput],
+    teacher_client: tinker.SamplingClient,
+    topk: int = 20,
+    max_context_length: int = 32768,
+    vocab_size: int | None = None,
+    skip_first_n_tokens: int = 3,
+) -> tuple[list[tinker.Datum], dict[str, float]]:
+    """Build cross_entropy datums with top-K teacher soft targets (offline version).
+
+    Adapted from ``tinker_opd.build_topk_distillation_datums`` for the offline
+    setting: teacher prompts are pre-built (stored in the dataset) and map
+    1-to-1 with student datums (no group-index indirection needed).
+
+    For each student datum:
+    1. Extract completion tokens from the student datum's mask.
+    2. Append them to the teacher prompt to build a teacher-forced sequence.
+    3. Call ``teacher_client.sample_async(topk_prompt_logprobs=K)`` in parallel.
+    4. For each completion position, read top-K (token_id, log_prob) pairs,
+       renormalise over K, and write them into an ``(N, K)`` shaped datum with
+       ``cross_entropy`` loss semantics.
+
+    Returns (new_datums, metrics). New datums have ``target_tokens`` shape
+    ``(N, K)`` and ``weights`` shape ``(N, K)`` — Tinker's CE loss consumes
+    these directly when called via ``forward_backward("cross_entropy")``.
+    """
+    teacher_forced_seqs: list[tinker.ModelInput] = []
+    teacher_prompt_lens: list[int] = []
+    completion_lens: list[int] = []
+    truncated_count = 0
+
+    for sd, tp in zip(student_datums, teacher_prompt_inputs, strict=True):
+        weights = sd.loss_fn_inputs["weights"].data
+        mask_indices = [i for i, w in enumerate(weights) if w > 0]
+        tp_len = tp.length
+
+        if not mask_indices:
+            teacher_forced_seqs.append(tp)
+            teacher_prompt_lens.append(tp_len)
+            completion_lens.append(0)
+            continue
+
+        # Reconstruct full student sequence and extract completion tokens.
+        targets = sd.loss_fn_inputs["target_tokens"].data
+        full_tokens = list(sd.model_input.to_ints())
+        if targets:
+            full_tokens.append(int(targets[-1]))
+        comp_start = mask_indices[0] + 1
+        comp_tokens = full_tokens[comp_start:]
+
+        available = max_context_length - tp_len
+        was_truncated = False
+        if available <= 0:
+            comp_tokens = []
+            was_truncated = True
+        elif len(comp_tokens) > available:
+            comp_tokens = comp_tokens[:available]
+            was_truncated = True
+        if was_truncated:
+            truncated_count += 1
+
+        teacher_forced = tp
+        for tok in comp_tokens:
+            teacher_forced = teacher_forced.append_int(tok)
+
+        teacher_forced_seqs.append(teacher_forced)
+        teacher_prompt_lens.append(tp_len)
+        completion_lens.append(len(comp_tokens))
+
+    # Parallel top-K logprob queries.
+    topk_responses = await asyncio.gather(
+        *[
+            teacher_client.sample_async(
+                prompt=tf_seq,
+                num_samples=1,
+                sampling_params=tinker.SamplingParams(max_tokens=1),
+                include_prompt_logprobs=True,
+                topk_prompt_logprobs=topk,
+            )
+            for tf_seq in teacher_forced_seqs
+        ]
+    )
+
+    # Build (N, K) shaped datums.
+    total_completion_tokens = 0.0
+    total_teacher_entropy = 0.0
+    new_datums: list[tinker.Datum] = []
+
+    for i, sd in enumerate(student_datums):
+        weights_1d = sd.loss_fn_inputs["weights"].data
+        mask_indices = [j for j, w in enumerate(weights_1d) if w > 0]
+        N = sd.model_input.length
+        comp_len = completion_lens[i]
+        tp_len = teacher_prompt_lens[i]
+
+        target_tokens_NK = torch.zeros(N, topk, dtype=torch.long)
+        weights_NK = torch.zeros(N, topk, dtype=torch.float32)
+
+        if comp_len > 0 and mask_indices:
+            topk_all = topk_responses[i].topk_prompt_logprobs
+            n_tokens = min(comp_len, len(mask_indices))
+
+            for t in range(n_tokens):
+                if t < skip_first_n_tokens:
+                    continue
+                teacher_pos = tp_len + t
+                student_pos = mask_indices[t]
+
+                if topk_all is None or teacher_pos >= len(topk_all):
+                    continue
+                topk_entries = topk_all[teacher_pos]
+                if not topk_entries:
+                    continue
+
+                filtered = [
+                    (tok_id, lp)
+                    for tok_id, lp in topk_entries[:topk]
+                    if vocab_size is None or tok_id < vocab_size
+                ]
+                if not filtered:
+                    continue
+
+                k_actual = len(filtered)
+                token_ids = torch.tensor([tid for tid, _ in filtered], dtype=torch.long)
+                logprobs = torch.tensor([lp for _, lp in filtered], dtype=torch.float32)
+                logprobs -= torch.logsumexp(logprobs, dim=0)
+                probs = logprobs.exp()
+
+                target_tokens_NK[student_pos, :k_actual] = token_ids
+                weights_NK[student_pos, :k_actual] = probs
+                total_teacher_entropy += -(probs * logprobs).sum().item()
+
+            total_completion_tokens += n_tokens
+
+        new_datums.append(tinker.Datum(
+            model_input=sd.model_input,
+            loss_fn_inputs={
+                "target_tokens": tinker.TensorData.from_torch(target_tokens_NK),
+                "weights": tinker.TensorData.from_torch(weights_NK),
+            },
+        ))
+
+    metrics: dict[str, float] = {
+        "opd/topk_truncated": float(truncated_count),
+        "opd/topk_num_datums": float(len(student_datums)),
+        "opd/topk_k": float(topk),
+    }
+    if total_completion_tokens > 0:
+        metrics["opd/total_completion_tokens"] = total_completion_tokens
+        metrics["opd/mean_teacher_entropy"] = total_teacher_entropy / total_completion_tokens
+    return new_datums, metrics
+
+
+def build_offline_topk_datums(
+    student_datums: list[tinker.Datum],
+    teacher_prompt_inputs: list[tinker.ModelInput],
+    teacher_client: tinker.SamplingClient,
+    topk: int = 20,
+    max_context_length: int = 32768,
+    vocab_size: int | None = None,
+) -> tuple[list[tinker.Datum], dict[str, float]]:
+    """Synchronous wrapper around :func:`_build_offline_topk_datums_async`."""
+    return asyncio.run(
+        _build_offline_topk_datums_async(
+            student_datums, teacher_prompt_inputs, teacher_client,
+            topk=topk, max_context_length=max_context_length, vocab_size=vocab_size,
+        )
+    )
+
+
+def precompute_all_topk_datums(
+    dataset: "OfflineOPDDataset",
+    teacher_client: tinker.SamplingClient,
+    topk: int = 20,
+    max_context_length: int = 32768,
+    vocab_size: int | None = None,
+) -> list[tinker.Datum]:
+    """Pre-compute top-K datums for every example in the dataset (offline optimisation).
+
+    Since the teacher is frozen and completions are fixed (offline, not on-policy),
+    top-K targets are identical across epochs and can be computed once upfront,
+    saving repeated API calls. Returns a list aligned 1-to-1 with the dataset's
+    internal un-shuffled order; use ``dataset.get_batch_topk_datums(batch_idx)``
+    to retrieve shuffled batches during training.
+    """
+    all_student, _ = zip(
+        *[dataset.get_batch(i) for i in range(len(dataset))],
+    ) if len(dataset) > 0 else ([], [])
+    all_student_flat = [d for batch in all_student for d in batch]
+    teacher_prompt_inputs = dataset.get_all_teacher_prompt_inputs()
+    logger.info(
+        "Pre-computing top-K=%d teacher targets for %d OPD examples",
+        topk, len(all_student_flat),
+    )
+    topk_datums, metrics = build_offline_topk_datums(
+        all_student_flat, teacher_prompt_inputs, teacher_client,
+        topk=topk, max_context_length=max_context_length, vocab_size=vocab_size,
+    )
+    logger.info("Top-K pre-computation done: %s", metrics)
+    return topk_datums
+
+
+def do_update_topk(
+    step: int,
+    total_steps: int,
+    config: "Config",
+    training_client: tinker.TrainingClient,
+    topk_datums: list[tinker.Datum],
+    ml_logger: "ml_log.Logger",
+    log_path: str,
+) -> dict[str, Any]:
+    """Single training step for top-K distillation.
+
+    Submits pre-built ``(N, K)`` datums directly to Tinker's built-in
+    ``cross_entropy`` loss, which computes
+    ``-sum_k p_teacher(v_k|t) * log p_student(v_k|t)`` server-side.
+    No custom Python loss needed — the CE loss over (N,K) targets is natively
+    supported by the Tinker training API.
+    """
+    if config.save_every > 0 and step % config.save_every == 0 and step > 0:
+        checkpoint_utils.save_checkpoint(
+            training_client=training_client,
+            name=f"{step:06d}",
+            log_path=log_path,
+            kind="both",
+            loop_state={"batch": step},
+            ttl_seconds=config.ttl_seconds,
+        )
+
+    learning_rate = config.learning_rate * compute_schedule_lr_multiplier(
+        lr_schedule=config.lr_schedule, step=step, total_steps=total_steps,
+    )
+    adam_params = tinker.AdamParams(
+        learning_rate=learning_rate,
+        beta1=config.adam_beta1,
+        beta2=config.adam_beta2,
+        eps=config.adam_eps,
+    )
+    result = training_client.forward_backward(topk_datums, "cross_entropy").result()
+    training_client.optim_step(adam_params).result()
+
+    metrics: dict[str, Any] = {
+        "opd_loss": result.metrics.get("loss", 0.0),
+        "num_examples": len(topk_datums),
+        "learning_rate": learning_rate,
+        "progress": step / total_steps,
+    }
+    metrics.update(result.metrics)
+    ml_logger.log_metrics(metrics=metrics, step=step)
+    return metrics
+
+
 def do_update(
     step: int,
     total_steps: int,
@@ -429,18 +697,34 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
     # ------------------------------------------------------------------ #
     # Teacher logprob provider (set up BEFORE any optim_step)             #
     # ------------------------------------------------------------------ #
-    get_teacher_lps: Callable[
-        [list[tinker.Datum], list[tinker.Datum]], list[torch.Tensor]
-    ]
-    if not config.use_skyrl:
-        # Tinker cloud path: a frozen base-model SamplingClient acts as the
-        # teacher.  Per-batch compute_logprobs_async is cheap and avoids
-        # materialising a full cache up front.
+    use_topk = (not config.use_skyrl) and config.topk > 0
+    topk_datums_all: list[tinker.Datum] = []
+
+    if use_topk:
+        # Tinker top-K path: pre-compute (N, K) targets ONCE for all examples
+        # (teacher and completions are fixed in offline mode → identical across
+        # epochs; saves K API calls per training step vs. on-policy SDFT).
         teacher_client = service_client.create_sampling_client(
             base_model=config.model_name,
         )
         logger.info(
-            "Tinker mode: created frozen teacher SamplingClient for %s",
+            "Top-K mode (K=%d): created frozen teacher SamplingClient for %s. "
+            "Pre-computing targets for all %d examples...",
+            config.topk, config.model_name, n_batches * dataset._batch_size,
+        )
+        topk_datums_all = precompute_all_topk_datums(
+            dataset, teacher_client, topk=config.topk,
+        )
+        logger.info("Top-K pre-computation complete (%d datums)", len(topk_datums_all))
+        get_teacher_lps = None  # not used in top-K path
+
+    elif not config.use_skyrl:
+        # Tinker IS path: frozen teacher SamplingClient, per-batch scalar logprobs.
+        teacher_client = service_client.create_sampling_client(
+            base_model=config.model_name,
+        )
+        logger.info(
+            "Tinker IS mode (topk=0): created frozen teacher SamplingClient for %s",
             config.model_name,
         )
 
@@ -450,8 +734,10 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
         ) -> list[torch.Tensor]:
             return _live_teacher_logprobs(teacher_client, student_datums, teacher_datums)
     else:
-        # SkyRL path: pre-compute teacher logprobs for every (student, teacher)
-        # pair via training_client.forward() at the initial weights.
+        # SkyRL IS path: pre-compute teacher logprobs via training_client.forward().
+        # NOTE: SkyRL does not support topk_prompt_logprobs, so top-K KD is
+        # unavailable here. If you need top-K distillation, switch to Tinker
+        # (drop --use-skyrl) and set --topk 20.
         teacher_cache = precompute_teacher_logprob_cache(
             training_client, dataset, config.num_epochs,
         )
@@ -472,7 +758,6 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
                 break
 
             student_datums, teacher_datums = dataset.get_batch(batch_idx)
-            teacher_lps = get_teacher_lps(student_datums, teacher_datums)
 
             if step == 0:
                 for i in range(min(2, len(student_datums))):
@@ -483,17 +768,36 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
                         int_tokens, cast(list[float], weights), tokenizer,
                     ))
 
-            do_update(
-                step=step,
-                total_steps=total_steps,
-                config=config,
-                training_client=training_client,
-                student_datums=student_datums,
-                teacher_completion_lps=teacher_lps,
-                ml_logger=ml_logger,
-                log_path=config.log_path,
-                tokenizer=tokenizer,
-            )
+            if use_topk:
+                # Retrieve the pre-computed top-K datums for this batch.
+                # topk_datums_all is in original dataset order; batch_idx
+                # corresponds to the batch window after set_epoch shuffle.
+                start = batch_idx * dataset._batch_size
+                end = min(start + dataset._batch_size, len(topk_datums_all))
+                batch_topk = [topk_datums_all[dataset._indices[i]]
+                              for i in range(start, end)]
+                do_update_topk(
+                    step=step,
+                    total_steps=total_steps,
+                    config=config,
+                    training_client=training_client,
+                    topk_datums=batch_topk,
+                    ml_logger=ml_logger,
+                    log_path=config.log_path,
+                )
+            else:
+                teacher_lps = get_teacher_lps(student_datums, teacher_datums)
+                do_update(
+                    step=step,
+                    total_steps=total_steps,
+                    config=config,
+                    training_client=training_client,
+                    student_datums=student_datums,
+                    teacher_completion_lps=teacher_lps,
+                    ml_logger=ml_logger,
+                    log_path=config.log_path,
+                    tokenizer=tokenizer,
+                )
 
     checkpoint_utils.save_checkpoint(
         training_client=training_client,
@@ -526,20 +830,49 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
-    parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument("--lr-schedule", default="cosine",
+                        choices=["linear", "cosine", "constant"],
+                        help="LR schedule (default: cosine)")
+    parser.add_argument("--num-epochs", type=int, default=4)
     parser.add_argument("--lora-rank", type=int, default=32)
     parser.add_argument("--load-checkpoint-path", default=None)
     parser.add_argument("--wandb-project", default=None)
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--base-url", default=None)
+    parser.add_argument("--save-every", type=int, default=0,
+                        help="Save checkpoint every N steps (0 = only at end)")
+    parser.add_argument(
+        "--pair-mode", choices=["first_last", "adjacent"], default="first_last",
+        help=(
+            "Pair construction mode. 'first_last' (default): one example per file, "
+            "student = first version, teacher has all future feedback. "
+            "'adjacent': one example per consecutive version pair."
+        ),
+    )
+    parser.add_argument(
+        "--use-gt", action="store_true",
+        help=(
+            "Append the last (ground-truth) version of each file to the teacher "
+            "prompt as a reference block. Implements the SDFT golden-answer trick "
+            "which sharpens teacher distributions on correct tokens."
+        ),
+    )
+    parser.add_argument(
+        "--topk", type=int, default=20,
+        help=(
+            "Top-K vocabulary candidates for distillation (Tinker only). "
+            "K=20 matches full-vocabulary KL in practice. Set to 0 to use "
+            "the importance-sampling fallback (advantage = teacher_lp - student_lp)."
+        ),
+    )
     parser.add_argument(
         "--use-skyrl", action="store_true",
         help=(
-            "Use the SkyRL-compatible path that pre-computes teacher "
-            "logprobs via training_client.forward(). Default (off) uses the "
-            "Tinker cloud path: query a frozen teacher SamplingClient per "
-            "batch via compute_logprobs_async."
+            "Use SkyRL-compatible IS path (training_client.forward) instead of "
+            "the Tinker teacher SamplingClient. Disables top-K distillation. "
+            "NOTE: SkyRL does not support topk_prompt_logprobs so top-K KD "
+            "is unavailable on this backend."
         ),
     )
     args = parser.parse_args()
@@ -552,6 +885,8 @@ if __name__ == "__main__":
         renderer=renderer,
         max_length=args.max_length,
         batch_size=args.batch_size,
+        pair_mode=args.pair_mode,
+        use_gt=args.use_gt,
     )
 
     cfg = Config(
@@ -560,13 +895,18 @@ if __name__ == "__main__":
         renderer_name=args.renderer_name,
         lora_rank=args.lora_rank,
         learning_rate=args.learning_rate,
+        lr_schedule=args.lr_schedule,
         num_epochs=args.num_epochs,
+        save_every=args.save_every,
         load_checkpoint_path=args.load_checkpoint_path,
         wandb_project=args.wandb_project,
         wandb_name=args.wandb_name,
         max_steps=args.max_steps,
         base_url=args.base_url,
         use_skyrl=args.use_skyrl,
+        pair_mode=args.pair_mode,
+        use_gt=args.use_gt,
+        topk=args.topk,
     )
 
     main(cfg, dataset)

@@ -53,28 +53,22 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+# DEAD CODE — superseded by _build_artifact_completion.
+# Kept as a fallback for diagnostic use and in case full-trajectory training
+# (non-artifact-only) is ever needed again.
 def _completion_and_mask(
     messages: list[dict],
 ) -> tuple[list[dict], list[bool]]:
-    """Return (completion_messages, is_agent_mask) from a round's messages.
-
-    Skips the first ``user`` message (it belongs to the prompt, not the
-    completion) and marks ``assistant`` messages as agent turns.
-
-    NOTE: superseded by :func:`_build_artifact_completion` for current training
-    modes; retained for diagnostic / fallback use only.
-    """
+    """Return (completion_messages, is_agent_mask) from a round's messages."""
     completion = messages[1:]
     is_agent = [m.get("role") == "assistant" for m in completion]
     return completion, is_agent
 
 
+# DEAD CODE — kept for potential future use if incomplete-round filtering
+# is re-introduced for full-trajectory training modes.
 def _is_complete_round(messages: list[dict]) -> bool:
-    """Return True if the round ends with a final assistant message.
-
-    Rounds that end on a tool result are incomplete (the agent was mid-execution
-    when the session was cut). Such rounds should be excluded from training.
-    """
+    """Return True if the round ends with a final assistant message."""
     completion = messages[1:]
     if not completion:
         return False
@@ -210,8 +204,22 @@ def _build_conversation_context(
 def _augment_with_feedback(
     prompt: list[dict],
     human_actions: list[dict],
+    gt_content: str | None = None,
 ) -> list[dict]:
-    """Append privileged human feedback to the last user message (for teacher)."""
+    """Append privileged human feedback (and optionally the ground-truth artifact)
+    to the last user message for the teacher prompt.
+
+    Captured action types:
+    - ``follow_up``     → '- Human feedback: "..."'
+    - ``file_edit``     → "- Human edited file '...'"
+    - ``edit_workflow`` → "- Human revised the workflow plan"
+    - ``edit_verifier`` → "- Human edited verification criteria"
+
+    When ``gt_content`` is provided (``use_gt=True``), the final accepted version
+    of the file is appended as a reference block after the feedback text.
+    This implements the SDFT "golden answer in teacher prompt" technique, which
+    empirically sharpens the teacher's distribution on the correct tokens.
+    """
     parts: list[str] = []
     for action in human_actions:
         atype = action.get("type", "follow_up")
@@ -227,15 +235,22 @@ def _augment_with_feedback(
         elif atype == "edit_verifier":
             parts.append("- Human edited verification criteria")
 
-    if not parts:
+    if not parts and gt_content is None:
         return prompt
 
-    suffix = (
-        "\n\nThe following is feedback from a human collaborator on a "
-        "previous attempt. Use this to guide your response:\n"
-        + "\n".join(parts)
-        + "\n\nNow generate an improved response incorporating the above guidance."
-    )
+    suffix = ""
+    if parts:
+        suffix += (
+            "\n\nThe following is feedback from a human collaborator on a "
+            "previous attempt. Use this to guide your response:\n"
+            + "\n".join(parts)
+        )
+    if gt_content is not None:
+        suffix += (
+            "\n\nFor reference, here is the final accepted version of the file:\n"
+            "```\n" + gt_content + "\n```"
+        )
+    suffix += "\n\nNow generate an improved response incorporating the above guidance."
     augmented = list(prompt)
     last = augmented[-1]
     augmented[-1] = {"role": last["role"], "content": last["content"] + suffix}
@@ -319,7 +334,7 @@ def _build_file_version_index(
     )
     file_index: dict[str, list[dict]] = {}
 
-    for unit in session.get("task_units", []):
+    for unit_idx, unit in enumerate(session.get("task_units", [])):
         if unit.get("intent") == "planning":
             continue
         rounds = unit.get("agent_trajectories", [])
@@ -352,6 +367,9 @@ def _build_file_version_index(
                     "path": path,
                     "content": content,
                     "prompt": prompt_for_round,
+                    # Source coordinates — used by OPD to find future feedback items.
+                    "unit_idx": unit_idx,
+                    "round_idx": round_idx,
                 })
 
             # Advance context: append this round's assistant+tool messages.
@@ -445,28 +463,20 @@ def extract_dpo_pairs(
 # OPD extraction (offline)
 # ---------------------------------------------------------------------------
 
-def extract_opd_examples(
+def _extract_opd_examples_legacy(
     sessions: list[dict],
     renderer: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract offline OPD examples from weight-format sessions.
+    """Legacy unit-local OPD extractor (one example per round within a task_unit).
+
+    Kept for reference and in case full-trajectory / non-artifact-only OPD
+    training is needed. The active extractor is :func:`extract_opd_examples`.
 
     For each task_unit with >=2 rounds and human feedback, produces one example
     per round k in [0, N-2]:
-
-    - **student_prompt**: accumulated context the model saw before round k
-      (prior rounds' full original messages + their triggering follow-ups).
-    - **teacher_prompt**: student_prompt + privileged human feedback from
-      round k onwards.
-    - **completion**: round k's artifact-only completion, built from
-      ``rounds[k].output_files`` as one ``write`` tool_call per file.
-    - **is_agent**: per-message mask (True for assistant).
-
-    Rounds without ``output_files`` (no artifact produced) are skipped.
-
-    Returns list of::
-
-        {student_prompt, teacher_prompt, completion, is_agent, round_index}
+    - student_prompt: accumulated context up to round k (unit-local)
+    - teacher_prompt: student_prompt + all future human feedback in this unit
+    - completion: round k's artifact-only completion
     """
     examples: list[dict[str, Any]] = []
 
@@ -493,7 +503,6 @@ def extract_opd_examples(
                 student_prompt = _build_conversation_context(
                     base_prompt, rounds, human_traj, up_to_round=k,
                 )
-
                 future_human = [
                     h for h in human_traj
                     if h.get("round_index") is None or h.get("round_index", -1) >= k
@@ -502,7 +511,6 @@ def extract_opd_examples(
                     continue
 
                 teacher_prompt = _augment_with_feedback(student_prompt, future_human)
-
                 examples.append({
                     "student_prompt": student_prompt,
                     "teacher_prompt": teacher_prompt,
@@ -514,9 +522,139 @@ def extract_opd_examples(
     return examples
 
 
+def extract_opd_examples(
+    sessions: list[dict],
+    renderer: Any | None = None,
+    pair_mode: str = "first_last",
+    use_gt: bool = False,
+) -> list[dict[str, Any]]:
+    """Extract offline OPD examples using the file-centric cross-unit strategy.
+
+    Mirrors the DPO file-centric design: the full session is scanned via
+    :func:`_build_file_version_index`, rounds are grouped by output filename
+    (basename), and OPD examples are built from the ordered version history.
+
+    Modes (``pair_mode``):
+
+    - ``"first_last"`` (default): one example per file.
+      Student = first version written (v0); teacher has **all** future human
+      feedback from v0's round onwards (cross-unit).
+
+    - ``"adjacent"``: one example per consecutive version step.
+      Student = version k (v_k); teacher has feedback arriving strictly after
+      v_k's source round. More examples, smaller per-example teacher signal.
+
+    When ``use_gt=True`` the **last** version's content is appended to every
+    teacher prompt as a "final accepted version" reference block. This
+    implements the SDFT golden-answer conditioning trick, which was shown to
+    significantly sharpen teacher distributions on the correct tokens.
+
+    Teacher prompt construction: ALL human action types are included:
+    - ``follow_up`` → "Human feedback: \"...\""
+    - ``file_edit`` → "Human edited file '...'"
+    - ``edit_workflow`` → "Human revised the workflow plan"
+    - ``edit_verifier`` → "Human edited verification criteria"
+
+    Cross-unit feedback: for each version v at (unit_idx=U, round_idx=R),
+    future feedback = actions with round_index ≥ R in unit U, plus ALL actions
+    in any subsequent unit (unit_idx > U).  This is the recommended "envelope"
+    so the teacher sees revision context from later task units that polished the
+    same file.
+
+    Returns list of::
+
+        {student_prompt, teacher_prompt, completion, is_agent}
+    """
+    if pair_mode not in {"first_last", "adjacent"}:
+        raise ValueError(
+            f"pair_mode must be 'first_last' or 'adjacent', got {pair_mode!r}"
+        )
+
+    examples: list[dict[str, Any]] = []
+
+    for session in sessions:
+        file_index = _build_file_version_index(
+            session,
+            session.get("system_prompt", ""),
+            session.get("tool_schemas"),
+            renderer,
+        )
+
+        # Flatten all human feedback across the session with position info.
+        # round_index == -1 means the action is not tied to a specific round
+        # (e.g. edit_workflow that spans the whole unit).
+        all_feedback: list[dict] = []
+        for unit_idx, unit in enumerate(session.get("task_units", [])):
+            if unit.get("intent") == "planning":
+                continue
+            for h in unit.get("human_trajectories", []) or []:
+                all_feedback.append({
+                    "unit_idx": unit_idx,
+                    "round_index": h.get("round_index", -1),
+                    "action": h,
+                })
+
+        for versions in file_index.values():
+            if len(versions) < 2:
+                continue
+
+            gt_content = versions[-1]["content"] if use_gt else None
+
+            # Which versions become the student completion?
+            if pair_mode == "first_last":
+                student_versions = [versions[0]]
+            else:  # adjacent
+                student_versions = versions[:-1]
+
+            for v in student_versions:
+                v_unit = v["unit_idx"]
+                v_round = v["round_idx"]
+
+                # Collect future human feedback (cross-unit envelope).
+                future_actions = [
+                    item["action"]
+                    for item in all_feedback
+                    if (item["unit_idx"] > v_unit)
+                    or (item["unit_idx"] == v_unit and item["round_index"] >= v_round)
+                ]
+
+                if not future_actions and not use_gt:
+                    continue  # no teacher signal for this version
+
+                completion, is_agent = _build_artifact_completion(
+                    [{"path": v["path"], "content": v["content"]}],
+                )
+                if not completion:
+                    continue
+
+                student_prompt = list(v["prompt"])
+                teacher_prompt = _augment_with_feedback(
+                    student_prompt, future_actions, gt_content,
+                )
+
+                examples.append({
+                    "student_prompt": student_prompt,
+                    "teacher_prompt": teacher_prompt,
+                    "completion": completion,
+                    "is_agent": is_agent,
+                })
+
+    return examples
+
+
 # ---------------------------------------------------------------------------
 # REINFORCE extraction
 # ---------------------------------------------------------------------------
+# TODO (future): migrate to the file-centric approach used by DPO and OPD.
+#   The main challenge is that each example's reward comes from
+#   `compute_per_traj_rewards(unit)` which is keyed by (unit, round_idx).
+#   To migrate, extend `_build_file_version_index` to also return the
+#   (unit_idx, round_idx) coordinates of each version (already added),
+#   then look up the verifier pass-rate for that specific (unit, round) as
+#   the reward signal. The advantage is a cross-unit context-aware prompt;
+#   the risk is that verifier criteria in one unit may not apply to a file
+#   that was polished in a different unit.
+#   For now, REINFORCE stays on the unit-local per-round path.
 
 def _reward_cache_is_binary_rubric_row(values: list[Any]) -> bool:
     """Each entry must be exactly 0 or 1 (float or int), not bool subtype quirks."""
@@ -710,10 +848,19 @@ def main() -> None:
         choices=["adjacent", "first_last"],
         default="first_last",
         help=(
-            "DPO pair construction (ignored for opd/reinforce). "
+            "Pair construction mode for DPO and OPD (ignored for reinforce). "
             "Both modes scan the whole session by file (cross-unit). "
             "'first_last' = one pair per file, first write vs last write (default). "
             "'adjacent' = one pair per consecutive version step per file."
+        ),
+    )
+    parser.add_argument(
+        "--use-gt",
+        action="store_true",
+        help=(
+            "OPD only: append the last version of each file to the teacher "
+            "prompt as a ground-truth reference (SDFT golden-answer trick). "
+            "Ignored for DPO and reinforce."
         ),
     )
     args = parser.parse_args()
@@ -735,10 +882,12 @@ def main() -> None:
                 print(f"    cho: {_msg_preview(m)}")
 
     elif args.mode == "opd":
-        units = extract_opd_examples(sessions)
-        print(f"Extracted {len(units)} OPD examples")
+        units = extract_opd_examples(
+            sessions, pair_mode=args.pair_mode, use_gt=args.use_gt,
+        )
+        print(f"Extracted {len(units)} OPD examples (pair_mode={args.pair_mode}, use_gt={args.use_gt})")
         for i, u in enumerate(units):
-            print(f"\n── Example {i} (round {u['round_index']}) ──")
+            print(f"\n── Example {i} ──")
             print(f"  student_prompt: {len(u['student_prompt'])} msgs")
             print(f"  teacher_prompt: {len(u['teacher_prompt'])} msgs")
             print(f"  completion: {len(u['completion'])} msgs (agent: {sum(u['is_agent'])})")
