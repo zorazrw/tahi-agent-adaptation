@@ -518,7 +518,7 @@ def _plan_steps(agent_steps: list[dict]) -> list[dict]:
         if parsed is None:
             continue
         kind, _ = parsed
-        if kind == "plan":
+        if kind in ("plan", "workflow_plan"):
             out.append(step)
     return out
 
@@ -573,7 +573,7 @@ def _inject_plan_workflow_tool_results(
         if not isinstance(action, str):
             continue
         parsed = _parse_action_call(action)
-        if parsed is None or parsed[0] != "plan":
+        if parsed is None or parsed[0] not in ("plan", "workflow_plan"):
             continue
         wf: Any = None
         if traj is not None and end_idx >= 0:

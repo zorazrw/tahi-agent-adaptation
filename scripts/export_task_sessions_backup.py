@@ -10,8 +10,7 @@ Each exported session is:
       {
         "actor": "user" | "agent",
         "action": str,
-        "tool_result": optional str; SDK tool outcomes, file-edit annotations, or compact verifier-line
-        annotations for ``edit_verifier()`` (one ``{criterion}: {status}`` line per verifier, then targeted ``•`` edits),
+        "tool_result": optional str; present when the SDK tool outcome was merged into the prior tool-call step,
         "environment": { ... }  # omitted for user/agent steps that are only ``message("…")`` (no `` | ``)
       },
       ...
@@ -25,12 +24,9 @@ are omitted — they are LM input, not user chat. Only real follow-ups from the 
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
 ``brain_edit()`` rows record Brain dialog saves (memory + skill files on disk).
-``edit_workflow()``, ``edit_verifier()``, and preview ``edit("…")`` (file save) rows persist the same
-``environment`` shape: ``workflow`` (nested steps; each node has its own ``verifiers`` with ``status``),
-``file`` (output paths + content), and ``memory`` / ``skill`` (each a map of ``file-name`` → file text
-as injected at snapshot time). ``edit_verifier()`` rows also set ``tool_result``: each verifier is flattened
-to one line ``{criterion}: {status}``, then a compact ``path=verifiers`` /
-``•`` annotation like file ``edit("…")`` tool results.
+``edit_workflow()``, ``edit_verifier()``, and preview ``file_edit("…")`` rows all persist the same
+``environment`` shape: ``workflow`` (nested steps + verifier criteria/status), ``file`` (output paths + content),
+``memory`` and ``skill`` (each a map of ``file-name`` → file text as injected at snapshot time).
 
 Per-step ``environment`` (workflow nodes, each node’s ``verifiers`` with ``status``, output files, memory/skills)
 comes from ``messages.state_snapshot`` when recorded: human ``user_prompt``; SDK ``user`` tool
@@ -40,7 +36,7 @@ The export reapplies a carried-forward workflow tree from snapshots so, after ``
 a step, later steps do not retain that step’s verifiers or output files (and ``file`` rows are aligned
 to the current tree). Older DBs without ``state_snapshot`` fall back to one end-of-session snapshot.
 
-The second is always the agent ``workflow_plan({initial query})``; its ``environment`` uses the workflow tree
+The second is always the agent ``plan({initial query})``; its ``environment`` uses the workflow tree
 as of the last persisted snapshot before the first ``edit_workflow`` (or WorkflowPlan tool input
 with ``normalizeRoots``), not necessarily ``sessions.workflow_tree`` after later edits. Every step
 ``status`` is ``pending``; each verifier is ``{"criterion", "status": "failure"}``; ``file`` maps
@@ -51,17 +47,26 @@ Database location (Electron userData):
 - Windows: %APPDATA%\\Agent Cowork\\sessions.db
 - Linux: ~/.config/Agent Cowork/sessions.db
 
-Output format
--------------
-Exports ``uuid``, ``name``, ``model``, ``task``, ``system_prompt``, ``tool_schemas``, and ``task_units``.
-Each task_unit has ``actor`` (``user`` or ``agent``), ``trajectory`` (default-style action rows without
-per-step ``actor`` or ``environment``), and ``environment`` (workflow, files, memory, skill). Agent units also include
-``prompt`` (full first-turn instruction for planning, then user or node prompts). The synthetic ``workflow_plan(...)``
-step is its own agent task_unit, followed by execution agent units.
+Formats
+-------
+--format default (default)
+  Human-readable action trajectory. Each step has actor, action, tool_result, and environment.
+  Used by the existing context-export pipeline.
+
+--format weight
+  Raw SDK messages + human actions for training. Each session is split into task_units
+  (one planning unit + one per workflow node). Each unit has:
+    prompt_first_turn   : full prompt sent to the LM for the first turn (memoryPrefix included
+                          when effective_prompt is persisted; otherwise reconstructed)
+    agent_trajectory    : slimmed raw SDK messages (assistant/user/result/system/verifier_label)
+    human_trajectories  : follow_up, file_edit, brain_edit, edit_workflow, edit_verifier actions
+    verifiers           : final verifier criteria + pass/fail status
+  Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
 
 Usage:
   conda activate code   # optional: use "code" env
-  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID]
+  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
+    [--format {default,weight}]
   # Use AGENT_COWORK_DB to override DB path:
   AGENT_COWORK_DB=/path/to/sessions.db python export_task_sessions.py
 """
@@ -69,14 +74,12 @@ Usage:
 import argparse
 import base64
 import copy
-import difflib
 import json
 import os
-import re
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Cap per-file inlined content to keep exports bounded (bytes).
 MAX_OUTPUT_FILE_BYTES = 500_000
@@ -285,14 +288,12 @@ def empty_environment() -> dict:
 
 
 def _verifier_success_or_failure(mark: Optional[str], *, plan_snapshot: bool) -> str:
-    """Match ``verifier_status`` / Electron snapshot: check→success, cross→failure, else unchecked."""
+    """Export only ``success`` or ``failure`` (plan snapshot: all failure)."""
     if plan_snapshot:
         return "failure"
     if mark == "check":
         return "success"
-    if mark == "cross":
-        return "failure"
-    return "unchecked"
+    return "failure"
 
 
 def _node_verifiers_for_export(
@@ -440,12 +441,7 @@ def build_environment_state(
         files = []
     mem = copy.deepcopy(memory) if isinstance(memory, dict) else {}
     sk = copy.deepcopy(skill) if isinstance(skill, dict) else {}
-    return {
-        "workflow": wf,
-        "file": files,
-        "memory": mem,
-        "skill": sk,
-    }
+    return {"workflow": wf, "file": files, "memory": mem, "skill": sk}
 
 
 def raw_has_workflow_tool(raw: dict) -> bool:
@@ -816,14 +812,11 @@ def _environment_for_norm_merge(norm: dict, default_env: dict) -> Tuple[dict, bo
         return default_env, False
     wf = snap.get("workflow")
     if isinstance(wf, list):
-        merged: Dict[str, Any] = {"workflow": copy.deepcopy(wf), "file": copy.deepcopy(files)}
-    else:
-        wf_fb = default_env.get("workflow")
-        if isinstance(wf_fb, list):
-            merged = {"workflow": copy.deepcopy(wf_fb), "file": copy.deepcopy(files)}
-        else:
-            return default_env, False
-    return merged, True
+        return {"workflow": copy.deepcopy(wf), "file": copy.deepcopy(files)}, True
+    wf_fb = default_env.get("workflow")
+    if isinstance(wf_fb, list):
+        return {"workflow": copy.deepcopy(wf_fb), "file": copy.deepcopy(files)}, True
+    return default_env, False
 
 
 def environment_for_norm(
@@ -838,7 +831,6 @@ def environment_for_norm(
     """Return (environment dict, True if persisted ``state_snapshot`` contributed file content).
 
     Canonical shape is ``{"workflow": [...], "file": [...], "memory": {...}, "skill": {...}}``.
-    Verifier criteria and status live on each node under ``workflow[].verifiers``.
     ``workflow_override`` (per-message replayed tree) replaces the merged workflow so removed steps
     and their output files/verifiers do not appear in later steps. File rows are realigned to that tree.
     ``memory`` / ``skill`` are filename→content maps for the step (from carried-forward snapshots).
@@ -853,7 +845,6 @@ def environment_for_norm(
     sk = skill if isinstance(skill, dict) else {}
     base["memory"] = copy.deepcopy(mem)
     base["skill"] = copy.deepcopy(sk)
-    base.pop("verifier", None)
     return base, took_snap
 
 
@@ -932,17 +923,6 @@ def is_backend_node_user_prompt(prompt: Any) -> bool:
     return "\n\nTask: " in p
 
 
-def _first_backend_node_prompt(norm_msgs: List[dict]) -> str:
-    """First persisted node instruction (Proceed with: … + Task:), for LM prompts after planning."""
-    for m in norm_msgs:
-        if m.get("role") != "user" or m.get("type") != "user_prompt":
-            continue
-        p = m.get("prompt", "")
-        if isinstance(p, str) and is_backend_node_user_prompt(p):
-            return p
-    return ""
-
-
 def build_full_session_trajectory(
     msgs: List[dict],
     initial_query: str,
@@ -986,7 +966,7 @@ def build_full_session_trajectory(
 
     traj: List[dict] = [
         trajectory_row("user", f"message({json.dumps(initial_query, ensure_ascii=False)})", empty_env),
-        trajectory_row("agent", f"workflow_plan({json.dumps(initial_query, ensure_ascii=False)})", plan_env),
+        trajectory_row("agent", f"plan({json.dumps(initial_query, ensure_ascii=False)})", plan_env),
     ]
 
     consumed_initial_user = False
@@ -1039,19 +1019,15 @@ def build_full_session_trajectory(
             wo_uv = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_uv = mem_timeline[idx] if idx < len(mem_timeline) else {}
             s_uv = sk_timeline[idx] if idx < len(sk_timeline) else {}
-            snap_wf_uv = _snapshot_workflow_tree(m)
-            wf_after_uv = snap_wf_uv if isinstance(snap_wf_uv, list) else wo_uv
             step_env, _snap = environment_for_norm(
                 m,
                 final_env,
                 cwd=cwd_val,
-                workflow_override=wf_after_uv,
+                workflow_override=wo_uv,
                 memory=m_uv,
                 skill=s_uv,
             )
-            wf_prev = wf_timeline[idx - 1] if idx > 0 else None
-            ev_tr = _edit_verifier_tool_result_from_snapshots(wf_prev, wf_after_uv)
-            traj.append(trajectory_row("agent", "edit_verifier()", step_env, tool_result=ev_tr))
+            traj.append(trajectory_row("agent", "edit_verifier()", step_env))
             idx += 1
             continue
 
@@ -1074,20 +1050,15 @@ def build_full_session_trajectory(
             wo_ev = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_ev = mem_timeline[idx] if idx < len(mem_timeline) else {}
             s_ev = sk_timeline[idx] if idx < len(sk_timeline) else {}
-            snap_wf_ev = _snapshot_workflow_tree(m)
-            # Prefer this row's persisted snapshot as "after" (matches DB write order); timeline should match.
-            wf_after_ev = snap_wf_ev if isinstance(snap_wf_ev, list) else wo_ev
             step_env, _snap = environment_for_norm(
                 m,
                 final_env,
                 cwd=cwd_val,
-                workflow_override=wf_after_ev,
+                workflow_override=wo_ev,
                 memory=m_ev,
                 skill=s_ev,
             )
-            wf_prev_u = wf_timeline[idx - 1] if idx > 0 else None
-            ev_tr_u = _edit_verifier_tool_result_from_snapshots(wf_prev_u, wf_after_ev)
-            traj.append(trajectory_row("user", "edit_verifier()", step_env, tool_result=ev_tr_u))
+            traj.append(trajectory_row("user", "edit_verifier()", step_env))
             idx += 1
             continue
 
@@ -1105,12 +1076,8 @@ def build_full_session_trajectory(
             )
             p_raw = m.get("path", "")
             p = str(p_raw) if p_raw is not None else ""
-            act = f"edit({json.dumps(p, ensure_ascii=False)})"
-            prior = _prior_snapshot_message(msgs, idx)
-            before_raw = _snapshot_file_content(prior, p, cwd_val) if prior else None
-            after_raw = _snapshot_file_content(m, p, cwd_val)
-            diff_blob = _file_edit_diff_from_raw_strings(before_raw, after_raw, p)
-            traj.append(trajectory_row("user", act, step_env, tool_result=diff_blob))
+            act = f"file_edit({json.dumps(p, ensure_ascii=False)})"
+            traj.append(trajectory_row("user", act, step_env))
             idx += 1
             continue
 
@@ -1364,7 +1331,6 @@ def _is_export_noise_message(msg: dict) -> bool:
     ``system`` / ``system_init``: SDK session/bootstrap metadata.
     ``run_result``: Pi run completion metadata (status/usage only, no LLM content).
     ``node_completed``: Pi node lifecycle event.
-    ``llm_debug``: Tinker bridge request/response telemetry (not part of the agent conversation).
     ``assistant`` with ``stopReason: "error"``: truncated/failed Pi retry attempts.
     """
     if msg.get("role") != "agent":
@@ -1373,7 +1339,7 @@ def _is_export_noise_message(msg: dict) -> bool:
     if not isinstance(raw, dict):
         return False
     t = raw.get("type")
-    if t in ("stream_event", "system", "system_init", "run_result", "node_completed", "llm_debug"):
+    if t in ("stream_event", "system", "system_init", "run_result", "node_completed"):
         return True
     if t == "assistant" and raw.get("stopReason") == "error":
         return True
@@ -1603,7 +1569,7 @@ def _tool_tasks_to_export_nested_plan(tasks: Any) -> List[dict]:
 
 
 def _snapshot_workflow_for_plan_row(msgs: List[dict]) -> Optional[list]:
-    """Workflow for the synthetic ``workflow_plan(...)`` row: pre-edit snapshot or earliest post-plan snapshot."""
+    """Workflow for the synthetic ``plan(...)`` row: pre-edit snapshot or earliest post-plan snapshot."""
     first_edit_idx: Optional[int] = None
     for i, m in enumerate(msgs):
         if m.get("type") == "edit_workflow":
@@ -1640,7 +1606,7 @@ def _build_plan_environment(
     skill: Optional[dict] = None,
 ) -> dict:
     """
-    Environment for the synthetic ``workflow_plan(...)`` trajectory row: workflow as it was right after
+    Environment for the synthetic ``plan(...)`` trajectory row: workflow as it was right after
     planning (from the last message snapshot before the first ``edit_workflow``, else the earliest
     snapshot with a workflow), not ``sessions.workflow_tree`` which may reflect later edits.
     Falls back to WorkflowPlan tool tasks (with ``normalize_workflow_plan_tasks``), then DB tree.
@@ -1667,12 +1633,7 @@ def _build_plan_environment(
     files = {p: None for p in rel_paths}
     mem = copy.deepcopy(memory) if isinstance(memory, dict) else {}
     sk = copy.deepcopy(skill) if isinstance(skill, dict) else {}
-    return {
-        "workflow": plan_wf,
-        "file": files,
-        "memory": mem,
-        "skill": sk,
-    }
+    return {"workflow": plan_wf, "file": files, "memory": mem, "skill": sk}
 
 
 def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:
@@ -1697,230 +1658,6 @@ def _brain_edit_human_entry(m: dict) -> dict:
         if isinstance(sp, dict):
             sk = copy.deepcopy(sp)
     return {"type": "brain_edit", "round_index": None, "memory": mem, "skill": sk}
-
-
-def _prior_snapshot_message(msgs: List[dict], before_idx: int) -> Optional[dict]:
-    """Latest message before ``before_idx`` that carries a ``state_snapshot`` (for file before/after)."""
-    for j in range(before_idx - 1, -1, -1):
-        if isinstance(msgs[j].get("state_snapshot"), dict):
-            return msgs[j]
-    return None
-
-
-_SENTENCE_BREAK_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-
-
-def _lines_for_diff_sentence_split(text: str) -> List[str]:
-    """Split text into one line per sentence (with trailing ``\\n``) for change alignment."""
-    if not text or not str(text).strip():
-        return []
-    lines_out: List[str] = []
-    for para in re.split(r"\n\s*\n", str(text).strip()):
-        para_flat = " ".join(para.split())
-        if not para_flat:
-            continue
-        for sent in _SENTENCE_BREAK_SPLIT_RE.split(para_flat):
-            s = sent.strip()
-            if s:
-                lines_out.append(s + "\n")
-    return lines_out if lines_out else [str(text).strip() + "\n"]
-
-
-def _trunc_anno(s: str, max_len: int = 160) -> str:
-    t = str(s).strip()
-    if len(t) <= max_len:
-        return t
-    return t[: max_len - 3].rstrip() + "..."
-
-
-def _word_change_snippets(before_line: str, after_line: str, *, trunc: int = 100) -> str:
-    """Short token-level edits between two strings (whitespace tokenization)."""
-    wa = before_line.split()
-    wb = after_line.split()
-    if wa == wb:
-        return "(same tokens)"
-    sm = difflib.SequenceMatcher(a=wa, b=wb, autojunk=False)
-    bits: List[str] = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            continue
-        if tag == "replace":
-            left = " ".join(wa[i1:i2])
-            right = " ".join(wb[j1:j2])
-            bits.append(f"{_trunc_anno(left, trunc)} → {_trunc_anno(right, trunc)}")
-        elif tag == "delete":
-            left = " ".join(wa[i1:i2])
-            bits.append(f"- {_trunc_anno(left, trunc)}")
-        elif tag == "insert":
-            right = " ".join(wb[j1:j2])
-            bits.append(f"+ {_trunc_anno(right, trunc)}")
-    return ", ".join(bits) if bits else "(no token edits)"
-
-
-def _compact_file_edit_annotation(before_s: str, after_s: str, path_disp: str) -> str:
-    """Localized edit summary: align sentences, then token-level snippets only (no full-file diff)."""
-    if before_s == after_s:
-        return f"(no textual change) path={path_disp}"
-
-    bl = [ln.rstrip("\n\r") for ln in _lines_for_diff_sentence_split(before_s)]
-    al = [ln.rstrip("\n\r") for ln in _lines_for_diff_sentence_split(after_s)]
-
-    sm = difflib.SequenceMatcher(a=bl, b=al, autojunk=False)
-    parts: List[str] = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            continue
-        if tag == "replace":
-            b_join = " ".join(bl[i1:i2])
-            a_join = " ".join(al[j1:j2])
-            if b_join.strip() == a_join.strip():
-                continue
-            ws = _word_change_snippets(b_join, a_join)
-            if ws == "(same tokens)":
-                continue
-            parts.append(f"• {_trunc_anno(ws, 700)}")
-        elif tag == "delete":
-            b_join = " ".join(bl[i1:i2])
-            parts.append(f"• removed: {_trunc_anno(b_join, 200)}")
-        elif tag == "insert":
-            a_join = " ".join(al[j1:j2])
-            parts.append(f"• added: {_trunc_anno(a_join, 200)}")
-
-    if not parts:
-        return f"(no localized changes detected) path={path_disp}"
-
-    body = "\n".join(parts)
-    max_out = 8000
-    if len(body) > max_out:
-        body = body[: max_out - 50].rstrip() + f"\n… (annotation truncated, path={path_disp})"
-    return f"path={path_disp}\n{body}"
-
-
-def _file_edit_diff_from_raw_strings(
-    before_raw: Optional[str],
-    after_raw: Optional[str],
-    path: str,
-) -> str:
-    """Compact localized edit annotation (sentence align + token-level snippets), not a full unified diff."""
-    before_s = before_raw if isinstance(before_raw, str) else ""
-    after_s = after_raw if isinstance(after_raw, str) else ""
-    path_disp = str(path).strip() or "(path)"
-    return _compact_file_edit_annotation(before_s, after_s, path_disp)
-
-
-def _one_line_verifier_field(val: Any) -> str:
-    """Collapse internal newlines/whitespace for a single-line verifier representation."""
-    if val is None:
-        return ""
-    s = val if isinstance(val, str) else str(val)
-    return " ".join(s.split())
-
-
-def _flatten_workflow_verifier_lines(wf: Optional[list]) -> List[str]:
-    """
-    Preorder flatten: one line per verifier, ``{criterion}: {status}`` (no node id; criterion is one line).
-    """
-    out: List[str] = []
-
-    def walk(nodes: Any) -> None:
-        if not isinstance(nodes, list):
-            return
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            for v in n.get("verifiers") or []:
-                crit = ""
-                st = ""
-                if isinstance(v, dict):
-                    crit = _one_line_verifier_field(v.get("criterion", ""))
-                    st = _one_line_verifier_field(v.get("status", ""))
-                elif isinstance(v, str) and v.strip():
-                    crit = _one_line_verifier_field(v)
-                line = f"{crit}: {st}" if crit else f"(empty criterion): {st}"
-                out.append(line)
-            walk(n.get("children"))
-
-    if isinstance(wf, list):
-        walk(wf)
-    return out
-
-
-def _verifier_line_criterion_key(line: str) -> str:
-    """Criterion portion of a flattened verifier line (everything before the last ``': '`` status suffix)."""
-    s = line.rstrip("\n\r")
-    if ": " not in s:
-        return s
-    return s.rsplit(": ", 1)[0]
-
-
-def _verifier_line_status_tail(line: str) -> str:
-    """Status token(s) after the last ``': '`` on a flattened verifier line."""
-    s = line.rstrip("\n\r")
-    if ": " not in s:
-        return ""
-    return s.rsplit(": ", 1)[1]
-
-
-def _compact_verifier_lines_annotation(
-    before_lines: List[str],
-    after_lines: List[str],
-    *,
-    path_disp: str = "verifiers",
-    max_out: int = 8000,
-) -> str:
-    """Diff flattened ``{criterion}: {status}`` lines by criterion key; targeted ``•`` bullets like file edits."""
-    bl = [ln.rstrip("\n\r") for ln in before_lines]
-    al = [ln.rstrip("\n\r") for ln in after_lines]
-    if bl == al:
-        return f"(no textual change) path={path_disp}"
-
-    kb = {_verifier_line_criterion_key(l): _verifier_line_status_tail(l) for l in bl}
-    ka = {_verifier_line_criterion_key(l): _verifier_line_status_tail(l) for l in al}
-    keys_b, keys_a = set(kb), set(ka)
-    parts: List[str] = []
-
-    for k in sorted(keys_b & keys_a):
-        stb, sta = kb[k], ka[k]
-        if stb == sta:
-            continue
-        # Same criterion key: only the trailing ``status`` changed.
-        parts.append(f"• {_trunc_anno(k, 520)}: {stb} → {sta}")
-
-    for k in sorted(keys_b - keys_a):
-        parts.append(f"• removed: {_trunc_anno(f'{k}: {kb[k]}', 220)}")
-    for k in sorted(keys_a - keys_b):
-        parts.append(f"• added: {_trunc_anno(f'{k}: {ka[k]}', 220)}")
-
-    if not parts:
-        return f"(no localized changes detected) path={path_disp}"
-
-    body = "\n".join(parts)
-    if len(body) > max_out:
-        body = body[: max_out - 50].rstrip() + f"\n… (annotation truncated, path={path_disp})"
-    return f"path={path_disp}\n{body}"
-
-
-def _edit_verifier_tool_result_from_snapshots(
-    wf_before: Optional[list],
-    wf_after: Optional[list],
-    *,
-    max_chars: int = 12_000,
-) -> str:
-    """Compact verifier edit summary: flatten to ``criterion: status`` lines, then targeted ``•`` edits."""
-    def _norm_wf(wf: Optional[list]) -> list:
-        if wf is None:
-            return []
-        return wf if isinstance(wf, list) else []
-
-    blines = _flatten_workflow_verifier_lines(_norm_wf(wf_before))
-    alines = _flatten_workflow_verifier_lines(_norm_wf(wf_after))
-    if blines == alines:
-        return (
-            "(no changes to verifier criteria/status between prior carried-forward snapshot "
-            "and this edit_verifier row)"
-        )
-    cap = min(max_chars, 8000)
-    return _compact_verifier_lines_annotation(blines, alines, path_disp="verifiers", max_out=cap)
 
 
 def _snapshot_file_content(
@@ -2297,12 +2034,7 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "read",
-            "description": (
-                "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). "
-                "Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB "
-                "(whichever is hit first). Use offset/limit for large files. When you need the full file, "
-                "continue with offset until complete."
-            ),
+            "description": "Read the contents of a file.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2318,10 +2050,7 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "write",
-            "description": (
-                "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. "
-                "Automatically creates parent directories."
-            ),
+            "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2336,46 +2065,25 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "edit",
-            "description": (
-                "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, "
-                "non-overlapping region of the original file. If two changes affect the same block or nearby lines, "
-                "merge them into one edit instead of emitting overlapping edits. Do not include large unchanged "
-                "regions just to connect distant changes."
-            ),
+            "description": "Edit a single file using exact text replacement.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
                     "edits": {
                         "type": "array",
-                        "description": (
-                            "One or more targeted replacements. Each edit is matched against the original file, "
-                            "not incrementally. Do not include overlapping or nested edits. If two changes touch "
-                            "the same block or nearby lines, merge them into one edit instead."
-                        ),
+                        "description": "One or more targeted replacements.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "oldText": {
-                                    "type": "string",
-                                    "description": (
-                                        "Exact text for one targeted replacement. It must be unique in the "
-                                        "original file and must not overlap with any other edits[].oldText in "
-                                        "the same call."
-                                    ),
-                                },
-                                "newText": {
-                                    "type": "string",
-                                    "description": "Replacement text for this targeted edit.",
-                                },
+                                "oldText": {"type": "string", "description": "Exact text to find."},
+                                "newText": {"type": "string", "description": "Replacement text."},
                             },
                             "required": ["oldText", "newText"],
-                            "additionalProperties": False,
                         },
                     },
                 },
                 "required": ["path", "edits"],
-                "additionalProperties": False,
             },
         },
     },
@@ -2383,19 +2091,12 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": (
-                "Execute a bash command in the current working directory. Returns stdout and stderr. "
-                "Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full "
-                "output is saved to a temp file. Optionally provide a timeout in seconds."
-            ),
+            "description": "Execute a bash command in the current working directory.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Bash command to execute"},
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no default timeout)",
-                    },
+                    "timeout": {"type": "number", "description": "Timeout in seconds (optional)"},
                 },
                 "required": ["command"],
             },
@@ -2405,36 +2106,17 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": (
-                "Search file contents for a pattern. Returns matching lines with file paths and line numbers. "
-                "Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). "
-                "Long lines are truncated to 500 chars."
-            ),
+            "description": "Search file contents for a pattern. Respects .gitignore.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
-                    "path": {
-                        "type": "string",
-                        "description": "Directory or file to search (default: current directory)",
-                    },
-                    "glob": {
-                        "type": "string",
-                        "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'",
-                    },
+                    "path": {"type": "string", "description": "Directory or file to search (default: current directory)"},
+                    "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. '*.ts'"},
                     "ignoreCase": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
-                    "literal": {
-                        "type": "boolean",
-                        "description": "Treat pattern as literal string instead of regex (default: false)",
-                    },
-                    "context": {
-                        "type": "number",
-                        "description": "Number of lines to show before and after each match (default: 0)",
-                    },
-                    "limit": {
-                        "type": "number",
-                        "description": "Maximum number of matches to return (default: 100)",
-                    },
+                    "literal": {"type": "boolean", "description": "Treat pattern as literal string (default: false)"},
+                    "context": {"type": "number", "description": "Lines of context before and after each match"},
+                    "limit": {"type": "number", "description": "Maximum number of matches to return"},
                 },
                 "required": ["pattern"],
             },
@@ -2444,21 +2126,13 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "find",
-            "description": (
-                "Search for files by glob pattern. Returns matching file paths relative to the search directory. "
-                "Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first)."
-            ),
+            "description": "Search for files by glob pattern. Respects .gitignore.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": (
-                            "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'"
-                        ),
-                    },
+                    "pattern": {"type": "string", "description": "Glob pattern to match files"},
                     "path": {"type": "string", "description": "Directory to search in (default: current directory)"},
-                    "limit": {"type": "number", "description": "Maximum number of results (default: 1000)"},
+                    "limit": {"type": "number", "description": "Maximum number of results"},
                 },
                 "required": ["pattern"],
             },
@@ -2468,15 +2142,12 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "ls",
-            "description": (
-                "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. "
-                "Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first)."
-            ),
+            "description": "List directory contents.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Directory to list (default: current directory)"},
-                    "limit": {"type": "number", "description": "Maximum number of entries to return (default: 500)"},
+                    "limit": {"type": "number", "description": "Maximum number of entries to return"},
                 },
                 "required": [],
             },
@@ -2486,33 +2157,58 @@ PI_TOOL_SCHEMAS: List[dict] = [
         "type": "function",
         "function": {
             "name": "workflow_plan",
-            "description": (
-                "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level with description, "
-                "outputFiles, verifiers, and optional children."
-            ),
+            "description": "Register a hierarchical workflow plan.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "tasks": {
                         "type": "array",
                         "description": "Top-level workflow steps",
-                        "items": {"$ref": "#/$defs/WorkflowNode"},
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "outputFiles": {"type": "array", "items": {"type": "string"}},
+                                "verifiers": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {"criterion": {"type": "string"}},
+                                    },
+                                },
+                                "children": {"type": "array", "items": {"type": "object"}},
+                            },
+                            "required": ["description"],
+                        },
                     },
                 },
                 "required": ["tasks"],
-                "$defs": {
-                    "WorkflowNode": {
-                        "type": "object",
-                        "properties": {
-                            "description": {"type": "string"},
-                            "outputFiles": {"type": "array", "items": {"type": "string"}},
-                            "verifiers": {"type": "array", "items": {"type": "string"}},
-                            "children": {"type": "array", "items": {"$ref": "#/$defs/WorkflowNode"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_question",
+            "description": "Ask the operator a structured question and wait for the answer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string"},
+                                "header": {"type": "string"},
+                                "options": {"type": "array", "items": {"type": "string"}},
+                                "multiSelect": {"type": "boolean"},
+                            },
+                            "required": ["question"],
                         },
-                        "required": ["description", "outputFiles", "verifiers"],
-                        "additionalProperties": False,
                     },
                 },
+                "required": ["questions"],
             },
         },
     },
@@ -2613,26 +2309,22 @@ def build_weight_based_session(
     """Build the weight-based export for a single session."""
     try:
         row = cursor.execute(
-            """SELECT id, title, workflow_tree, last_prompt, cwd, engine, steps, output_files, verification_criteria, verifier_marks
+            """SELECT id, title, workflow_tree, last_prompt, cwd, engine
                FROM sessions WHERE id = ?""",
             (session_id,),
         ).fetchone()
     except sqlite3.OperationalError:
         row = cursor.execute(
-            """SELECT id, title, workflow_tree, last_prompt, cwd, engine
+            """SELECT id, title, workflow_tree, last_prompt, cwd
                FROM sessions WHERE id = ?""",
             (session_id,),
         ).fetchone()
         if row:
-            row = (*row, None, None, None, None)
+            row = (*row, None)
     if not row:
         return None
-    sid, title, workflow_tree_raw, last_prompt, cwd, db_engine, steps_raw, output_files_raw, verification_criteria_raw, verifier_marks_raw = row
+    sid, title, workflow_tree_raw, last_prompt, cwd, db_engine = row
     workflow_tree = parse_json_column(workflow_tree_raw, [])
-    steps = parse_json_column(steps_raw, [])
-    output_files = parse_json_column(output_files_raw, [])
-    verification_criteria = parse_json_column(verification_criteria_raw, [])
-    verifier_marks = parse_json_column(verifier_marks_raw, [])
     export_cwd: Optional[str] = None
     if cwd is not None:
         cs = str(cwd).strip()
@@ -2674,130 +2366,281 @@ def build_weight_based_session(
 
     is_pi = _is_pi_engine(all_msgs)
 
-    engine = db_engine or "legacy-claude"
-    action_trajectory: List[dict] = []
-    for data_str, snapshot_raw, _ in messages_rows:
-        try:
-            msg = json.loads(data_str)
-            norm = normalize_pi_message(msg) if engine == "pi" else normalize_legacy_message(msg)
-            if snapshot_raw:
-                try:
-                    norm["state_snapshot"] = json.loads(snapshot_raw)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            action_trajectory.append(norm)
-        except json.JSONDecodeError:
-            action_trajectory.append({"role": "unknown", "raw": data_str[:200]})
-    if engine == "pi":
-        action_trajectory = [m for m in action_trajectory if not _is_export_noise_message(m)]
-    else:
-        action_trajectory = filter_out_stream_events(action_trajectory)
+    initial_task_instruction = ""
+    for m in all_msgs:
+        if m.get("type") == "user_prompt":
+            p = m.get("prompt", "")
+            if isinstance(p, str) and not is_backend_node_user_prompt(p):
+                initial_task_instruction = p
+                break
+    if not initial_task_instruction:
+        initial_task_instruction = last_prompt or ""
 
-    initial_task_instruction = extract_initial_task_instruction(action_trajectory, last_prompt or "")
-    full_traj = build_full_session_trajectory(
-        action_trajectory,
-        initial_task_instruction,
-        export_cwd,
-        workflow_tree,
-        steps,
-        output_files,
-        verification_criteria,
-        verifier_marks,
-    )
+    # ── Segment messages into phases ──
+    # Find boundaries: "Proceed with:" prompts mark node execution starts
+    node_starts: List[Tuple[int, str]] = []  # (msg_index, node_description)
+    path_nodes = iter_workflow_nodes_with_path(workflow_tree)
+    path_to_node: Dict[str, dict] = {}
+    for path, node in path_nodes:
+        if isinstance(node.get("id"), str) and path:
+            path_to_node[path] = node
 
-    # Ensure each exported step has environment, then group consecutive steps
-    # by actor into task_units.
-    env_carry = empty_environment()
-    full_traj_with_env: List[dict] = []
-    for step in full_traj:
-        step_out = copy.deepcopy(step)
-        step_env = step_out.get("environment")
-        if isinstance(step_env, dict):
-            merged_env = copy.deepcopy(step_env)
-            merged_env.pop("verifier", None)
-            env_carry = merged_env
-            step_out["environment"] = copy.deepcopy(merged_env)
-        else:
-            step_out["environment"] = copy.deepcopy(env_carry)
-        full_traj_with_env.append(step_out)
-
-    task_units: List[dict] = []
-    current_actor: Optional[str] = None
-    current_steps: List[dict] = []
-    current_agent_prompt: str = ""
-    pending_agent_prompt: str = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
-    first_plan_split_done = False
-    skip_indices: Set[int] = set()
-
-    def _flush_group() -> None:
-        nonlocal current_actor, current_steps, current_agent_prompt
-        if not current_steps or current_actor is None:
-            return
-        last_env = copy.deepcopy(current_steps[-1].get("environment")) or empty_environment()
-        traj_out: List[dict] = []
-        for s in current_steps:
-            row = copy.deepcopy(s)
-            row.pop("environment", None)
-            row.pop("actor", None)
-            traj_out.append(row)
-        unit: Dict[str, Any] = {
-            "actor": "agent" if current_actor == "agent" else "user",
-            "trajectory": traj_out,
-            "environment": last_env,
-        }
-        if current_actor == "agent":
-            unit["prompt"] = current_agent_prompt
-        task_units.append(unit)
-        current_actor = None
-        current_steps = []
-        current_agent_prompt = ""
-
-    for i, step in enumerate(full_traj_with_env):
-        if i in skip_indices:
+    for i, m in enumerate(all_msgs):
+        if m.get("type") != "user_prompt":
             continue
-        actor = str(step.get("actor", "user"))
-        if actor == "user":
-            p = _parse_action_message_payload(str(step.get("action", "")))
-            if isinstance(p, str) and not _prompts_equal(p, initial_task_instruction):
-                pending_agent_prompt = p
+        p = m.get("prompt", "")
+        if not isinstance(p, str) or not p.startswith("Proceed with: "):
+            continue
+        first_line = p.splitlines()[0]
+        path = first_line.removeprefix("Proceed with: ").strip()
+        if path in path_to_node:
+            node_starts.append((i, path))
 
-        if current_actor is None:
-            current_actor = actor
-        if actor != current_actor:
-            _flush_group()
-            current_actor = actor
-            current_steps = []
-            if current_actor == "agent":
-                current_agent_prompt = pending_agent_prompt
-        elif current_actor == "agent" and not current_steps:
-            current_agent_prompt = pending_agent_prompt
+    # ── Build planning task_unit ──
+    planning_end = node_starts[0][0] if node_starts else len(all_msgs)
+    planning_msgs = all_msgs[:planning_end]
 
-        current_steps.append(step)
+    planning_agent_traj_raw: List[dict] = []
+    planning_human_traj: List[dict] = []
+    prev_workflow_snapshot: Optional[List[dict]] = None
 
-        act = str(step.get("action", ""))
-        if (
-            current_actor == "agent"
-            and (act.startswith("workflow_plan(") or act.startswith("plan("))
-            and not first_plan_split_done
-        ):
-            first_plan_split_done = True
-            if i + 1 < len(full_traj_with_env):
-                nxt = full_traj_with_env[i + 1]
-                if str(nxt.get("actor", "")) == "agent":
-                    nxt_act = str(nxt.get("action", ""))
-                    if nxt_act.startswith("message("):
-                        ack = _parse_action_message_payload(nxt_act)
-                        if isinstance(ack, str) and ack.strip():
-                            current_steps[-1]["tool_result"] = ack
-                            skip_indices.add(i + 1)
-            _flush_group()
-            current_actor = "agent"
-            current_steps = []
-            nxt = _first_backend_node_prompt(action_trajectory)
-            pending_agent_prompt = nxt
-            current_agent_prompt = nxt
+    for m in planning_msgs:
+        t = m.get("type")
+        if t in ALL_AGENT_MSG_TYPES:
+            planning_agent_traj_raw.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
 
-    _flush_group()
+        elif t == "edit_workflow":
+            wf_after = _snapshot_workflow_tree(m)
+            entry: Dict[str, Any] = {
+                "type": "edit_workflow",
+                "round_index": None,
+            }
+            if prev_workflow_snapshot is not None:
+                entry["workflow_tree_before"] = prev_workflow_snapshot
+            if wf_after is not None:
+                entry["workflow_tree_after"] = wf_after
+                prev_workflow_snapshot = wf_after
+            planning_human_traj.append(entry)
+
+        elif t == "edit_verifier":
+            wf_after = _snapshot_workflow_tree(m)
+            entry = {
+                "type": "edit_verifier",
+                "round_index": None,
+            }
+            if prev_workflow_snapshot is not None:
+                entry["verifiers_before"] = _extract_verifier_criteria(prev_workflow_snapshot)
+            if wf_after is not None:
+                entry["verifiers_after"] = _extract_verifier_criteria(wf_after)
+                prev_workflow_snapshot = wf_after
+            planning_human_traj.append(entry)
+
+        elif t == "brain_edit":
+            planning_human_traj.append(_brain_edit_human_entry(m))
+
+    if is_pi:
+        planning_agent_traj_merged = planning_agent_traj_raw
+    else:
+        planning_agent_traj_merged = _merge_partial_assistant_messages(planning_agent_traj_raw)
+    workflow_tree_generated = _extract_workflow_tree_from_tool_use(planning_agent_traj_merged)
+    workflow_tree_after_planning = prev_workflow_snapshot or workflow_tree
+    if is_pi:
+        planning_agent_traj_final = planning_agent_traj_merged
+    else:
+        planning_agent_traj_final = _merge_parallel_tool_results(planning_agent_traj_merged)
+    planning_agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in planning_agent_traj_final]
+
+    # Normalize planning human_trajectories workflow snapshots to LLM native format
+    for h in planning_human_traj:
+        if h.get("type") == "edit_workflow":
+            if "workflow_tree_before" in h:
+                h["workflow_tree_before"] = _to_llm_native_tree(h["workflow_tree_before"])
+            if "workflow_tree_after" in h:
+                h["workflow_tree_after"] = _to_llm_native_tree(h["workflow_tree_after"])
+
+    # Reconstruct the planning first-turn prompt:
+    # WORKFLOW_PLAN_INSTRUCTION + user's initial task instruction
+    # NOTE: memoryPrefix is not available from DB; will be accurate once
+    # effective_prompt is persisted (TODO: modify src/electron).
+    planning_prompt = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
+
+    # Build planning trajectories (planning is always a single trajectory)
+    if is_pi:
+        pi_raw_msgs = [e["raw"] for e in planning_agent_traj if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
+        planning_messages = [{"role": "user", "content": planning_prompt}] + pi_messages_to_openai(pi_raw_msgs)
+    else:
+        planning_messages = [{"role": "user", "content": planning_prompt}]
+    planning_traj_entry: Dict[str, Any] = {
+        "prompt": planning_prompt,
+        "messages": planning_messages,
+    }
+
+    planning_unit: Dict[str, Any] = {
+        "intent": "planning",
+        "agent_trajectories": [planning_traj_entry],
+        "human_trajectories": planning_human_traj,
+        "verifiers": [],
+        "workflow_tree_generated": workflow_tree_generated,
+        "workflow_tree_final": _to_llm_native_tree(workflow_tree_after_planning),
+    }
+
+    # ── Build execution task_units ──
+    task_units: List[dict] = [planning_unit]
+
+    for seg_idx, (start_i, path) in enumerate(node_starts):
+        end_i = node_starts[seg_idx + 1][0] if seg_idx + 1 < len(node_starts) else len(all_msgs)
+        node_msgs = all_msgs[start_i:end_i]
+        node = path_to_node[path]
+        node_id = node.get("id", "")
+        node_desc = node.get("description", "")
+
+        agent_traj_raw: List[dict] = []
+        human_traj: List[dict] = []
+        round_counter = 0
+        node_prompt_consumed = False
+        node_first_turn_prompt: Optional[str] = None
+        last_snapshot_msg: Optional[dict] = None
+        # Track where follow_up prompts split the trajectory.
+        # Each entry: (index into agent_traj_raw at time of split, prompt text)
+        follow_up_splits: List[Tuple[int, str]] = []
+
+        for m in node_msgs:
+            t = m.get("type")
+
+            if t == "user_prompt":
+                p = m.get("prompt", "")
+                if isinstance(p, str) and is_backend_node_user_prompt(p):
+                    if not node_prompt_consumed:
+                        node_prompt_consumed = True
+                        node_first_turn_prompt = p
+                        continue
+                    follow_up_splits.append((len(agent_traj_raw), p))
+                    human_traj.append({
+                        "type": "follow_up",
+                        # 0-based index of this follow-up (aligns with trajectories[1], [2], …)
+                        "round_index": len(follow_up_splits) - 1,
+                        "prompt": p,
+                    })
+                    continue
+                follow_up_splits.append((len(agent_traj_raw), p if isinstance(p, str) else ""))
+                human_traj.append({
+                    "type": "follow_up",
+                    "round_index": len(follow_up_splits) - 1,
+                    "prompt": p if isinstance(p, str) else "",
+                })
+                continue
+
+            if t in ALL_AGENT_MSG_TYPES:
+                raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
+                agent_traj_raw.append({"raw": raw_clean})
+                if t == "system" and m.get("subtype") == "init":
+                    round_counter += 1
+                if t == "system_init":
+                    round_counter += 1
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+            elif t == "verifier_label" or t == "update_verifiers":
+                raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
+                agent_traj_raw.append({"raw": raw_clean})
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+            elif t == "file_edit":
+                fe_path = m.get("path", "")
+                edited_content = _snapshot_file_content(m, fe_path, export_cwd)
+                original_content = None
+                if last_snapshot_msg is not None:
+                    original_content = _snapshot_file_content(last_snapshot_msg, fe_path, export_cwd)
+                human_traj.append({
+                    "type": "file_edit",
+                    "round_index": None,
+                    "path": fe_path,
+                    "original": original_content,
+                    "edited": edited_content,
+                })
+
+            elif t == "edit_workflow":
+                wf_after = _snapshot_workflow_tree(m)
+                entry = {"type": "edit_workflow", "round_index": None}
+                if wf_after is not None:
+                    entry["workflow_tree_after"] = wf_after
+                human_traj.append(entry)
+
+            elif t == "edit_verifier":
+                wf_before = _snapshot_workflow_tree(last_snapshot_msg) if last_snapshot_msg else None
+                wf_after = _snapshot_workflow_tree(m)
+                entry: Dict[str, Any] = {"type": "edit_verifier", "round_index": None}
+                if wf_before is not None:
+                    before_node = _find_node_in_tree(wf_before, node_id)
+                    if before_node:
+                        entry["verifiers_before"] = before_node.get("verifiers", [])
+                if wf_after is not None:
+                    after_node = _find_node_in_tree(wf_after, node_id)
+                    if after_node:
+                        entry["verifiers_after"] = after_node.get("verifiers", [])
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+                human_traj.append(entry)
+
+            elif t == "brain_edit":
+                human_traj.append(_brain_edit_human_entry(m))
+                if m.get("state_snapshot"):
+                    last_snapshot_msg = m
+
+        # Build verifiers from final workflow tree
+        final_node = _find_node_in_tree(workflow_tree, node_id)
+        verifiers: List[dict] = []
+        if final_node:
+            criteria = final_node.get("verifiers", [])
+            marks = final_node.get("verifierMarks", [])
+            for j, c in enumerate(criteria):
+                crit = c.get("criterion", "") if isinstance(c, dict) else str(c)
+                mark = marks[j] if j < len(marks) else None
+                verifiers.append({
+                    "criterion": crit,
+                    "status": mark == "check",
+                })
+
+        if is_pi:
+            agent_traj_final = agent_traj_raw
+        else:
+            agent_traj_merged = _merge_partial_assistant_messages(agent_traj_raw)
+            agent_traj_final = _merge_parallel_tool_results(agent_traj_merged)
+        agent_traj = [{"raw": _slim_raw_message(e["raw"])} for e in agent_traj_final]
+
+        # ── Split agent_trajectory into per-trajectory segments ──
+        # ``follow_up_splits`` was populated during the message loop:
+        # each entry is (index_in_agent_traj_raw, prompt_text).
+        # Since merging / slimming preserves ordering and count for Pi
+        # (no merging) and approximately for Legacy, the indices still
+        # align with agent_traj.
+        def _build_traj_entry(prompt: str, seg: List[dict]) -> Dict[str, Any]:
+            if is_pi:
+                pi_raw = [e["raw"] for e in seg
+                          if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
+                messages = [{"role": "user", "content": prompt}] + pi_messages_to_openai(pi_raw)
+            else:
+                messages = [{"role": "user", "content": prompt}]
+            return {"prompt": prompt, "messages": messages}
+
+        agent_trajectories: List[dict] = []
+        if not follow_up_splits:
+            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj))
+        else:
+            first_end = follow_up_splits[0][0]
+            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj[:first_end]))
+            for si, (split_idx, follow_prompt) in enumerate(follow_up_splits):
+                next_end = follow_up_splits[si + 1][0] if si + 1 < len(follow_up_splits) else len(agent_traj)
+                agent_trajectories.append(_build_traj_entry(follow_prompt, agent_traj[split_idx:next_end]))
+
+        unit: Dict[str, Any] = {
+            "intent": node_desc,
+            "agent_trajectories": agent_trajectories,
+            "human_trajectories": human_traj,
+            "verifiers": verifiers,
+        }
+        task_units.append(unit)
 
     # ── Extract model name from messages ──
     model_name = ""
@@ -2815,12 +2658,13 @@ def build_weight_based_session(
     result: Dict[str, Any] = {
         "uuid": sid,
         "name": title or "",
-        "task": initial_task_instruction,
+        "initial_task_instruction": initial_task_instruction,
         "model": model_name,
         "task_units": task_units,
     }
-    result["system_prompt"] = _pi_system_prompt(export_cwd) if is_pi else ""
-    result["tool_schemas"] = PI_TOOL_SCHEMAS if is_pi else []
+    if is_pi:
+        result["system_prompt"] = _pi_system_prompt(export_cwd)
+        result["tool_schemas"] = PI_TOOL_SCHEMAS
     return result
 
 
@@ -2849,6 +2693,13 @@ def main() -> int:
     parser.add_argument("--db", type=Path, help="Path to sessions.db (default: Electron userData location)")
     parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout)")
     parser.add_argument("--session-id", type=str, help="Export only this session ID")
+    parser.add_argument(
+        "--format",
+        type=str,
+        choices=["default", "weight"],
+        default="default",
+        help='Export format: "default" (human-readable trajectory) or "weight" (OAI messages + human_trajectories for training).',
+    )
     args = parser.parse_args()
 
     db_path = args.db or get_default_db_path()
@@ -2865,20 +2716,36 @@ def main() -> int:
     cursor = conn.cursor()
 
     try:
+        if args.format == "weight":
+            if args.session_id:
+                sess = build_weight_based_session(cursor, args.session_id)
+                if not sess:
+                    print(f"Error: session not found: {args.session_id}", file=sys.stderr)
+                    return 1
+                payload = [sess]
+            else:
+                payload = extract_all_sessions_weight_based(cursor)
+            json_str = json.dumps(payload, indent=2, ensure_ascii=False)
+            if args.output:
+                args.output.write_text(json_str + "\n", encoding="utf-8")
+                n_units = sum(len(s.get("task_units", [])) for s in payload)
+                print(f"Wrote {args.output} ({len(payload)} sessions, {n_units} task_units)", file=sys.stderr)
+            else:
+                print(json_str)
+            return 0
+
         if args.session_id:
-            sess = build_weight_based_session(cursor, args.session_id)
-            if not sess:
+            payload = extract_session(cursor, args.session_id)
+            if not payload:
                 print(f"Error: session not found: {args.session_id}", file=sys.stderr)
                 return 1
-            payload = [sess]
         else:
-            payload = extract_all_sessions_weight_based(cursor)
+            payload = extract_all_sessions(cursor)
 
         json_str = json.dumps(payload, indent=2, ensure_ascii=False)
         if args.output:
             args.output.write_text(json_str + "\n", encoding="utf-8")
-            n_units = sum(len(s.get("task_units", [])) for s in payload)
-            print(f"Wrote {args.output} ({len(payload)} sessions, {n_units} task_units)", file=sys.stderr)
+            print(f"Wrote {args.output}", file=sys.stderr)
         else:
             print(json_str)
     finally:

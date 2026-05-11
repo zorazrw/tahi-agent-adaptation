@@ -25,7 +25,7 @@ _TOOL_NAME_RE = re.compile(r"^([A-Za-z_][\w]*)\(")
 
 
 def _decode_message_like(action: str, prefix: str) -> str | None:
-    """Parse ``message("...")`` / ``plan("...")`` bodies via JSON string rules."""
+    """Parse ``message("...")`` / ``plan("...")`` / ``workflow_plan("...")`` bodies via JSON string rules."""
     head = prefix + "("
     if not (action.startswith(head) and action.endswith(")")):
         return None
@@ -49,7 +49,7 @@ def _parse_tool_call(action: str) -> tuple[str, str] | None:
     if not m:
         return None
     name = m.group(1)
-    if name in ("message", "plan"):
+    if name in ("message", "plan", "workflow_plan"):
         return None
 
     rest = action[m.end() :].lstrip()
@@ -81,7 +81,7 @@ def traj_to_chat(trajectory: list[dict]) -> list[dict]:
     """
     Convert a trajectory to OpenAI-compatible chat messages.
 
-    - ``message("...")`` / ``plan("...")`` → ``user`` or ``assistant`` ``content``.
+    - ``message("...")`` / ``plan("...")`` / ``workflow_plan("...")`` → ``user`` or ``assistant`` ``content``.
     - ``ToolName({...})`` → ``assistant`` with ``tool_calls``, optional following
         ``tool`` message when ``tool_result`` is present on the same step.
     """
@@ -98,7 +98,7 @@ def traj_to_chat(trajectory: list[dict]) -> list[dict]:
         actor = event.get("actor", "agent")
         role = "user" if actor == "user" else "assistant"
 
-        for prefix in ("message", "plan"):
+        for prefix in ("message", "plan", "workflow_plan"):
             body = _decode_message_like(action, prefix)
             if body is not None:
                 chat.append({"role": role, "content": body})

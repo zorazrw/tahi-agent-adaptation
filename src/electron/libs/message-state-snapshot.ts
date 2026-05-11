@@ -30,16 +30,18 @@ export type ExportEnvironmentSnapshot = {
   skill: Record<string, string>;
 };
 
-function verifierStatusForExport(mark: VerifierMark | undefined): "success" | "failure" {
+/** Align with in-app sidebar: no mark means not yet labeled, not a failed check. */
+function verifierStatusForExport(mark: VerifierMark | undefined): "success" | "failure" | "unchecked" {
   if (mark === "check") return "success";
-  return "failure";
+  if (mark === "cross") return "failure";
+  return "unchecked";
 }
 
 function workflowNestedForExport(nodes: WorkflowNode[]): Array<{
   id: string;
   description: string;
   outputFiles: string[];
-  verifiers: Array<{ criterion: string; status: "success" | "failure" }>;
+  verifiers: Array<{ criterion: string; status: "success" | "failure" | "unchecked" }>;
   status: string;
   children: ReturnType<typeof workflowNestedForExport>;
 }> {
