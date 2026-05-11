@@ -20,6 +20,9 @@ if str(_scripts) not in sys.path:
 import induce  # noqa: E402
 import session_export_common as s  # noqa: E402
 
+DEFAULT_VERIFIER_MODEL = "claude-haiku-4-5-20251001"
+_ACTION_CALL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(([\s\S]*)\)$")
+
 
 def _strip_environment(x: Any) -> Any:
     if isinstance(x, dict):
@@ -27,6 +30,174 @@ def _strip_environment(x: Any) -> Any:
     if isinstance(x, list):
         return [_strip_environment(i) for i in x]
     return x
+
+
+def _parse_action_call(action: str) -> tuple[str, Any] | None:
+    m = _ACTION_CALL_RE.match(action)
+    if m is None:
+        return None
+    name, payload = m.group(1), m.group(2)
+    name_key = name.lower()
+    payload = payload.strip()
+    if not payload:
+        return name_key, None
+    try:
+        if name_key in {"write", "edit"}:
+            parsed = json.loads(payload)
+            if isinstance(parsed, dict):
+                return name_key, parsed
+            return None
+        if name_key == "message":
+            text = json.loads(payload)
+            if isinstance(text, str):
+                return name_key, text
+            return None
+    except json.JSONDecodeError:
+        return None
+    return name_key, payload
+
+
+def _make_write_action(path: str, content: str) -> str:
+    payload = {"path": path, "content": content}
+    return f"write({json.dumps(payload, ensure_ascii=False)})"
+
+
+def _file_path_from_write_payload(payload: dict[str, Any]) -> str | None:
+    p = payload.get("path")
+    if isinstance(p, str):
+        return p
+    fp = payload.get("file_path")
+    return fp if isinstance(fp, str) else None
+
+
+def _apply_edit_content(content: str, edit_payload: dict[str, Any]) -> str:
+    edits = edit_payload.get("edits")
+    if isinstance(edits, list) and len(edits) > 0:
+        out = content
+        for edit in edits:
+            if not isinstance(edit, dict):
+                continue
+            old_text = edit.get("oldText")
+            new_text = edit.get("newText")
+            if isinstance(old_text, str) and isinstance(new_text, str) and old_text in out:
+                out = out.replace(old_text, new_text, 1)
+        return out
+
+    # Claude / Anthropic style: old_string, new_string, replace_all
+    old_s = edit_payload.get("old_string")
+    new_s = edit_payload.get("new_string")
+    if isinstance(old_s, str) and isinstance(new_s, str):
+        if edit_payload.get("replace_all"):
+            return content.replace(old_s, new_s)
+        if old_s in content:
+            return content.replace(old_s, new_s, 1)
+    return content
+
+
+def _step_env_file_map(step: dict) -> dict[str, str]:
+    env = step.get("environment") if isinstance(step, dict) else None
+    if not isinstance(env, dict):
+        return {}
+    file_field = env.get("file")
+    if isinstance(file_field, dict):
+        return {
+            k: v
+            for k, v in file_field.items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
+    if isinstance(file_field, list):
+        out: dict[str, str] = {}
+        for item in file_field:
+            if not isinstance(item, dict):
+                continue
+            rel = item.get("path")
+            content = item.get("content")
+            if isinstance(rel, str) and isinstance(content, str):
+                out[rel] = content
+        return out
+    return {}
+
+
+def _rewrite_agent_trajectory(agent_steps: list[dict]) -> list[dict]:
+    final_message_idx: int | None = None
+    file_content_by_path: dict[str, str] = {}
+    first_file_action_index: dict[str, int] = {}
+    latest_env_content_by_path: dict[str, str] = {}
+    latest_nonempty_env_content_by_path: dict[str, str] = {}
+
+    for idx, step in enumerate(agent_steps):
+        step_env_files = _step_env_file_map(step)
+        latest_env_content_by_path.update(step_env_files)
+        for path, content in step_env_files.items():
+            if content.strip():
+                latest_nonempty_env_content_by_path[path] = content
+        action = step.get("action")
+        if not isinstance(action, str):
+            continue
+        parsed = _parse_action_call(action)
+        if parsed is None:
+            continue
+        kind, payload = parsed
+        if kind == "message":
+            final_message_idx = idx
+            continue
+        if kind == "write" and isinstance(payload, dict):
+            path = _file_path_from_write_payload(payload)
+            content = payload.get("content")
+            if isinstance(path, str) and isinstance(content, str):
+                if path not in first_file_action_index:
+                    first_file_action_index[path] = idx
+                file_content_by_path[path] = content
+            continue
+        if kind == "edit" and isinstance(payload, dict):
+            path = _file_path_from_write_payload(payload)
+            if isinstance(path, str):
+                if path not in first_file_action_index:
+                    first_file_action_index[path] = idx
+                env_content = latest_nonempty_env_content_by_path.get(path) or latest_env_content_by_path.get(
+                    path
+                )
+                if env_content is not None:
+                    # Prefer environment snapshot of full post-edit file content.
+                    file_content_by_path[path] = env_content
+                else:
+                    prior = file_content_by_path.get(path, "")
+                    file_content_by_path[path] = _apply_edit_content(prior, payload)
+
+    # Finalize touched file content using latest available environment snapshots.
+    for path in list(first_file_action_index.keys()):
+        env_content = latest_nonempty_env_content_by_path.get(path) or latest_env_content_by_path.get(path)
+        if env_content is not None:
+            file_content_by_path[path] = env_content
+
+    merged_writes_by_index: dict[int, list[dict]] = {}
+    for path, idx in first_file_action_index.items():
+        content = file_content_by_path.get(path)
+        if content is None:
+            continue
+        merged_writes_by_index.setdefault(idx, []).append({"action": _make_write_action(path, content)})
+
+    out: list[dict] = []
+    for idx, step in enumerate(agent_steps):
+        action = step.get("action")
+        parsed = _parse_action_call(action) if isinstance(action, str) else None
+
+        if idx in merged_writes_by_index:
+            merged = sorted(merged_writes_by_index[idx], key=lambda s: str(s["action"]))
+            out.extend(merged)
+
+        if parsed is None:
+            out.append(step)
+            continue
+
+        kind, _ = parsed
+        if kind in {"write", "edit"}:
+            continue
+        if kind == "message" and idx != final_message_idx:
+            continue
+        out.append(step)
+
+    return out
 
 
 def _top_level_workflow(step: dict) -> list[dict]:
@@ -42,47 +213,43 @@ def _verifier_criterion(v: dict) -> str | None:
     return crit if isinstance(crit, str) and crit.strip() else None
 
 
+def _workflow_verifier_lines_flat(wf: list[dict]) -> list[str]:
+    """All verifier criterion strings from a workflow tree (pre-order: node then children)."""
+    out: list[str] = []
+    for node in wf:
+        if not isinstance(node, dict):
+            continue
+        for raw_v in node.get("verifiers") or []:
+            if isinstance(raw_v, dict):
+                c = _verifier_criterion(raw_v)
+                if c is not None:
+                    out.append(c)
+        children = node.get("children")
+        if isinstance(children, list):
+            child_nodes = [c for c in children if isinstance(c, dict)]
+            out.extend(_workflow_verifier_lines_flat(child_nodes))
+    return out
+
+
 def _final_verifier_criteria(traj: list) -> list[str]:
-    """Final top-level verifier criteria text in-order."""
+    """Verifier criteria from the newest trajectory step that carries a workflow tree."""
     for step in reversed(traj):
         wf = _top_level_workflow(step)
         if not wf:
             continue
-        out: list[str] = []
-        for node in wf:
-            for raw_v in node.get("verifiers") or []:
-                if isinstance(raw_v, dict):
-                    c = _verifier_criterion(raw_v)
-                    if c is not None:
-                        out.append(c)
-        if out:
-            return out
+        lines = _workflow_verifier_lines_flat(wf)
+        if lines:
+            return lines
     return []
 
 
 def _latest_agent_file_blocks(agent_steps: list[dict]) -> list[tuple[str, str]]:
     for step in reversed(agent_steps):
-        env = step.get("environment") if isinstance(step, dict) else None
-        if not isinstance(env, dict):
-            continue
-        file_field = env.get("file")
-        if isinstance(file_field, dict):
-            blocks = [(k, v) for k, v in file_field.items() if isinstance(k, str) and isinstance(v, str)]
-            if blocks:
-                blocks.sort(key=lambda x: x[0])
-                return blocks
-        if isinstance(file_field, list):
-            blocks_list: list[tuple[str, str]] = []
-            for item in file_field:
-                if not isinstance(item, dict):
-                    continue
-                rel = item.get("path")
-                content = item.get("content")
-                if isinstance(rel, str) and isinstance(content, str):
-                    blocks_list.append((rel, content))
-            if blocks_list:
-                blocks_list.sort(key=lambda x: x[0])
-                return blocks_list
+        file_map = _step_env_file_map(step)
+        if file_map:
+            blocks = list(file_map.items())
+            blocks.sort(key=lambda x: x[0])
+            return blocks
     return []
 
 
@@ -222,17 +389,33 @@ def _parse_json_from_model_text(text: str) -> dict[str, Any]:
     return json.loads(raw[start : end + 1])
 
 
-def _interpret_results(text: str, n: int) -> list[bool | None]:
-    parsed = _parse_json_from_model_text(text)
-    results = parsed.get("results")
-    if not isinstance(results, list):
-        raise ValueError("Missing results array")
+def _parse_passes_fallback(text: str, n: int) -> list[bool | None]:
+    """
+    Best-effort fallback when model returns malformed JSON.
+    Extracts pass booleans from patterns like:
+      "pass": true / "pass": false
+    """
+    vals = re.findall(r'"pass"\s*:\s*(true|false)', text, flags=re.IGNORECASE)
     out: list[bool | None] = [None] * n
-    for i in range(min(n, len(results))):
-        row = results[i]
-        if isinstance(row, dict) and "pass" in row:
-            out[i] = bool(row["pass"])
+    for i, tok in enumerate(vals[:n]):
+        out[i] = tok.lower() == "true"
     return out
+
+
+def _interpret_results(text: str, n: int) -> list[bool | None]:
+    try:
+        parsed = _parse_json_from_model_text(text)
+        results = parsed.get("results")
+        if not isinstance(results, list):
+            raise ValueError("Missing results array")
+        out: list[bool | None] = [None] * n
+        for i in range(min(n, len(results))):
+            row = results[i]
+            if isinstance(row, dict) and "pass" in row:
+                out[i] = bool(row["pass"])
+        return out
+    except (ValueError, json.JSONDecodeError, TypeError, KeyError):
+        return _parse_passes_fallback(text, n)
 
 
 def _eval_cache_key(criteria: list[str], file_blocks: list[tuple[str, str]]) -> str:
@@ -250,14 +433,20 @@ def _eval_cache_key(criteria: list[str], file_blocks: list[tuple[str, str]]) -> 
 
 @dataclass
 class LLMScorer:
-    client: Any
     model: str
     max_tokens: int
     cache: dict[str, float]
     debug_prompts: bool
+    client: Any | None = None
+    no_llm_reward: bool = False
+    max_retries: int = 1
 
     def score(self, criteria: list[str], file_blocks: list[tuple[str, str]]) -> float:
+        if self.no_llm_reward:
+            return 0.5
         if not criteria or not file_blocks:
+            return 0.0
+        if self.client is None:
             return 0.0
         key = _eval_cache_key(criteria, file_blocks)
         cached = self.cache.get(key)
@@ -268,14 +457,44 @@ class LLMScorer:
             print("\n=== verifier_prompt_begin ===", file=sys.stderr)
             print(_debug_render_message_content(content), file=sys.stderr)
             print("=== verifier_prompt_end ===\n", file=sys.stderr)
-        msg = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            temperature=0.0,
-            messages=[{"role": "user", "content": content}],
-        )
-        raw = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-        judged = _interpret_results(raw, len(criteria))
+        judged: list[bool | None] | None = None
+        last_raw = ""
+        attempts = 1 + max(0, self.max_retries)
+        for attempt in range(attempts):
+            msg = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=0.0,
+                messages=[{"role": "user", "content": content}],
+            )
+            raw = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+            last_raw = raw
+            judged_try = _interpret_results(raw, len(criteria))
+            if all(v is not None for v in judged_try):
+                judged = judged_try
+                break
+            # Retry once with a strict repair prompt if parse was partial.
+            if attempt + 1 < attempts:
+                content = [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Your previous output was not valid JSON for this schema.\n"
+                            'Return ONLY: {"results":[{"pass":true|false}, ...]} with exactly '
+                            f"{len(criteria)} entries."
+                        ),
+                    },
+                    {"type": "text", "text": "Previous output:"},
+                    {"type": "text", "text": _truncate_file_text(raw, max_len=4000)},
+                ]
+                continue
+            judged = judged_try
+        if judged is None:
+            judged = [None] * len(criteria)
+        # Conservative default: unresolved entries count as failure.
+        judged = [False if v is None else v for v in judged]
+        if self.debug_prompts and any(v is False for v in judged) and "pass" not in last_raw:
+            print("[warn] verifier response parse fallback used; unresolved entries marked false", file=sys.stderr)
         score = round(sum(1 for p in judged if p is True) / len(criteria), 4)
         self.cache[key] = score
         return score
@@ -283,46 +502,235 @@ class LLMScorer:
 
 def _chunk_reward(
     agent_steps: list[dict],
-    human_steps: list[dict],
+    human_suffix_count: int,
     final_criteria: list[str],
     scorer: LLMScorer,
 ) -> dict[str, float | int]:
     files = _latest_agent_file_blocks(agent_steps)
-    return {"verifier": scorer.score(final_criteria, files), "human": len(human_steps)}
+    return {"verifier": scorer.score(final_criteria, files), "human": human_suffix_count}
 
 
-def _units(traj: list, scorer: LLMScorer) -> tuple[dict | None, list[dict]]:
+def _plan_steps(agent_steps: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for step in agent_steps:
+        action = step.get("action")
+        parsed = _parse_action_call(action) if isinstance(action, str) else None
+        if parsed is None:
+            continue
+        kind, _ = parsed
+        if kind == "plan":
+            out.append(step)
+    return out
+
+
+def _first_plan_step_index(traj: list, plan_action: str) -> int | None:
+    for i, st in enumerate(traj):
+        if not isinstance(st, dict):
+            continue
+        if st.get("actor") == "agent" and st.get("action") == plan_action:
+            return i
+    return None
+
+
+def _latest_workflow_between(
+    traj: list,
+    plan_action: str,
+    end_idx: int,
+) -> list[Any] | None:
+    """Last ``environment.workflow`` from the matching plan step through ``end_idx`` (inclusive).
+
+    ``end_idx`` should be the index in ``traj`` of the last step of the current learning unit's
+    agent segment so each unit's ``plan`` tool_result reflects workflow state after that chunk,
+    not necessarily the end of the whole session.
+    """
+    start = _first_plan_step_index(traj, plan_action)
+    if start is None or start > end_idx:
+        return None
+    last: list[Any] | None = None
+    for st in traj[start : end_idx + 1]:
+        if not isinstance(st, dict):
+            continue
+        env = st.get("environment")
+        if isinstance(env, dict) and isinstance(env.get("workflow"), list):
+            last = env["workflow"]
+    return last
+
+
+def _inject_plan_workflow_tool_results(
+    agent_steps: list[dict],
+    traj: list | None = None,
+    *,
+    workflow_upto_idx: int | None = None,
+) -> None:
+    """Attach tool_result to plan steps from ``environment.workflow`` (before env is stripped).
+
+    Resolves workflow via ``traj`` from the plan row through ``workflow_upto_idx`` (defaults to
+    end of session). Falls back to the plan step's own ``environment`` if lookup fails.
+    """
+    end_idx = workflow_upto_idx if workflow_upto_idx is not None else (len(traj) - 1 if traj else -1)
+    for step in agent_steps:
+        action = step.get("action")
+        if not isinstance(action, str):
+            continue
+        parsed = _parse_action_call(action)
+        if parsed is None or parsed[0] != "plan":
+            continue
+        wf: Any = None
+        if traj is not None and end_idx >= 0:
+            wf = _latest_workflow_between(traj, action, end_idx)
+        if not isinstance(wf, list):
+            env = step.get("environment")
+            if isinstance(env, dict):
+                wf = env.get("workflow")
+        if isinstance(wf, list):
+            step["tool_result"] = json.dumps(wf, ensure_ascii=False)
+        else:
+            step["tool_result"] = "[]"
+
+
+def _units(
+    traj: list,
+    scorer: LLMScorer,
+    agent_trajectory_style: str = "default",
+    merge_file_actions: bool = True,
+) -> tuple[dict | None, list[dict]]:
     initial, pairs = s.pair_segments(traj)
     if not pairs:
         return initial, []
     final_criteria = _final_verifier_criteria(traj)
+    human_counts = [len(hm) for _, hm in pairs]
+    human_suffix_counts = [0] * len(human_counts)
+    running = 0
+    for i in range(len(human_counts) - 1, -1, -1):
+        running += human_counts[i]
+        human_suffix_counts[i] = running
     prefix = list(initial["steps"]) if initial else []
     agent_history: list[dict] = []
+    initial_plan_steps: list[dict] = []
     out: list[dict] = []
     for j, (ag, hm) in enumerate(pairs):
         ag, hm = list(ag), list(hm)
+        if merge_file_actions:
+            ag_rewritten = _rewrite_agent_trajectory(ag)
+        else:
+            ag_rewritten = ag
+        if j == 0:
+            initial_plan_steps = _plan_steps(ag_rewritten)
         # Score each unit using file state at the end of this chunk in sequence.
         # If this chunk has no new file update, we fall back to the latest prior agent file state.
         agent_history.extend(ag)
+        if agent_trajectory_style == "aggregate":
+            if merge_file_actions:
+                agent_traj_out = _rewrite_agent_trajectory(list(agent_history))
+            else:
+                agent_traj_out = list(agent_history)
+        else:
+            agent_traj_out = ag_rewritten
+        if j > 0 and initial_plan_steps:
+            plan_actions = [s.get("action") for s in initial_plan_steps]
+            existing_prefix = [s.get("action") for s in agent_traj_out[: len(initial_plan_steps)]]
+            if existing_prefix != plan_actions:
+                agent_traj_out = [*initial_plan_steps, *agent_traj_out]
+        if hm:
+            segment_tail = hm[-1]
+        elif ag:
+            segment_tail = ag[-1]
+        else:
+            segment_tail = None
+        try:
+            wf_upto = traj.index(segment_tail) if segment_tail is not None else (len(traj) - 1 if traj else -1)
+        except ValueError:
+            wf_upto = len(traj) - 1 if traj else -1
+        _inject_plan_workflow_tool_results(agent_traj_out, traj, workflow_upto_idx=wf_upto)
         out.append(
             {
                 "index": j,
                 "user_messages": [s.user_text(x) for x in prefix],
-                "agent_trajectory": ag,
+                "agent_trajectory": agent_traj_out,
                 "human_trajectory": hm,
-                "reward": _chunk_reward(agent_history, hm, final_criteria, scorer),
+                "reward": _chunk_reward(agent_history, human_suffix_counts[j], final_criteria, scorer),
             }
         )
         prefix.extend(hm)
     return initial, out
 
 
-def _session(blob: dict, scorer: LLMScorer) -> dict:
+def _rescale_session_verifier_rewards(units: list[dict]) -> None:
+    """Rescale verifier rewards within a session.
+
+    Policy:
+    - First learning unit verifier is set to 0.0.
+    - Last learning unit verifier is kept unchanged.
+    - Middle units are linearly rescaled proportional to their original values
+      between the original first and original last verifier anchors.
+
+    If there is only one learning unit, rewards are left unchanged (nothing to anchor).
+    """
+    if not units:
+        return
+
+    def _get_verifier(unit: dict) -> float | None:
+        reward = unit.get("reward")
+        if not isinstance(reward, dict):
+            return None
+        v = reward.get("verifier")
+        if isinstance(v, (int, float)):
+            return float(v)
+        return None
+
+    def _set_verifier(unit: dict, value: float) -> None:
+        reward = unit.get("reward")
+        if not isinstance(reward, dict):
+            reward = {}
+            unit["reward"] = reward
+        reward["verifier"] = round(float(value), 4)
+
+    n = len(units)
+    if n == 1:
+        return
+
+    first_orig = _get_verifier(units[0])
+    last_orig = _get_verifier(units[-1])
+    if first_orig is None or last_orig is None:
+        return
+
+    _set_verifier(units[0], 0.0)
+    _set_verifier(units[-1], last_orig)
+
+    if n <= 2:
+        return
+
+    denom = last_orig - first_orig
+    for i in range(1, n - 1):
+        current = _get_verifier(units[i])
+        if current is None:
+            continue
+        if abs(denom) < 1e-12:
+            scaled = 0.0
+        else:
+            scaled = ((current - first_orig) / denom) * last_orig
+        # Keep rewards in [0, 1] range.
+        scaled = max(0.0, min(1.0, scaled))
+        _set_verifier(units[i], scaled)
+
+
+def _session(
+    blob: dict,
+    scorer: LLMScorer,
+    agent_trajectory_style: str = "default",
+    merge_file_actions: bool = True,
+) -> dict:
     meta = {"uuid": blob.get("uuid"), "name": blob.get("name")}
     traj = blob.get("trajectory")
     if not isinstance(traj, list):
         return s.strip_actor({**meta, "initial_message": None, "learning_units": [], "error": "bad_trajectory"})
-    initial, units = _units(traj, scorer)
+    initial, units = _units(
+        traj,
+        scorer,
+        agent_trajectory_style=agent_trajectory_style,
+        merge_file_actions=merge_file_actions,
+    )
+    _rescale_session_verifier_rewards(units)
     return s.strip_actor(_strip_environment({**meta, "initial_message": initial, "learning_units": units}))
 
 
@@ -330,10 +738,40 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Export trajectories with LLM-rated REINFORCE rewards.")
     p.add_argument("input", nargs="?", default="-")
     p.add_argument("-o", "--output", default="-")
-    p.add_argument("--model", default=None, help="Override Anthropic model name")
+    p.add_argument(
+        "--model",
+        default=DEFAULT_VERIFIER_MODEL,
+        help=f'Anthropic model name for verifier scoring (default: {DEFAULT_VERIFIER_MODEL})',
+    )
     p.add_argument("--max-tokens", type=int, default=1024)
+    p.add_argument(
+        "--agent_trajectory_style",
+        choices=["default", "aggregate"],
+        default="default",
+        help=(
+            "default: per-unit agent steps only; aggregate: each unit's agent_trajectory is the "
+            "cumulative prefix of all agent steps so far. Works together with --merge_file_actions: "
+            "when merge is on, that cumulative list is rewritten so Write/Edit (any casing) collapse "
+            "into consolidated write(...) steps."
+        ),
+    )
+    p.add_argument(
+        "--merge_file_actions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Rewrite trajectories to merge file edits into synthetic write(path, content) at first "
+            "touch per path. Supports write/Write/edit/Edit and file_path or path. Composes with "
+            "--agent_trajectory_style aggregate (rewrite runs on the full cumulative agent history)."
+        ),
+    )
     p.add_argument("--no-api-config", action="store_true")
     p.add_argument("--no-claude-settings", action="store_true")
+    p.add_argument(
+        "--no_llm_reward",
+        action="store_true",
+        help="Skip verifier LM calls and use a fixed default verifier reward of 0.5",
+    )
     p.add_argument(
         "--debug-prompts",
         action="store_true",
@@ -341,20 +779,35 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    cfg = induce.resolve_anthropic_config(
-        skip_api_config=bool(args.no_api_config),
-        skip_claude_settings=bool(args.no_claude_settings),
-    )
-    scorer = LLMScorer(
-        client=induce.make_anthropic_client(cfg),
-        model=args.model or cfg.model,
-        max_tokens=int(args.max_tokens),
-        cache={},
-        debug_prompts=bool(args.debug_prompts),
-    )
+    base_scorer_kw = {
+        "model": args.model,
+        "max_tokens": int(args.max_tokens),
+        "cache": {},
+        "debug_prompts": bool(args.debug_prompts),
+    }
+    if args.no_llm_reward:
+        scorer = LLMScorer(**base_scorer_kw, client=None, no_llm_reward=True)
+    else:
+        cfg = induce.resolve_anthropic_config(
+            skip_api_config=bool(args.no_api_config),
+            skip_claude_settings=bool(args.no_claude_settings),
+        )
+        scorer = LLMScorer(
+            **base_scorer_kw,
+            client=induce.make_anthropic_client(cfg),
+            no_llm_reward=False,
+        )
 
     raw = json.load(sys.stdin) if args.input == "-" else json.loads(Path(args.input).read_text(encoding="utf-8"))
-    results = [_session(b, scorer) for b in s.blobs(raw)]
+    results = [
+        _session(
+            b,
+            scorer,
+            agent_trajectory_style=args.agent_trajectory_style,
+            merge_file_actions=bool(args.merge_file_actions),
+        )
+        for b in s.blobs(raw)
+    ]
     payload = results[0] if len(results) == 1 else {"sessions": results}
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     if args.output == "-":

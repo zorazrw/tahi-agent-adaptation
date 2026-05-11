@@ -189,8 +189,10 @@ def make_reinforce_loss_fn(
 
         loss_fn(data, logprobs_list) -> (loss, metrics)
 
-    For each trajectory j the weighted sequence log-probability is
-    ``sum_t(logprob_t * weight_t)`` where weight_t masks out prompt tokens.
+    For each trajectory j the weighted sequence log-probability is the mean
+    over included tokens:
+    ``sum_t(logprob_t * weight_t) / sum_t(weight_t)`` where weight_t masks out
+    prompt tokens.
     The loss is ``-mean_j(advantage_j * seq_logprob_j)``.
     """
 
@@ -198,9 +200,16 @@ def make_reinforce_loss_fn(
         data: list[tinker.Datum], logprobs_list: list[torch.Tensor]
     ) -> tuple[torch.Tensor, dict[str, float]]:
         weighted_logprobs = []
+        token_weight_sums = []
         for j in range(len(data)):
             weights = torch.tensor(data[j].loss_fn_inputs["weights"].data)
-            seq_logprob = torch.dot(logprobs_list[j].float(), weights.float())
+            weights_f = weights.float()
+            token_weight_sum = weights_f.sum()
+            token_weight_sums.append(token_weight_sum)
+            # Use per-token mean logprob to avoid length bias across sequences.
+            seq_logprob = torch.dot(logprobs_list[j].float(), weights_f) / torch.clamp(
+                token_weight_sum, min=1e-8
+            )
             weighted_logprobs.append(seq_logprob)
 
         logprob_tensor = torch.stack(weighted_logprobs)
@@ -212,10 +221,53 @@ def make_reinforce_loss_fn(
             "mean_advantage": advantage_tensor.mean().item(),
             "mean_abs_advantage": advantage_tensor.abs().mean().item(),
             "mean_seq_logprob": logprob_tensor.mean().item(),
+            "mean_weighted_tokens": torch.stack(token_weight_sums).mean().item(),
+            "min_weighted_tokens": torch.stack(token_weight_sums).min().item(),
         }
         return loss, metrics
 
     return reinforce_loss_fn
+
+
+def _add_first_step_sanity_metrics(
+    metrics: dict[str, int | float | str],
+    reinforce_metrics: dict[str, float],
+    advantages: list[float],
+) -> None:
+    """Log first-step sanity checks for gradient signal and update viability.
+
+    With the remote ``tinker.TrainingClient`` abstraction we cannot directly
+    inspect parameter tensors/``.grad`` buffers from this process. These checks
+    therefore validate finite/non-trivial training signal proxies.
+    """
+
+    def _is_finite(value: float) -> bool:
+        return torch.isfinite(torch.tensor(value)).item()
+
+    reinforce_loss = float(reinforce_metrics.get("reinforce_loss", float("nan")))
+    mean_seq_logprob = float(reinforce_metrics.get("mean_seq_logprob", float("nan")))
+    mean_advantage = float(reinforce_metrics.get("mean_advantage", float("nan")))
+    mean_abs_advantage = float(reinforce_metrics.get("mean_abs_advantage", float("nan")))
+
+    finite_values_ok = all(
+        _is_finite(v) for v in [reinforce_loss, mean_seq_logprob, mean_advantage, mean_abs_advantage]
+    )
+    has_nontrivial_signal = (
+        abs(mean_abs_advantage) > 1e-8 and abs(mean_seq_logprob) > 1e-8 and len(advantages) > 0
+    )
+
+    metrics.update(
+        sanity_finite_values=float(finite_values_ok),
+        sanity_nontrivial_signal=float(has_nontrivial_signal),
+        sanity_first_step_passed=float(finite_values_ok and has_nontrivial_signal),
+    )
+    if not (finite_values_ok and has_nontrivial_signal):
+        logger.warning(
+            "First-step sanity check failed (finite_values_ok=%s, has_nontrivial_signal=%s). "
+            "This can indicate broken gradient signal, degenerate rewards, or data/mask issues.",
+            finite_values_ok,
+            has_nontrivial_signal,
+        )
 
 
 def do_update(
@@ -292,6 +344,8 @@ def do_update(
             backward_result = training_client.forward_backward_custom(data, loss_fn).result()
             reinforce_metrics = backward_result.metrics
             training_client.optim_step(adam_params).result()
+            if step == 0:
+                _add_first_step_sanity_metrics(metrics, reinforce_metrics, advantages)
 
         # Update running baseline with EMA:
         #   b_t <- (1 - beta) * b_{t-1} + beta * mean_reward_t
