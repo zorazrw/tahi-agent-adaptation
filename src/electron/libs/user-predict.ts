@@ -55,7 +55,8 @@ function normalizeActionType(value: unknown): PredictedUserActionSuggestion["act
     raw === "edit_workflow" ||
     raw === "edit_verifier" ||
     raw === "file_edit" ||
-    raw === "brain_edit"
+    raw === "brain_edit" ||
+    raw === "stop"
   ) {
     return raw;
   }
@@ -214,8 +215,11 @@ function buildPredictionPrompt(args: {
   return [
     "You are predicting Zora's most likely immediate next action in Agent Cowork.",
     "Return ONLY JSON.",
-    'Schema: {"actionType":"message|edit_workflow|edit_verifier|file_edit|brain_edit|unknown","draftText":"string","confidence":0.0,"rationale":"string"}',
+    'Schema: {"actionType":"message|edit_workflow|edit_verifier|file_edit|brain_edit|stop|unknown","draftText":"string","confidence":0.0,"rationale":"string"}',
+    "Use actionType \"stop\" when the user is most likely done for now (satisfied, switching tasks, or not sending another prompt/structural edit). This is intentional completion — not a model error.",
+    "Use actionType \"unknown\" only when the next move is unclear or does not fit message, workflow/verifier edits, file_edit, brain_edit, or stop.",
     "draftText should be the most likely next user message if actionType is message.",
+    "If actionType is stop, draftText should be empty.",
     "If the likely action is not message, draftText may be empty or a short representative utterance.",
     "Optimize for the immediate next move, not the long-term intent.",
     "",

@@ -325,6 +325,7 @@ export type PredictedUserActionType =
   | "edit_verifier"
   | "file_edit"
   | "brain_edit"
+  | "stop"
   | "unknown";
 
 export type PredictedUserActionSuggestion = {

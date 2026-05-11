@@ -273,6 +273,11 @@ export function PromptInput({
                     </button>
                   </div>
                 </div>
+                {predictedSuggestion.actionType === "stop" && !predictedSuggestion.draftText.trim() && (
+                  <p className="text-xs text-muted-foreground">
+                    Predicted end of turn — no further user message or structural edit expected.
+                  </p>
+                )}
                 {predictedSuggestion.draftText && (
                   <div className="rounded-xl border border-ink-900/8 bg-surface-secondary px-3 py-2 text-sm text-ink-800">
                     {predictedSuggestion.draftText}

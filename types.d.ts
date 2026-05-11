@@ -121,6 +121,7 @@ type PredictedUserActionType =
     | "edit_verifier"
     | "file_edit"
     | "brain_edit"
+    | "stop"
     | "unknown";
 
 type PredictedUserActionSuggestion = {
