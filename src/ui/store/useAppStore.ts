@@ -13,7 +13,6 @@ const PREDICTION_ASSIST_MODE_KEY = "agent-cowork-prediction-assist-mode";
 
 export type WorkflowRunMode = "manual" | "auto";
 export type PredictionAssistMode = "off" | "suggestion" | "autofill";
-export type PredictionAssistOverride = "default" | PredictionAssistMode;
 
 function readStoredWorkflowRunMode(): WorkflowRunMode {
   try {
@@ -83,8 +82,6 @@ interface AppState {
   workflowRunMode: WorkflowRunMode;
   /** Controls next-user prediction behavior in chat: off, suggest, or auto-send suggested message. */
   predictionAssistMode: PredictionAssistMode;
-  /** Local UI override for prediction behavior; defaults to the Settings value when set to "default". */
-  predictionAssistOverride: PredictionAssistOverride;
   /** LM is labeling verifiers for this session/step before the next run can proceed. */
   verifierCheckSessionId: string | null;
   verifierCheckNodeId: string | null;
@@ -107,7 +104,6 @@ interface AppState {
   setApiConfigChecked: (checked: boolean) => void;
   setWorkflowRunMode: (mode: WorkflowRunMode) => void;
   setPredictionAssistMode: (mode: PredictionAssistMode) => void;
-  setPredictionAssistOverride: (mode: PredictionAssistOverride) => void;
   markHistoryRequested: (sessionId: string) => void;
   resolvePermissionRequest: (sessionId: string, toolUseId: string) => void;
   updateWorkflowTree: (sessionId: string, workflowTree: WorkflowNode[]) => void;
@@ -158,7 +154,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   contextInductionDepth: 0,
   workflowRunMode: readStoredWorkflowRunMode(),
   predictionAssistMode: readStoredPredictionAssistMode(),
-  predictionAssistOverride: "default",
   verifierCheckSessionId: null,
   verifierCheckNodeId: null,
 
@@ -210,8 +205,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ predictionAssistMode });
   },
-
-  setPredictionAssistOverride: (predictionAssistOverride) => set({ predictionAssistOverride }),
 
   toolStatuses: {},
   setToolStatus: (toolUseId, status) => set((state) => ({

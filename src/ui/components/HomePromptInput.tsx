@@ -306,7 +306,7 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
 
           <div className="flex-1" />
 
-          <PredictionAssistOverrideControl compact />
+          <PredictionAssistOverrideControl />
 
           {/* Send button */}
           <button

@@ -99,9 +99,6 @@ function App() {
   const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
   const contextInductionDepth = useAppStore((s) => s.contextInductionDepth);
   const predictionAssistMode = useAppStore((s) => s.predictionAssistMode);
-  const predictionAssistOverride = useAppStore((s) => s.predictionAssistOverride);
-  const effectivePredictionAssistMode =
-    predictionAssistOverride === "default" ? predictionAssistMode : predictionAssistOverride;
 
   // Helper function to extract partial message content
   const getPartialMessageContent = (eventMessage: any) => {
@@ -295,7 +292,7 @@ function App() {
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (effectivePredictionAssistMode === "off") {
+    if (predictionAssistMode === "off") {
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
       return;
@@ -347,10 +344,10 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeSession, activeSessionId, effectivePredictionAssistMode, hasNextRunnableWorkflowNode, messages]);
+  }, [activeSession, activeSessionId, predictionAssistMode, hasNextRunnableWorkflowNode, messages]);
 
   useEffect(() => {
-    if (effectivePredictionAssistMode !== "autofill") return;
+    if (predictionAssistMode !== "autofill") return;
     if (!predictedSuggestion || predictedSuggestion.actionType !== "message") return;
     if (!predictedSuggestion.draftText.trim()) return;
     if (!activeSessionId || !activeSession || activeSession.status !== "completed") return;
@@ -377,7 +374,7 @@ function App() {
     lastAutofillKey,
     messages.length,
     predictedSuggestion,
-    effectivePredictionAssistMode,
+    predictionAssistMode,
     hasNextRunnableWorkflowNode,
     resetToLatest,
     selectedNodeId,
@@ -705,7 +702,7 @@ function App() {
           onSendMessage={handleSendMessage}
           disabled={visibleMessages.length === 0}
           rightOffset={undefined}
-          predictedSuggestion={effectivePredictionAssistMode === "off" ? null : predictedSuggestion}
+          predictedSuggestion={predictionAssistMode === "off" ? null : predictedSuggestion}
           isPredictingSuggestion={isPredictingSuggestion}
           onClearPredictedSuggestion={() => setPredictedSuggestion(null)}
         />

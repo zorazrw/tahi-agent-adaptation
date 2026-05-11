@@ -1,5 +1,5 @@
 import { useAppStore } from "../store/useAppStore";
-import type { PredictionAssistMode, PredictionAssistOverride } from "../store/useAppStore";
+import type { PredictionAssistMode } from "../store/useAppStore";
 
 function modeLabel(mode: PredictionAssistMode): string {
   switch (mode) {
@@ -12,30 +12,34 @@ function modeLabel(mode: PredictionAssistMode): string {
   }
 }
 
-export function PredictionAssistOverrideControl({ compact = false }: { compact?: boolean }) {
+/** Toolbar control styled like the “Work in a folder” button in `HomePromptInput`. */
+export function PredictionAssistOverrideControl() {
   const predictionAssistMode = useAppStore((s) => s.predictionAssistMode);
-  const predictionAssistOverride = useAppStore((s) => s.predictionAssistOverride);
-  const setPredictionAssistOverride = useAppStore((s) => s.setPredictionAssistOverride);
+  const setPredictionAssistMode = useAppStore((s) => s.setPredictionAssistMode);
 
   return (
     <label
-      className={`inline-flex items-center gap-2 rounded-lg border border-ink-900/10 bg-surface px-2.5 text-muted-foreground transition-colors hover:border-ink-900/20 hover:bg-ink-900/5 ${
-        compact ? "h-8 min-h-8" : "h-8 min-h-8"
-      }`}
-      title={`Local prediction override. Default currently resolves to ${modeLabel(predictionAssistMode)} from Settings.`}
+      className="group inline-flex h-8 min-h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-sm leading-none text-muted-foreground transition-colors hover:bg-ink-900/5 hover:text-ink-700"
+      title="User simulator: Off (no prediction), Suggestion (Tab to accept), or Autofill (send predicted message once)."
     >
-      <span className="text-xs font-medium text-ink-600 whitespace-nowrap">User Simulator</span>
-      <select
-        value={predictionAssistOverride}
-        onChange={(e) => setPredictionAssistOverride(e.target.value as PredictionAssistOverride)}
-        className="bg-transparent text-sm text-ink-700 focus:outline-none pr-5 min-w-0"
-        aria-label="Prediction assist override"
-      >
-        <option value="default">Default ({modeLabel(predictionAssistMode)})</option>
-        <option value="off">Off</option>
-        <option value="suggestion">Suggestion</option>
-        <option value="autofill">Autofill</option>
-      </select>
+      <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+      </svg>
+      <span className="shrink-0 whitespace-nowrap">User Simulator</span>
+      <span className="inline-flex min-w-[7.5rem] items-center justify-center self-center rounded-md border border-ink-900/10 bg-transparent px-2 py-0.5 transition-colors group-hover:border-ink-900/15">
+        <select
+          value={predictionAssistMode}
+          onChange={(e) => setPredictionAssistMode(e.target.value as PredictionAssistMode)}
+          className="w-full min-w-0 cursor-pointer border-0 bg-transparent py-0 text-center text-sm font-normal leading-none text-ink-800 focus:outline-none focus:ring-0 group-hover:text-ink-900"
+          aria-label="User simulator mode"
+        >
+          <option value="off">{modeLabel("off")}</option>
+          <option value="suggestion">{modeLabel("suggestion")}</option>
+          <option value="autofill">{modeLabel("autofill")}</option>
+        </select>
+      </span>
     </label>
   );
 }
