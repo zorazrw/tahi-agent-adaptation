@@ -48,6 +48,7 @@ import {
     buildWorkflowSummaryFromTree,
     resolveAppUserProfileMarkdown,
     predictNextUserAction,
+    isFakeUserPredictEnabled,
 } from "./libs/user-predict.js";
 
 type SaveMemoryParseResult =
@@ -269,7 +270,7 @@ app.on("ready", () => {
             }
             const cwd = history.session.cwd ?? process.cwd();
             const { profileMarkdown, profilePath } = resolveAppUserProfileMarkdown(cwd);
-            if (!profileMarkdown.trim()) {
+            if (!profileMarkdown.trim() && !isFakeUserPredictEnabled()) {
                 return null;
             }
 

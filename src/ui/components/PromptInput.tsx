@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { ClientEvent, PredictedUserActionSuggestion } from "../types";
+import type { ClientEvent, PredictedUserActionSuggestion, WorkflowNode } from "../types";
 import { useAppStore } from "../store/useAppStore";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
@@ -7,6 +7,33 @@ const MAX_ROWS = 12;
 const LINE_HEIGHT = 21;
 const MAX_HEIGHT = MAX_ROWS * LINE_HEIGHT;
 const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
+
+function isFakeUserPrediction(s: PredictedUserActionSuggestion): boolean {
+  const raw = s.rawResponse?.trim();
+  if (!raw) return false;
+  try {
+    const j = JSON.parse(raw) as { fakeUserPredict?: boolean };
+    return j?.fakeUserPredict === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Fake `edit_workflow` accept: append a root “Visualization” step so Progress updates (UI test hook). */
+function appendFakeVisualizationStep(tree: WorkflowNode[] | undefined): WorkflowNode[] {
+  const clone = JSON.parse(JSON.stringify(tree ?? [])) as WorkflowNode[];
+  const step: WorkflowNode = {
+    id: crypto.randomUUID(),
+    description: "Visualization",
+    outputFiles: [],
+    verifiers: [],
+    verifierMarks: [],
+    children: [],
+    status: "pending",
+    depth: 0,
+  };
+  return [...clone, step];
+}
 
 function readStoredAutoInduction(): boolean {
   try {
@@ -144,32 +171,69 @@ export function PromptInput({
     selectedNode.status !== "running"
   );
 
-  const canSendPredictedSuggestion = Boolean(
+  const canAcceptPrediction = Boolean(
     predictedSuggestion &&
-    predictedSuggestion.actionType === "message" &&
-    predictedSuggestion.draftText.trim() &&
+    activeSessionId &&
     !isRunning &&
     !disabled &&
-    !prompt.trim()
+    !prompt.trim() &&
+    (predictedSuggestion.actionType === "message"
+      ? Boolean(predictedSuggestion.draftText.trim())
+      : predictedSuggestion.actionType === "edit_workflow" ||
+        predictedSuggestion.actionType === "edit_verifier" ||
+        predictedSuggestion.actionType === "file_edit" ||
+        predictedSuggestion.actionType === "brain_edit" ||
+        predictedSuggestion.actionType === "stop" ||
+        predictedSuggestion.actionType === "unknown")
   );
 
-  const sendPredictedSuggestion = useCallback(() => {
-    if (!predictedSuggestion || predictedSuggestion.actionType !== "message") return;
-    const draftText = predictedSuggestion.draftText.trim();
-    if (!draftText) return;
-    if (!activeSessionId) return;
-    onSendMessage?.();
-    sendEvent({
-      type: "session.continue",
-      payload: {
-        sessionId: activeSessionId,
-        prompt: draftText,
-        ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
-      },
-    });
-    setPrompt("");
-    onClearPredictedSuggestion?.();
-  }, [activeSessionId, onClearPredictedSuggestion, onSendMessage, predictedSuggestion, selectedNodeId, sendEvent, setPrompt]);
+  const acceptPredictedSuggestion = useCallback(() => {
+    if (!predictedSuggestion || !activeSessionId) return;
+    const t = predictedSuggestion.actionType;
+
+    if (t === "message") {
+      const draftText = predictedSuggestion.draftText.trim();
+      if (!draftText) return;
+      onSendMessage?.();
+      sendEvent({
+        type: "session.continue",
+        payload: {
+          sessionId: activeSessionId,
+          prompt: draftText,
+          ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
+        },
+      });
+      setPrompt("");
+      return;
+    }
+
+    if (t === "brain_edit") {
+      sendEvent({ type: "session.recordBrainEdit", payload: { sessionId: activeSessionId } });
+      onSendMessage?.();
+      return;
+    }
+
+    if (t === "edit_workflow") {
+      if (isFakeUserPrediction(predictedSuggestion) && activeSessionId) {
+        const next = appendFakeVisualizationStep(activeSession?.workflowTree);
+        const newStep = next[next.length - 1];
+        useAppStore.getState().updateWorkflowTree(activeSessionId, next);
+        sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: next } });
+        if (newStep) useAppStore.getState().setSelectedNodeId(newStep.id);
+      }
+      onSendMessage?.();
+      return;
+    }
+
+    if (t === "edit_verifier") {
+      onSendMessage?.();
+      return;
+    }
+
+    if (t === "file_edit" || t === "stop" || t === "unknown") {
+      onSendMessage?.();
+    }
+  }, [activeSession, activeSessionId, onSendMessage, predictedSuggestion, selectedNodeId, sendEvent, setPrompt]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Escape" && predictedSuggestion) {
@@ -177,13 +241,8 @@ export function PromptInput({
       onClearPredictedSuggestion?.();
       return;
     }
-    if (e.key === "Tab" && canSendPredictedSuggestion) {
-      e.preventDefault();
-      sendPredictedSuggestion();
-      return;
-    }
-    // Tab to start next pending step
-    if (e.key === "Tab" && hasPendingNode && selectedNodeId && !prompt.trim()) {
+    // Tab to start next pending step (prediction accept uses the suggestion “Accept” button, not Tab)
+    if (e.key === "Tab" && hasPendingNode && selectedNodeId && !prompt.trim() && !canAcceptPrediction) {
       e.preventDefault();
       setRunningNodeId(selectedNodeId);
       sendEvent({ type: "session.solveNode", payload: { sessionId: activeSessionId!, nodeId: selectedNodeId } });
@@ -257,17 +316,20 @@ export function PromptInput({
                       {(predictedSuggestion.confidence * 100).toFixed(0)}% self-reported confidence
                     </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {canSendPredictedSuggestion && (
-                      <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                        <kbd className="inline-flex items-center rounded border border-ink-900/15 bg-ink-900/5 px-1.5 py-0.5 font-medium leading-none">TAB</kbd>
-                        send suggestion
-                      </span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {canAcceptPrediction && (
+                      <button
+                        type="button"
+                        onClick={() => acceptPredictedSuggestion()}
+                        className="rounded-lg bg-primary px-2.5 py-1.5 text-xs font-medium text-white shadow-soft hover:bg-primary-hover transition-colors"
+                      >
+                        {predictedSuggestion.actionType === "message" ? "Accept & send" : "Accept"}
+                      </button>
                     )}
                     <button
                       type="button"
                       onClick={() => onClearPredictedSuggestion?.()}
-                      className="text-[11px] text-muted-foreground hover:text-ink-800"
+                      className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-ink-900/5 hover:text-ink-800 transition-colors"
                     >
                       Dismiss
                     </button>
@@ -305,7 +367,7 @@ export function PromptInput({
             ref={promptRef}
             disabled={disabled && !isRunning}
           />
-          {hasPendingNode && !prompt.trim() && !canSendPredictedSuggestion && (
+          {hasPendingNode && !prompt.trim() && !canAcceptPrediction && (
             <div className="absolute right-0 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
               <kbd className="inline-flex items-center rounded border border-ink-900/15 bg-ink-900/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground leading-none">TAB</kbd>
               <span className="text-xs text-muted-foreground whitespace-nowrap">to start next step</span>

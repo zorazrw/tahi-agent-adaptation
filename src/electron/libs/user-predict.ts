@@ -63,6 +63,72 @@ function normalizeActionType(value: unknown): PredictedUserActionSuggestion["act
   return "unknown";
 }
 
+/** True when `AGENT_COWORK_FAKE_USER_PREDICT` is set (see `maybeFakeUserPredictAction`). */
+export function isFakeUserPredictEnabled(): boolean {
+  return Boolean(process.env.AGENT_COWORK_FAKE_USER_PREDICT?.trim());
+}
+
+/**
+ * TEMPORARY UI testing: skip the LLM and return a fixed prediction.
+ * Set env `AGENT_COWORK_FAKE_USER_PREDICT` to one of:
+ * `message` | `edit_workflow` | `edit_verifier` | `file_edit` | `edit_file` (alias) | `brain_edit` | `stop` | `unknown`
+ * Example: `AGENT_COWORK_FAKE_USER_PREDICT=file_edit npm run dev`
+ * Remove this hook when finished testing.
+ */
+function maybeFakeUserPredictAction(): PredictedUserActionSuggestion | null {
+  const raw = process.env.AGENT_COWORK_FAKE_USER_PREDICT?.trim();
+  if (!raw) return null;
+
+  const lowered = raw.toLowerCase();
+  const aliased = lowered === "edit_file" ? "file_edit" : lowered;
+  const actionType = normalizeActionType(aliased);
+
+  const fixed: Record<
+    PredictedUserActionSuggestion["actionType"],
+    { draftText: string; rationale: string }
+  > = {
+    message: {
+      draftText: "[Fake UI test] Tighten the legend spacing and bump axis label font one step.",
+      rationale: "Placeholder: predicted next user chat for layout polish (testing message + Tab path).",
+    },
+    edit_workflow: {
+      draftText:
+        "[Fake UI test] Accept adds a new root step “Visualization” in Progress (workflow plan update).",
+      rationale:
+        "Placeholder: edit_workflow. With AGENT_COWORK_FAKE_USER_PREDICT=edit_workflow, Accept appends that step to the tree.",
+    },
+    edit_verifier: {
+      draftText: "[Fake UI test] User would open the verifier panel and relax the “no duplicate dates” check.",
+      rationale: "Placeholder: edit_verifier (testing non-message layout).",
+    },
+    file_edit: {
+      draftText: "[Fake UI test] User would open `artifacts/chart.html` for a direct HTML tweak.",
+      rationale: "Placeholder: file_edit (testing draft block with path-like text).",
+    },
+    brain_edit: {
+      draftText: "[Fake UI test] User would edit project memory (e.g. AGENTS.md or brain panel).",
+      rationale: "Placeholder: brain_edit.",
+    },
+    stop: {
+      draftText: "",
+      rationale: "Placeholder: user is done for this turn (testing stop + empty draft copy).",
+    },
+    unknown: {
+      draftText: "[Fake UI test] Model could not classify the next surface action.",
+      rationale: "Placeholder: unknown actionType (testing fallback styling).",
+    },
+  };
+
+  const row = fixed[actionType];
+  return {
+    actionType,
+    draftText: row.draftText,
+    confidence: 0.77,
+    rationale: row.rationale,
+    rawResponse: JSON.stringify({ fakeUserPredict: true, requested: raw, actionType }),
+  };
+}
+
 function normalizeJudgeVerdict(value: unknown): UserPredictionJudgeResult["verdict"] {
   const raw = asString(value).trim().toLowerCase();
   if (raw === "accurate" || raw === "partially_accurate" || raw === "inaccurate") {
@@ -215,9 +281,18 @@ function buildPredictionPrompt(args: {
   return [
     "You are predicting Zora's most likely immediate next action in Agent Cowork.",
     "Return ONLY JSON.",
-    'Schema: {"actionType":"message|edit_workflow|edit_verifier|file_edit|brain_edit|stop|unknown","draftText":"string","confidence":0.0,"rationale":"string"}',
+    'Schema: {"actionType":"file_edit|edit_verifier|edit_workflow|brain_edit|message|stop|unknown","draftText":"string","confidence":0.0,"rationale":"string"}',
+    "Use actionType \"stop\" liberally when appropriate: if the agent's latest output plausibly satisfies the user's original request, if remaining issues are minor/optional, or if another prompt would mostly be scope creep — prefer \"stop\" over speculative follow-ups.",
+    "When uncertain between \"stop\" and a vague or low-value \"message\", choose \"stop\". Reserve \"message\" for clear, necessary next steps that stay on-task.",
     "Use actionType \"stop\" when the user is most likely done for now (satisfied, switching tasks, or not sending another prompt/structural edit). This is intentional completion — not a model error.",
     "Use actionType \"unknown\" only when the next move is unclear or does not fit message, workflow/verifier edits, file_edit, brain_edit, or stop.",
+    "Anchor on the user's initial request (usually the first substantive \"User:\" turn in the transcript). Do not predict draftText or any next action that pivots to a new goal, new deliverable, unrelated benchmark, or \"improvement\" beyond what that initial request asked for.",
+    "Never predict a message whose purpose is to drag the task toward unrelated exploration, extra features, or reframing the assignment. If the work already matches the initial ask, use \"stop\" instead of inventing follow-on work.",
+    "Predicted edit_workflow, edit_verifier, file_edit, or brain_edit must likewise serve the same initial request — not introduce a new assignment or tangent.",
+    "Do not default to actionType \"message\". Pick the single best type. Use \"message\" only when the next step is most likely a normal chat prompt.",
+    "Use edit_workflow when the user would likely adjust the task tree or steps; edit_verifier when they would tweak criteria or checks; file_edit when they would open and edit a specific file path next; brain_edit when they would change saved memory/skills.",
+    "If the workflow summary shows failing or stale verifiers the user would plausibly fix before chatting, prefer edit_verifier or edit_workflow over message.",
+    "The transcript uses \"User:\" for chat prompts and \"UserAction: edit_workflow\" / \"UserAction: edit_verifier\" / \"UserAction: file_edit(path)\" / \"UserAction: brain_edit\" for non-chat actions. Prefer the action type that matches how the user has been acting.",
     "draftText should be the most likely next user message if actionType is message.",
     "If actionType is stop, draftText should be empty.",
     "If the likely action is not message, draftText may be empty or a short representative utterance.",
@@ -233,7 +308,7 @@ function buildPredictionPrompt(args: {
     args.workflowSummary
       ? ["WORKFLOW / VERIFIER SUMMARY:", args.workflowSummary, ""].join("\n")
       : "",
-    "Think about whether Zora is most likely to send a terse correction, edit the workflow, edit a verifier, or directly edit a file.",
+    "Choose the actionType that best matches the next single user move among message, edit_workflow, edit_verifier, file_edit, brain_edit, stop, and unknown.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -246,6 +321,9 @@ export async function predictNextUserAction(args: {
   workflowSummary?: string;
   sessionTitle?: string;
 }): Promise<PredictedUserActionSuggestion> {
+  const fake = maybeFakeUserPredictAction();
+  if (fake) return fake;
+
   const rawResponse = await runPiTextPrompt({
     cwd: args.cwd,
     prompt: buildPredictionPrompt(args),
