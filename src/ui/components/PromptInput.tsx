@@ -254,7 +254,7 @@ export function PromptInput({
                       {predictedSuggestion.actionType}
                     </span>
                     <span className="text-[11px] text-muted-foreground">
-                      {(predictedSuggestion.confidence * 100).toFixed(0)}% confidence
+                      {(predictedSuggestion.confidence * 100).toFixed(0)}% self-reported confidence
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
@@ -280,7 +280,7 @@ export function PromptInput({
                 )}
                 {predictedSuggestion.rationale && (
                   <div className="text-xs text-muted-foreground line-clamp-3">
-                    {predictedSuggestion.rationale}
+                    Rationale: {predictedSuggestion.rationale}
                   </div>
                 )}
               </div>
