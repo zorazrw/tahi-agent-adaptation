@@ -136,6 +136,8 @@ export async function generateUserProfileMarkdown(args: {
   lastN?: number;
   sessionStore: SessionStore;
   writeToDisk?: boolean;
+  /** Test seam — defaults to `runPiTextPrompt`. */
+  runPrompt?: (input: { cwd: string; prompt: string }) => Promise<string>;
 }): Promise<UserProfileGenerationResult> {
   const lastN = clampLastN(args.lastN ?? DEFAULT_LAST_N);
   const profilePath = resolveProfileTargetPath(args.cwd);
@@ -154,9 +156,10 @@ export async function generateUserProfileMarkdown(args: {
   const promptCount = bundles.reduce((sum, bundle) => sum + bundle.prompts.length, 0);
 
   const promptCwd = args.cwd && args.cwd.trim() ? args.cwd : process.cwd();
+  const runPrompt = args.runPrompt ?? runPiTextPrompt;
   let raw: string;
   try {
-    raw = await runPiTextPrompt({
+    raw = await runPrompt({
       cwd: promptCwd,
       prompt: buildGenerationPrompt({
         existingProfile,
