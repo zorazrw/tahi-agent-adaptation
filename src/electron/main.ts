@@ -50,6 +50,11 @@ import {
     predictNextUserAction,
     isFakeUserPredictEnabled,
 } from "./libs/user-predict.js";
+import {
+    generateUserProfileMarkdown,
+    readUserProfile,
+    writeUserProfile,
+} from "./libs/user-profile-generator.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -291,6 +296,63 @@ app.on("ready", () => {
             return null;
         }
     });
+
+    ipcMainHandle("get-user-profile", (_: any, cwd?: string | null) => {
+        try {
+            return readUserProfile(typeof cwd === "string" && cwd.trim() ? cwd : undefined);
+        } catch (error) {
+            return {
+                markdown: "",
+                profilePath: "",
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
+    });
+
+    ipcMainHandle(
+        "save-user-profile",
+        async (_: any, payload: { markdown?: unknown; cwd?: unknown } | null) => {
+            try {
+                const markdown =
+                    typeof payload?.markdown === "string" ? payload.markdown : "";
+                const cwdRaw = typeof payload?.cwd === "string" ? payload.cwd.trim() : "";
+                const { profilePath } = await writeUserProfile({
+                    cwd: cwdRaw || undefined,
+                    markdown,
+                });
+                return { success: true, profilePath };
+            } catch (error) {
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                };
+            }
+        }
+    );
+
+    ipcMainHandle(
+        "generate-user-profile",
+        async (_: any, payload: { lastN?: unknown; cwd?: unknown; writeToDisk?: unknown } | null) => {
+            try {
+                const lastNRaw = payload?.lastN;
+                const lastN =
+                    typeof lastNRaw === "number" ? lastNRaw : Number(lastNRaw ?? 10);
+                const cwdRaw = typeof payload?.cwd === "string" ? payload.cwd.trim() : "";
+                const writeToDisk = payload?.writeToDisk !== false;
+                return await generateUserProfileMarkdown({
+                    cwd: cwdRaw || undefined,
+                    lastN: Number.isFinite(lastN) ? lastN : 10,
+                    sessionStore: sessions,
+                    writeToDisk,
+                });
+            } catch (error) {
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                };
+            }
+        }
+    );
 
     // Handle recent cwds request
     ipcMainHandle("get-recent-cwds", (_: any, limit?: number) => {

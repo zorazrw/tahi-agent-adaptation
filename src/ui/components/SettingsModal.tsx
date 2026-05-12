@@ -1,8 +1,15 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { useAppStore } from "../store/useAppStore";
 import type { PredictionAssistMode, WorkflowRunMode } from "../store/useAppStore";
 import { Spinner } from "./Spinner";
+import { ViewToggle, useViewToggle } from "./file-renderers/ViewToggle";
 import type {
   AvailableModel,
   OpenAICompatibleApiFormat,
@@ -13,7 +20,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "api" | "workflow" | "skills" | "data";
+type Tab = "api" | "workflow" | "skills" | "profile" | "data";
 const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
 
 function readStoredAutoInduction(): boolean {
@@ -26,6 +33,10 @@ function readStoredAutoInduction(): boolean {
   }
   return true;
 }
+
+const DEFAULT_PROFILE_LAST_N = 10;
+const MIN_PROFILE_LAST_N = 1;
+const MAX_PROFILE_LAST_N = 200;
 
 function WorkflowPanel() {
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
@@ -197,6 +208,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  tab === "profile"
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+                onClick={() => setTab("profile")}
+              >
+                Profile
+              </button>
+              <button
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                   tab === "data"
                     ? "bg-primary/10 text-primary"
                     : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
@@ -213,6 +234,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <ApiPanel onClose={onClose} />
               ) : tab === "workflow" ? (
                 <WorkflowPanel />
+              ) : tab === "profile" ? (
+                <ProfilePanel />
               ) : tab === "skills" ? (
                 <SkillsPanel />
               ) : (
@@ -1325,5 +1348,240 @@ function SkillsPanel() {
         </div>
       )}
     </>
+  );
+}
+
+/* ---------- Profile Panel ---------- */
+
+function clampLastN(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_PROFILE_LAST_N;
+  return Math.min(Math.max(Math.floor(value), MIN_PROFILE_LAST_N), MAX_PROFILE_LAST_N);
+}
+
+function ProfilePanel() {
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const sessionCwd = useAppStore((s) =>
+    s.activeSessionId ? s.sessions[s.activeSessionId]?.cwd : undefined
+  );
+  const targetCwd = sessionCwd ?? null;
+
+  const [profilePath, setProfilePath] = useState<string>("");
+  const [markdown, setMarkdown] = useState<string>("");
+  const [originalMarkdown, setOriginalMarkdown] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const [mode, setMode] = useViewToggle("preview");
+
+  const [lastN, setLastN] = useState<number>(DEFAULT_PROFILE_LAST_N);
+  const [lastNInput, setLastNInput] = useState<string>(String(DEFAULT_PROFILE_LAST_N));
+  const [generating, setGenerating] = useState(false);
+  const [generationStatus, setGenerationStatus] = useState<string | null>(null);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveOk, setSaveOk] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const result = await window.electron.getUserProfile(targetCwd);
+      setProfilePath(result?.profilePath ?? "");
+      setMarkdown(result?.markdown ?? "");
+      setOriginalMarkdown(result?.markdown ?? "");
+      if (result?.error) setLoadError(result.error);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to load USER_PROFILE.md");
+    } finally {
+      setLoading(false);
+    }
+  }, [targetCwd]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    setGenerationStatus(null);
+    setGenerationError(null);
+    setSaveOk(false);
+    try {
+      const result = await window.electron.generateUserProfile({
+        lastN,
+        cwd: targetCwd,
+        writeToDisk: true,
+      });
+      if (!result?.success) {
+        setGenerationError(result?.error ?? "Generation failed");
+        return;
+      }
+      const nextMarkdown = result.markdown ?? "";
+      setMarkdown(nextMarkdown);
+      setOriginalMarkdown(nextMarkdown);
+      if (result.profilePath) setProfilePath(result.profilePath);
+      setGenerationStatus(
+        `Generated from ${result.chatCount ?? 0} chat${result.chatCount === 1 ? "" : "s"} (${result.promptCount ?? 0} prompts). Saved to disk.`
+      );
+    } catch (err) {
+      setGenerationError(err instanceof Error ? err.message : "Generation failed");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveError(null);
+    setSaveOk(false);
+    try {
+      const result = await window.electron.saveUserProfile({ markdown, cwd: targetCwd });
+      if (!result.success) {
+        setSaveError(result.error ?? "Save failed");
+        return;
+      }
+      setProfilePath(result.profilePath);
+      setOriginalMarkdown(markdown);
+      setSaveOk(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const dirty = markdown !== originalMarkdown;
+
+  return (
+    <div className="flex flex-col gap-4 min-h-0">
+      <div>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          USER_PROFILE.md is read by the next-action predictor. Live preview below; auto-generate from your recent chats or hand-edit.
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-ink-900/10 bg-surface p-4 flex flex-col gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <label className="flex items-center gap-2 text-xs font-medium text-ink-700">
+            Last
+            <input
+              type="number"
+              min={MIN_PROFILE_LAST_N}
+              max={MAX_PROFILE_LAST_N}
+              className="w-20 rounded-lg border border-ink-900/10 bg-surface-cream px-2 py-1.5 text-sm text-ink-800 focus:outline-none focus:ring-2 focus:ring-primary/25"
+              value={lastNInput}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setLastNInput(raw);
+                const parsed = Number(raw);
+                if (Number.isFinite(parsed)) {
+                  setLastN(clampLastN(parsed));
+                }
+              }}
+              onBlur={() => {
+                const parsed = Number(lastNInput);
+                const next = clampLastN(Number.isFinite(parsed) ? parsed : DEFAULT_PROFILE_LAST_N);
+                setLastN(next);
+                setLastNInput(String(next));
+              }}
+            />
+            chat{lastN === 1 ? "" : "s"}
+          </label>
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={generating}
+            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover transition-colors disabled:opacity-50 flex items-center gap-2"
+          >
+            {generating ? (
+              <>
+                <Spinner className="w-3.5 h-3.5" color="currentColor" />
+                Generating…
+              </>
+            ) : (
+              "Auto-generate"
+            )}
+          </button>
+          {!activeSessionId ? (
+            <span className="text-[11px] text-muted-foreground">
+              No active session — writing to repo USER_PROFILE.md.
+            </span>
+          ) : null}
+        </div>
+        {generationStatus ? (
+          <p className="text-xs text-primary">{generationStatus}</p>
+        ) : null}
+        {generationError ? (
+          <p className="text-xs text-error">{generationError}</p>
+        ) : null}
+      </div>
+
+      {profilePath ? (
+        <p
+          className="text-[11px] text-muted-foreground font-mono truncate"
+          title={profilePath}
+        >
+          {profilePath}
+        </p>
+      ) : null}
+
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-600">
+          USER_PROFILE.md
+        </h3>
+        <ViewToggle mode={mode} onChange={setMode} />
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <Spinner className="w-5 h-5 text-primary" color="currentColor" />
+        </div>
+      ) : loadError ? (
+        <p className="text-sm text-error">{loadError}</p>
+      ) : mode === "preview" ? (
+        <div className="md-prose min-h-[200px] max-h-[min(420px,55vh)] overflow-auto rounded-lg border border-ink-900/10 bg-surface-cream px-3 py-2">
+          {markdown.trim() ? (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeRaw]}
+            >
+              {markdown}
+            </ReactMarkdown>
+          ) : (
+            <p className="text-sm text-muted-foreground italic">
+              No USER_PROFILE.md yet. Auto-generate from recent chats or write one below.
+            </p>
+          )}
+        </div>
+      ) : (
+        <textarea
+          className="min-h-[260px] max-h-[min(520px,60vh)] w-full rounded-lg border border-ink-900/10 bg-surface px-3 py-2 text-sm text-ink-800 font-mono leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-primary/25 focus:border-primary/30"
+          value={markdown}
+          onChange={(e) => {
+            setMarkdown(e.target.value);
+            setSaveOk(false);
+          }}
+          spellCheck={false}
+          aria-label="USER_PROFILE.md content"
+        />
+      )}
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving || !dirty}
+          className="rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover transition-colors disabled:opacity-50"
+        >
+          {saving ? "Saving…" : dirty ? "Save edits" : "Saved"}
+        </button>
+        {saveError ? <span className="text-sm text-error">{saveError}</span> : null}
+        {saveOk && !saveError ? (
+          <span className="text-sm text-primary">Saved.</span>
+        ) : null}
+      </div>
+    </div>
   );
 }

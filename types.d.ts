@@ -133,6 +133,36 @@ type PredictedUserActionSuggestion = {
     profilePath?: string;
 }
 
+type UserProfileLoadResult = {
+    markdown: string;
+    profilePath: string;
+    error?: string;
+}
+
+type UserProfileSaveInput = {
+    markdown: string;
+    cwd?: string | null;
+}
+
+type UserProfileSaveResult =
+    | { success: true; profilePath: string }
+    | { success: false; error: string };
+
+type UserProfileGenerationInput = {
+    lastN?: number;
+    cwd?: string | null;
+    writeToDisk?: boolean;
+}
+
+type UserProfileGenerationResult = {
+    success: boolean;
+    profilePath?: string;
+    markdown?: string;
+    chatCount?: number;
+    promptCount?: number;
+    error?: string;
+}
+
 type ResolveTinkerCheckpointResult =
     | { ok: true; base_model: string }
     | { ok: false; error: string };
@@ -142,6 +172,9 @@ type EventPayloadMapping = {
     getStaticData: StaticData;
     "generate-session-title": string;
     "predict-next-user-action": PredictedUserActionSuggestion | null;
+    "get-user-profile": UserProfileLoadResult;
+    "save-user-profile": UserProfileSaveResult;
+    "generate-user-profile": UserProfileGenerationResult;
     "get-recent-cwds": string[];
     "select-directory": string | null;
     "get-agent-settings": AgentSettings;
@@ -185,6 +218,9 @@ interface Window {
         onServerEvent: (callback: (event: any) => void) => UnsubscribeFunction;
         generateSessionTitle: (userInput: string | null) => Promise<string>;
         predictNextUserAction: (sessionId: string) => Promise<PredictedUserActionSuggestion | null>;
+        getUserProfile: (cwd?: string | null) => Promise<UserProfileLoadResult>;
+        saveUserProfile: (payload: UserProfileSaveInput) => Promise<UserProfileSaveResult>;
+        generateUserProfile: (payload: UserProfileGenerationInput) => Promise<UserProfileGenerationResult>;
         getRecentCwds: (limit?: number) => Promise<string[]>;
         selectDirectory: () => Promise<string | null>;
         getAgentSettings: () => Promise<AgentSettings>;
