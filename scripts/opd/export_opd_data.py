@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DPO from export_task_sessions JSON: pairwise agent segments (j vs j+1)."""
+"""OPD from export_task_sessions JSON: one learning unit per agent→human segment."""
 
 from __future__ import annotations
 
@@ -24,21 +24,18 @@ def _user_messages_only(steps: list[dict]) -> list[str]:
     return [s.user_text(x) for x in steps if isinstance(x, dict) and _is_message_action(x)]
 
 
-def _dpo_units(traj: list) -> tuple[dict | None, list[dict]]:
+def _opd_units(traj: list) -> tuple[dict | None, list[dict]]:
     initial, pairs = s.pair_segments(traj)
-    if len(pairs) < 2:
+    if not pairs:
         return initial, []
     prefix = list(initial["steps"]) if initial else []
     units = []
-    for j in range(len(pairs) - 1):
-        ag, hm = pairs[j]
-        ag1, _ = pairs[j + 1]
+    for j, (ag, hm) in enumerate(pairs):
         units.append(
             {
                 "index": j,
                 "user_messages": _user_messages_only(prefix),
-                "rejected_trajectory": list(ag),
-                "chosen_trajectory": list(ag1),
+                "agent_trajectory": list(ag),
                 "human_trajectory": list(hm),
             }
         )
@@ -48,13 +45,11 @@ def _dpo_units(traj: list) -> tuple[dict | None, list[dict]]:
 
 def _session(blob: dict) -> dict:
     meta = {"uuid": blob.get("uuid"), "name": blob.get("name")}
-    traj = blob.get("trajectory")
+    traj = s.trajectory_from_blob(blob)
     if not isinstance(traj, list):
         out = {**meta, "initial_message": "", "learning_units": [], "error": "bad_trajectory"}
     else:
-        initial, units = _dpo_units(traj)
-        if units:
-            units = units[1:]
+        initial, units = _opd_units(traj)
         initial_text = ""
         if isinstance(initial, dict):
             steps = initial.get("steps")
@@ -66,7 +61,7 @@ def _session(blob: dict) -> dict:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Export trajectories as DPO learning units.")
+    p = argparse.ArgumentParser(description="Export trajectories as OPD learning units.")
     p.add_argument("input", nargs="?", default="-")
     p.add_argument("-o", "--output", default="-")
     args = p.parse_args()

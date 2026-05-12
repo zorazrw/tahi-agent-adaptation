@@ -19,12 +19,12 @@ if [[ -z "${TINKER_API_KEY:-}" ]]; then
   exit 1
 fi
 
-python tinker_reinforce.py \
-  --train-path reinforce_claude45_task1_step10.json \
+python -m reinforce.tinker_reinforce \
+  --train-path reinforce_20tasks_rewritten.json \
   --model-name Qwen/Qwen3.5-4B \
   --renderer-name qwen3_5 \
-  --log-path ./logs/reinforce_qwen3.5-4b_claude45-task1-step10 \
+  --log-path ./reinforce/logs/reinforce_qwen3.5-4b_20tasks \
   --batch-size 4 \
   --learning-rate 1e-5 \
   --reward-alpha 0.05 \
-  --epochs 100
+  --epochs 20
