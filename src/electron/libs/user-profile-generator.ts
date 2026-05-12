@@ -8,18 +8,12 @@ import { getUserProfileRepoPath } from "./user-predict.js";
 
 const DEFAULT_LAST_N = 10;
 const MAX_LAST_N = 200;
-const MAX_PROMPT_CHARS = 600;
 const MAX_TOTAL_TRANSCRIPT_CHARS = 60_000;
 
 function clampLastN(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return DEFAULT_LAST_N;
   return Math.min(Math.max(Math.floor(n), 1), MAX_LAST_N);
-}
-
-function truncate(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
 function extractUserPromptsFromSession(messages: StreamMessage[]): string[] {
@@ -64,7 +58,7 @@ function formatChatsForPrompt(bundles: ChatBundle[]): string {
     const header = `--- Chat ${index + 1} (${bundle.title}) ---`;
     const lines = [header];
     for (const prompt of bundle.prompts) {
-      lines.push(`User: ${truncate(prompt, MAX_PROMPT_CHARS)}`);
+      lines.push(`User: ${prompt}`);
     }
     const block = lines.join("\n");
     if (totalChars + block.length > MAX_TOTAL_TRANSCRIPT_CHARS) {
