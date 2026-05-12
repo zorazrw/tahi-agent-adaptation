@@ -5,6 +5,15 @@ import {
   executeAction,
   type ExecutableAction,
 } from "../../lib/executable-actions";
+import {
+  BrainIcon,
+  CircleStopIcon,
+  FileTextIcon,
+  GitBranchIcon,
+  HelpCircleIcon,
+  ListChecksIcon,
+  MessageSquareTextIcon,
+} from "lucide-react";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 12;
@@ -21,6 +30,248 @@ function isFakeUserPrediction(s: PredictedUserActionSuggestion): boolean {
   } catch {
     return false;
   }
+}
+
+function getExecutableAction(suggestion: PredictedUserActionSuggestion): ExecutableAction | null {
+  return suggestion.executable ?? null;
+}
+
+function countWorkflowNodes(nodes: WorkflowNode[]): number {
+  return nodes.reduce((count, node) => count + 1 + countWorkflowNodes(node.children), 0);
+}
+
+function firstWorkflowDescriptions(nodes: WorkflowNode[], limit = 3): string[] {
+  const descriptions: string[] = [];
+  const visit = (items: WorkflowNode[]) => {
+    for (const item of items) {
+      if (descriptions.length >= limit) return;
+      descriptions.push(item.description || "Untitled step");
+      visit(item.children);
+    }
+  };
+  visit(nodes);
+  return descriptions;
+}
+
+function lineCount(text: string): number {
+  if (!text) return 0;
+  return text.split("\n").length;
+}
+
+function fileName(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+function PredictionActionPreview({
+  suggestion,
+}: {
+  suggestion: PredictedUserActionSuggestion;
+}) {
+  const action = getExecutableAction(suggestion);
+  const type = suggestion.actionType;
+
+  const tone = (() => {
+    switch (type) {
+      case "message":
+        return {
+          title: "Message",
+          accent: "text-primary",
+          chip: "bg-primary-subtle text-primary",
+          border: "border-primary/20",
+          icon: <MessageSquareTextIcon className="size-4" aria-hidden />,
+        };
+      case "edit_workflow":
+        return {
+          title: "Workflow edit",
+          accent: "text-info",
+          chip: "bg-info-light text-info",
+          border: "border-info/20",
+          icon: <GitBranchIcon className="size-4" aria-hidden />,
+        };
+      case "edit_verifier":
+        return {
+          title: "Verifier edit",
+          accent: "text-success",
+          chip: "bg-success-light text-success",
+          border: "border-success/20",
+          icon: <ListChecksIcon className="size-4" aria-hidden />,
+        };
+      case "file_edit":
+        return {
+          title: "File edit",
+          accent: "text-ink-700",
+          chip: "bg-ink-900/5 text-ink-700",
+          border: "border-ink-900/12",
+          icon: <FileTextIcon className="size-4" aria-hidden />,
+        };
+      case "brain_edit":
+        return {
+          title: "Brain edit",
+          accent: "text-[#8B5E2A]",
+          chip: "bg-[#F1E3D1] text-[#7A4E20]",
+          border: "border-[#D8B98F]",
+          icon: <BrainIcon className="size-4" aria-hidden />,
+        };
+      case "stop":
+        return {
+          title: "Stop",
+          accent: "text-error",
+          chip: "bg-error-light text-error",
+          border: "border-error/20",
+          icon: <CircleStopIcon className="size-4" aria-hidden />,
+        };
+      case "unknown":
+        return {
+          title: "Unknown",
+          accent: "text-muted-foreground",
+          chip: "bg-surface-tertiary text-muted-foreground",
+          border: "border-ink-900/10",
+          icon: <HelpCircleIcon className="size-4" aria-hidden />,
+        };
+    }
+  })();
+
+  const body = (() => {
+    if (action?.type === "message") {
+      return (
+        <>
+          <div className="text-[11px] font-medium text-muted-foreground">Draft prompt</div>
+          <div className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap rounded-lg border border-ink-900/8 bg-white px-3 py-2 text-sm text-ink-900">
+            {action.text}
+          </div>
+        </>
+      );
+    }
+
+    if (action?.type === "edit_workflow") {
+      const descriptions = firstWorkflowDescriptions(action.workflowTree);
+      return (
+        <>
+          <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+            <span>{countWorkflowNodes(action.workflowTree)} steps</span>
+            <span>{action.workflowTree.length} root items</span>
+          </div>
+          {descriptions.length > 0 && (
+            <div className="mt-2 grid gap-1.5">
+              {descriptions.map((description, index) => (
+                <div key={`${description}-${index}`} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs text-ink-800">
+                  <span className={`h-1.5 w-1.5 rounded-full ${index === 0 ? "bg-info" : "bg-ink-900/20"}`} />
+                  <span className="truncate">{description}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      );
+    }
+
+    if (action?.type === "edit_verifier") {
+      return (
+        <>
+          <div className="text-[11px] text-muted-foreground">
+            Node <span className="font-mono text-ink-700">{action.nodeId}</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {action.verifiers.length > 0 ? (
+              action.verifiers.slice(0, 4).map((verifier, index) => (
+                <span key={`${verifier}-${index}`} className="rounded-md border border-success/20 bg-white px-2 py-1 text-xs text-ink-800">
+                  {verifier}
+                </span>
+              ))
+            ) : (
+              <span className="text-xs text-muted-foreground">Clears verifier list</span>
+            )}
+            {action.verifiers.length > 4 && (
+              <span className="rounded-md bg-white px-2 py-1 text-xs text-muted-foreground">
+                +{action.verifiers.length - 4} more
+              </span>
+            )}
+          </div>
+        </>
+      );
+    }
+
+    if (action?.type === "file_edit") {
+      return (
+        <>
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium text-ink-900">{fileName(action.path)}</div>
+              <div className="truncate font-mono text-[11px] text-muted-foreground">{action.path}</div>
+            </div>
+            <span className="shrink-0 rounded-md bg-white px-2 py-1 text-[11px] text-muted-foreground">
+              {lineCount(action.contents)} lines
+            </span>
+          </div>
+          {action.contents && (
+            <pre className="mt-2 max-h-20 overflow-hidden rounded-lg border border-ink-900/8 bg-white px-3 py-2 text-xs text-ink-700">
+              {action.contents.split("\n").slice(0, 3).join("\n")}
+            </pre>
+          )}
+        </>
+      );
+    }
+
+    if (action?.type === "brain_edit") {
+      return (
+        <>
+          <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+            <span>{action.kind === "memory" ? "Memory" : "Skill"} update</span>
+            <span>{action.sections.length} sections</span>
+            {action.deletedFileNames?.length ? <span>{action.deletedFileNames.length} deletes</span> : null}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {action.sections.slice(0, 4).map((section) => (
+              <span key={section.fileName} className="rounded-md border border-[#D8B98F] bg-white px-2 py-1 text-xs text-ink-800">
+                {section.fileName}
+              </span>
+            ))}
+            {action.sections.length > 4 && (
+              <span className="rounded-md bg-white px-2 py-1 text-xs text-muted-foreground">
+                +{action.sections.length - 4} more
+              </span>
+            )}
+          </div>
+        </>
+      );
+    }
+
+    if (action?.type === "stop" || type === "stop") {
+      return (
+        <div className="text-sm text-ink-800">
+          Predicted that the user is done for now, with no follow-up prompt or structural edit expected.
+        </div>
+      );
+    }
+
+    if (suggestion.draftText.trim()) {
+      return (
+        <div className="whitespace-pre-wrap rounded-lg border border-ink-900/8 bg-white px-3 py-2 text-sm text-ink-800">
+          {suggestion.draftText}
+        </div>
+      );
+    }
+
+    return (
+      <div className="text-sm text-muted-foreground">
+        The predictor could not produce a validated action payload.
+      </div>
+    );
+  })();
+
+  return (
+    <div className={`rounded-xl border ${tone.border} bg-surface-secondary/80 px-3 py-2.5`}>
+      <div className="mb-2 flex items-center gap-2">
+        <div className={`${tone.accent} flex h-7 w-7 items-center justify-center rounded-lg bg-white shadow-soft`}>
+          {tone.icon}
+        </div>
+        <span className={`rounded-md px-2 py-1 text-[11px] font-semibold uppercase ${tone.chip}`}>
+          {tone.title}
+        </span>
+      </div>
+      {body}
+    </div>
+  );
 }
 
 /** Fake `edit_workflow` accept: append a root “Visualization” step so Progress updates (UI test hook). */
@@ -394,16 +645,7 @@ export function PromptInput({
                     </button>
                   </div>
                 </div>
-                {predictedSuggestion.actionType === "stop" && !predictedSuggestion.draftText.trim() && (
-                  <p className="text-xs text-muted-foreground">
-                    Predicted end of turn — no further user message or structural edit expected.
-                  </p>
-                )}
-                {predictedSuggestion.draftText && (
-                  <div className="rounded-xl border border-ink-900/8 bg-surface-secondary px-3 py-2 text-sm text-ink-800">
-                    {predictedSuggestion.draftText}
-                  </div>
-                )}
+                <PredictionActionPreview suggestion={predictedSuggestion} />
                 {predictedSuggestion.rationale && (
                   <div className="text-xs text-muted-foreground line-clamp-3">
                     Rationale: {predictedSuggestion.rationale}
