@@ -20,7 +20,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "api" | "workflow" | "skills" | "profile" | "data";
+type Tab = "api" | "workflow" | "skills" | "profile" | "predictions" | "data";
 const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
 
 function readStoredAutoInduction(): boolean {
@@ -218,6 +218,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  tab === "predictions"
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+                onClick={() => setTab("predictions")}
+              >
+                Predictions
+              </button>
+              <button
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                   tab === "data"
                     ? "bg-primary/10 text-primary"
                     : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
@@ -236,6 +246,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <WorkflowPanel />
               ) : tab === "profile" ? (
                 <ProfilePanel />
+              ) : tab === "predictions" ? (
+                <PredictionsPanel />
               ) : tab === "skills" ? (
                 <SkillsPanel />
               ) : (
@@ -1582,6 +1594,208 @@ function ProfilePanel() {
           <span className="text-sm text-primary">Saved.</span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/* ---------- Predictions Panel ---------- */
+
+type PredictionWindow = "all" | "7d" | "30d";
+
+const PREDICTION_WINDOWS: { value: PredictionWindow; label: string; days: number | null }[] = [
+  { value: "all", label: "All time", days: null },
+  { value: "30d", label: "Last 30 days", days: 30 },
+  { value: "7d", label: "Last 7 days", days: 7 },
+];
+
+function pctText(numerator: number, denominator: number): string {
+  if (denominator <= 0) return "—";
+  return `${((100 * numerator) / denominator).toFixed(1)}%`;
+}
+
+function formatLatency(ms: number | null): string {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatDate(ms: number | null): string {
+  if (ms == null) return "—";
+  return new Date(ms).toLocaleString();
+}
+
+function PredictionsPanel() {
+  const [windowKey, setWindowKey] = useState<PredictionWindow>("all");
+  const [stats, setStats] = useState<PredictionStats | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadStats = useCallback(async (key: PredictionWindow) => {
+    const choice = PREDICTION_WINDOWS.find((w) => w.value === key) ?? PREDICTION_WINDOWS[0];
+    const sinceMs = choice.days != null ? Date.now() - choice.days * 86_400_000 : null;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electron.getPredictionStats(sinceMs);
+      setStats(result);
+    } catch (err) {
+      console.error("Failed to load prediction stats:", err);
+      setError(err instanceof Error ? err.message : String(err));
+      setStats(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStats(windowKey);
+  }, [loadStats, windowKey]);
+
+  const totals = stats?.totals;
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Historical accept / dismiss / ignore counts for the prediction suggestion shown above the prompt input.
+          A prediction is counted as <em>ignored</em> when it is cleared without an explicit user action
+          (e.g. the session changes or a new run starts).
+        </p>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-1 rounded-xl border border-ink-900/10 bg-surface p-1">
+          {PREDICTION_WINDOWS.map((w) => (
+            <button
+              key={w.value}
+              type="button"
+              onClick={() => setWindowKey(w.value)}
+              className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
+                windowKey === w.value
+                  ? "bg-primary text-white"
+                  : "text-muted-foreground hover:text-ink-700"
+              }`}
+            >
+              {w.label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => loadStats(windowKey)}
+          disabled={loading}
+          className="rounded-lg border border-ink-900/10 bg-surface px-3 py-1.5 text-xs font-medium text-ink-700 hover:bg-ink-900/5 transition-colors disabled:opacity-50"
+        >
+          {loading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      {error ? (
+        <div className="rounded-xl border border-error/20 bg-error/5 px-4 py-3 text-sm text-error">
+          {error}
+        </div>
+      ) : null}
+
+      {!stats && loading ? (
+        <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-6 text-sm text-muted-foreground">
+          Loading…
+        </div>
+      ) : !stats || (totals && totals.shown === 0) ? (
+        <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-6 text-sm text-muted-foreground">
+          No predictions have been shown yet in this window.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <PredictionStatTile label="Shown" value={totals!.shown} />
+            <PredictionStatTile
+              label="Accepted"
+              value={totals!.accepted}
+              hint={`${pctText(totals!.accepted, totals!.shown)} • auto ${totals!.autoAccepted}`}
+            />
+            <PredictionStatTile
+              label="Dismissed"
+              value={totals!.dismissed}
+              hint={pctText(totals!.dismissed, totals!.shown)}
+            />
+            <PredictionStatTile
+              label="Ignored"
+              value={totals!.ignored}
+              hint={pctText(totals!.ignored, totals!.shown)}
+            />
+          </div>
+
+          <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-3 text-xs text-muted-foreground space-y-1">
+            <div>
+              Decision latency:{" "}
+              <span className="text-ink-700">median {formatLatency(stats.medianLatencyMs)}</span>
+              {" • "}
+              <span className="text-ink-700">p90 {formatLatency(stats.p90LatencyMs)}</span>
+            </div>
+            <div>
+              Window: {formatDate(stats.firstEventAt)} → {formatDate(stats.lastEventAt)}
+            </div>
+            <div>
+              {stats.predictionCount} predictions • {stats.rawEventCount} events recorded
+              {totals!.unresolved > 0 ? ` • ${totals!.unresolved} unresolved` : null}
+            </div>
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-ink-900/10">
+            <table className="w-full text-xs">
+              <thead className="bg-ink-900/5 text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">Action type</th>
+                  <th className="px-3 py-2 text-right font-medium">Shown</th>
+                  <th className="px-3 py-2 text-right font-medium">Accept</th>
+                  <th className="px-3 py-2 text-right font-medium">Dismiss</th>
+                  <th className="px-3 py-2 text-right font-medium">Ignore</th>
+                  <th className="px-3 py-2 text-right font-medium">Unresolved</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.byActionType.map((row) => (
+                  <tr key={row.actionType} className="border-t border-ink-900/8">
+                    <td className="px-3 py-2 text-ink-800 font-medium">{row.actionType}</td>
+                    <td className="px-3 py-2 text-right text-ink-700">{row.shown}</td>
+                    <td className="px-3 py-2 text-right text-ink-700">
+                      {row.accepted}{" "}
+                      <span className="text-muted-foreground">({pctText(row.accepted, row.shown)})</span>
+                    </td>
+                    <td className="px-3 py-2 text-right text-ink-700">
+                      {row.dismissed}{" "}
+                      <span className="text-muted-foreground">({pctText(row.dismissed, row.shown)})</span>
+                    </td>
+                    <td className="px-3 py-2 text-right text-ink-700">
+                      {row.ignored}{" "}
+                      <span className="text-muted-foreground">({pctText(row.ignored, row.shown)})</span>
+                    </td>
+                    <td className="px-3 py-2 text-right text-ink-700">{row.unresolved}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PredictionStatTile({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: number;
+  hint?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-3">
+      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-1 text-2xl font-semibold text-ink-800 tabular-nums">{value}</div>
+      {hint ? <div className="mt-0.5 text-[11px] text-muted-foreground">{hint}</div> : null}
     </div>
   );
 }

@@ -297,6 +297,11 @@ app.on("ready", () => {
         }
     });
 
+    ipcMainHandle("get-prediction-stats", (_: any, sinceMs?: number | null) => {
+        const since = typeof sinceMs === "number" && Number.isFinite(sinceMs) ? sinceMs : undefined;
+        return sessions.getPredictionStats(since);
+    });
+
     ipcMainHandle("record-prediction-event", (_: any, payload: unknown) => {
         try {
             const e = payload as {

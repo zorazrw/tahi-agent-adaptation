@@ -146,6 +146,26 @@ type PredictionEventInput = {
     metadata?: Record<string, unknown> | null;
 }
 
+type PredictionStatsBucket = {
+    shown: number;
+    accepted: number;
+    dismissed: number;
+    ignored: number;
+    unresolved: number;
+    autoAccepted: number;
+}
+
+type PredictionStats = {
+    totals: PredictionStatsBucket;
+    byActionType: Array<{ actionType: string } & PredictionStatsBucket>;
+    rawEventCount: number;
+    predictionCount: number;
+    firstEventAt: number | null;
+    lastEventAt: number | null;
+    medianLatencyMs: number | null;
+    p90LatencyMs: number | null;
+}
+
 type UserProfileLoadResult = {
     markdown: string;
     profilePath: string;
@@ -186,6 +206,7 @@ type EventPayloadMapping = {
     "generate-session-title": string;
     "predict-next-user-action": PredictedUserActionSuggestion | null;
     "record-prediction-event": { success: boolean };
+    "get-prediction-stats": PredictionStats;
     "get-user-profile": UserProfileLoadResult;
     "save-user-profile": UserProfileSaveResult;
     "generate-user-profile": UserProfileGenerationResult;
@@ -233,6 +254,7 @@ interface Window {
         generateSessionTitle: (userInput: string | null) => Promise<string>;
         predictNextUserAction: (sessionId: string) => Promise<PredictedUserActionSuggestion | null>;
         recordPredictionEvent: (event: PredictionEventInput) => Promise<{ success: boolean }>;
+        getPredictionStats: (sinceMs?: number | null) => Promise<PredictionStats>;
         getUserProfile: (cwd?: string | null) => Promise<UserProfileLoadResult>;
         saveUserProfile: (payload: UserProfileSaveInput) => Promise<UserProfileSaveResult>;
         generateUserProfile: (payload: UserProfileGenerationInput) => Promise<UserProfileGenerationResult>;

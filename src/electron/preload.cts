@@ -29,6 +29,8 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("predict-next-user-action", sessionId),
     recordPredictionEvent: (event: PredictionEventInput) =>
         ipcInvoke("record-prediction-event", event),
+    getPredictionStats: (sinceMs?: number | null) =>
+        ipcInvoke("get-prediction-stats", sinceMs ?? null),
     getUserProfile: (cwd?: string | null) =>
         ipcInvoke("get-user-profile", cwd ?? null),
     saveUserProfile: (payload: { markdown: string; cwd?: string | null }) =>

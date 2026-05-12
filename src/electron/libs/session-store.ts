@@ -129,6 +129,26 @@ export type PredictionEventInput = {
   metadata?: Record<string, unknown> | null;
 };
 
+export type PredictionStatsBucket = {
+  shown: number;
+  accepted: number;
+  dismissed: number;
+  ignored: number;
+  unresolved: number;
+  autoAccepted: number;
+};
+
+export type PredictionStats = {
+  totals: PredictionStatsBucket;
+  byActionType: Array<{ actionType: string } & PredictionStatsBucket>;
+  rawEventCount: number;
+  predictionCount: number;
+  firstEventAt: number | null;
+  lastEventAt: number | null;
+  medianLatencyMs: number | null;
+  p90LatencyMs: number | null;
+};
+
 export class SessionStore {
   private sessions = new Map<string, Session>();
   private db: Database.Database;
@@ -560,6 +580,117 @@ export class SessionStore {
     this.db.exec(`create index if not exists prediction_events_session_id on prediction_events(session_id)`);
     this.db.exec(`create index if not exists prediction_events_event on prediction_events(event)`);
     this.db.exec(`create index if not exists prediction_events_prediction_id on prediction_events(prediction_id)`);
+  }
+
+  getPredictionStats(sinceMs?: number): PredictionStats {
+    const params: number[] = [];
+    let where = "";
+    if (typeof sinceMs === "number" && Number.isFinite(sinceMs)) {
+      where = "where created_at >= ?";
+      params.push(sinceMs);
+    }
+    const rows = this.db
+      .prepare(
+        `select prediction_id, event, action_type, metadata, created_at
+         from prediction_events ${where}
+         order by created_at asc`
+      )
+      .all(...params) as Array<{
+        prediction_id: string;
+        event: string;
+        action_type: string;
+        metadata: string | null;
+        created_at: number;
+      }>;
+
+    type Bucket = {
+      actionType: string;
+      shownAt: number | null;
+      resolvedAt: number | null;
+      outcome: "accepted" | "dismissed" | "ignored" | null;
+      auto: boolean;
+    };
+    const byPred = new Map<string, Bucket>();
+    let firstEventAt: number | null = null;
+    let lastEventAt: number | null = null;
+
+    for (const row of rows) {
+      if (firstEventAt === null || row.created_at < firstEventAt) firstEventAt = row.created_at;
+      if (lastEventAt === null || row.created_at > lastEventAt) lastEventAt = row.created_at;
+      let bucket = byPred.get(row.prediction_id);
+      if (!bucket) {
+        bucket = { actionType: row.action_type, shownAt: null, resolvedAt: null, outcome: null, auto: false };
+        byPred.set(row.prediction_id, bucket);
+      }
+      if (row.event === "shown") {
+        if (bucket.shownAt === null) bucket.shownAt = row.created_at;
+        bucket.actionType = row.action_type;
+      } else if (
+        bucket.outcome === null &&
+        (row.event === "accepted" || row.event === "dismissed" || row.event === "ignored")
+      ) {
+        bucket.outcome = row.event;
+        bucket.resolvedAt = row.created_at;
+        if (row.metadata) {
+          try {
+            const parsed = JSON.parse(row.metadata) as { auto?: boolean };
+            if (parsed && parsed.auto === true) bucket.auto = true;
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+
+    const empty = (): PredictionStatsBucket => ({
+      shown: 0,
+      accepted: 0,
+      dismissed: 0,
+      ignored: 0,
+      unresolved: 0,
+      autoAccepted: 0,
+    });
+    const totals = empty();
+    const byActionMap = new Map<string, PredictionStatsBucket>();
+    const latencies: number[] = [];
+
+    for (const bucket of byPred.values()) {
+      if (bucket.shownAt === null) continue;
+      const slot = byActionMap.get(bucket.actionType) ?? empty();
+      totals.shown += 1;
+      slot.shown += 1;
+      const outcome = bucket.outcome ?? "unresolved";
+      totals[outcome] += 1;
+      slot[outcome] += 1;
+      if (outcome === "accepted" && bucket.auto) {
+        totals.autoAccepted += 1;
+        slot.autoAccepted += 1;
+      }
+      if ((outcome === "accepted" || outcome === "dismissed") && bucket.resolvedAt !== null) {
+        latencies.push(bucket.resolvedAt - bucket.shownAt);
+      }
+      byActionMap.set(bucket.actionType, slot);
+    }
+
+    const byActionType = [...byActionMap.entries()]
+      .map(([actionType, counts]) => ({ actionType, ...counts }))
+      .sort((a, b) => b.shown - a.shown || a.actionType.localeCompare(b.actionType));
+
+    latencies.sort((a, b) => a - b);
+    const medianLatencyMs = latencies.length > 0 ? latencies[Math.floor(latencies.length / 2)] : null;
+    const p90LatencyMs =
+      latencies.length > 0 ? latencies[Math.max(0, Math.floor(latencies.length * 0.9) - 1)] : null;
+
+    return {
+      totals,
+      byActionType,
+      rawEventCount: rows.length,
+      predictionCount: byPred.size,
+      firstEventAt,
+      lastEventAt,
+      medianLatencyMs,
+      p90LatencyMs,
+    };
   }
 
   recordPredictionEvent(input: PredictionEventInput): void {
