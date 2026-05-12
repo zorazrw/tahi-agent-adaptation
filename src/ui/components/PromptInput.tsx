@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { ClientEvent, PredictedUserActionSuggestion, WorkflowNode } from "../types";
 import { useAppStore } from "../store/useAppStore";
+import {
+  executeAction,
+  type ExecutableAction,
+} from "../../lib/executable-actions";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 12;
@@ -189,10 +193,71 @@ export function PromptInput({
         predictedSuggestion.actionType === "unknown")
   );
 
-  const acceptPredictedSuggestion = useCallback(() => {
-    if (!predictedSuggestion || !activeSessionId) return;
-    const t = predictedSuggestion.actionType;
+  const setGlobalError = useAppStore((s) => s.setGlobalError);
 
+  const acceptPredictedSuggestion = useCallback(async () => {
+    if (!predictedSuggestion || !activeSessionId) return;
+    const sessionCwd = activeSession?.cwd;
+
+    // Fake `edit_workflow` UI test hook: append a "Visualization" step locally
+    // and sync, bypassing the LLM's executable payload.
+    if (
+      predictedSuggestion.actionType === "edit_workflow" &&
+      isFakeUserPrediction(predictedSuggestion)
+    ) {
+      onAcceptPredictedSuggestion?.();
+      const next = appendFakeVisualizationStep(activeSession?.workflowTree);
+      const newStep = next[next.length - 1];
+      useAppStore.getState().updateWorkflowTree(activeSessionId, next);
+      sendEvent({
+        type: "session.updateWorkflowTree",
+        payload: { sessionId: activeSessionId, workflowTree: next },
+      });
+      if (newStep) useAppStore.getState().setSelectedNodeId(newStep.id);
+      onSendMessage?.();
+      return;
+    }
+
+    // Validated payload from the LLM: dispatch via the shared executeAction.
+    if (predictedSuggestion.executable) {
+      onAcceptPredictedSuggestion?.();
+      // The LLM doesn't see the current node selection, so override
+      // verificationNodeId on message actions from local UI state.
+      const action: ExecutableAction =
+        predictedSuggestion.executable.type === "message" && selectedNodeId
+          ? { ...predictedSuggestion.executable, verificationNodeId: selectedNodeId }
+          : predictedSuggestion.executable;
+
+      try {
+        await executeAction(action, {
+          sessionId: activeSessionId,
+          sendEvent,
+          currentWorkflowTree: activeSession?.workflowTree,
+          writeFile: async (filePath, contents) => {
+            const result = await window.electron.writeFile(
+              filePath,
+              sessionCwd ?? null,
+              contents,
+              activeSessionId
+            );
+            if (!result?.success) {
+              throw new Error(result?.error ?? "writeFile failed");
+            }
+          },
+        });
+        if (action.type === "message") setPrompt("");
+        onSendMessage?.();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("Failed to execute predicted action:", err);
+        setGlobalError(`Failed to execute ${action.type}: ${message}`);
+      }
+      return;
+    }
+
+    // Legacy fallback: model returned no validated executable. Preserve the
+    // previous behaviour (message → continue, brain_edit → record, others → dismiss).
+    const t = predictedSuggestion.actionType;
     if (t === "message") {
       const draftText = predictedSuggestion.draftText.trim();
       if (!draftText) return;
@@ -209,38 +274,25 @@ export function PromptInput({
       setPrompt("");
       return;
     }
-
     if (t === "brain_edit") {
       onAcceptPredictedSuggestion?.();
       sendEvent({ type: "session.recordBrainEdit", payload: { sessionId: activeSessionId } });
       onSendMessage?.();
       return;
     }
-
-    if (t === "edit_workflow") {
-      onAcceptPredictedSuggestion?.();
-      if (isFakeUserPrediction(predictedSuggestion) && activeSessionId) {
-        const next = appendFakeVisualizationStep(activeSession?.workflowTree);
-        const newStep = next[next.length - 1];
-        useAppStore.getState().updateWorkflowTree(activeSessionId, next);
-        sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: next } });
-        if (newStep) useAppStore.getState().setSelectedNodeId(newStep.id);
-      }
-      onSendMessage?.();
-      return;
-    }
-
-    if (t === "edit_verifier") {
-      onAcceptPredictedSuggestion?.();
-      onSendMessage?.();
-      return;
-    }
-
-    if (t === "file_edit" || t === "stop" || t === "unknown") {
-      onAcceptPredictedSuggestion?.();
-      onSendMessage?.();
-    }
-  }, [activeSession, activeSessionId, onAcceptPredictedSuggestion, onSendMessage, predictedSuggestion, selectedNodeId, sendEvent, setPrompt]);
+    onAcceptPredictedSuggestion?.();
+    onSendMessage?.();
+  }, [
+    activeSession,
+    activeSessionId,
+    onAcceptPredictedSuggestion,
+    onSendMessage,
+    predictedSuggestion,
+    selectedNodeId,
+    sendEvent,
+    setGlobalError,
+    setPrompt,
+  ]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Escape" && predictedSuggestion) {

@@ -3,7 +3,7 @@ import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
 import type { AppPermissionResult, ClientEvent, PredictedUserActionSuggestion, ServerEvent } from "./types";
-import { findNextRunnableWorkflowNodeId } from "./lib/workflow-run";
+import { findNextRunnableWorkflowNodeId, isWorkflowUntouched } from "./lib/workflow-run";
 import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
@@ -346,14 +346,29 @@ function App() {
       setPredictedSuggestion(null);
       return;
     }
-    const isNaturalStop =
+    const sessionNotRunning =
       activeSessionId &&
       activeSession &&
-      activeSession.status === "completed" &&
-      !hasNextRunnableWorkflowNode &&
+      activeSession.status !== "running" &&
       !explicitlyStoppedSessionIdsRef.current.has(activeSessionId);
 
-    if (!isNaturalStop || messages.length === 0) {
+    // Two prediction-display moments:
+    //  (1) natural stop — agent finished a run cycle (status `completed`, no runnable node).
+    //      The original gate; required for autofill below.
+    //  (2) post-initial-planning — workflow was just generated, no node started yet
+    //      (status `idle`, every node `pending`). Surface prediction here so the
+    //      user gets a suggested next move right after planning.
+    const isNaturalStop =
+      sessionNotRunning &&
+      activeSession?.status === "completed" &&
+      !hasNextRunnableWorkflowNode;
+    const isPostInitialPlanning =
+      sessionNotRunning &&
+      activeSession?.status === "idle" &&
+      isWorkflowUntouched(activeSession?.workflowTree ?? []);
+    const shouldPredict = isNaturalStop || isPostInitialPlanning;
+
+    if (!shouldPredict || messages.length === 0) {
       flushIgnoredIfUnresolved();
       currentPredictionRef.current = null;
       setIsPredictingSuggestion(false);
@@ -363,9 +378,14 @@ function App() {
     const sessionId = activeSessionId;
 
     const lastMessage = messages[messages.length - 1];
+    // Block `user_prompt` as the last message only for the natural-stop case.
+    // For post-initial-planning the user_prompt IS the relevant context (the
+    // agent emits no assistant message between the prompt and the plan), so
+    // letting it through is exactly what we want.
+    const blocksUserPromptAsLast = !isPostInitialPlanning;
     if (
       !lastMessage ||
-      lastMessage.type === "user_prompt" ||
+      (blocksUserPromptAsLast && lastMessage.type === "user_prompt") ||
       (lastMessage.type === "run_result" && lastMessage.status !== "success")
     ) {
       flushIgnoredIfUnresolved();

@@ -335,6 +335,12 @@ export type PredictedUserActionSuggestion = {
   rationale: string;
   rawResponse?: string;
   profilePath?: string;
+  /**
+   * Validated executable payload parsed from the model's response.
+   * `null` when actionType is `unknown` or when the LLM omitted/malformed the
+   * payload. Pass to `executeAction` from `src/lib/executable-actions.ts`.
+   */
+  executable?: import("./executable-actions.js").ExecutableAction | null;
 };
 
 export type PredictionJudgeVerdict = "accurate" | "partially_accurate" | "inaccurate";

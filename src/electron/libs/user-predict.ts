@@ -1,12 +1,27 @@
 import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
+import { z } from "zod";
 import type {
   PredictedUserActionSuggestion,
   StreamMessage,
   UserPredictionJudgeResult,
   WorkflowNode,
 } from "../types.js";
+import {
+  executableActionSchema,
+  type ExecutableAction,
+} from "../../lib/executable-actions.js";
 import { runPiTextPrompt } from "./pi-prompt.js";
+
+/**
+ * JSON Schema the LLM sees. Derived from the zod discriminated union so the
+ * model can emit a payload that round-trips through `executableActionSchema`.
+ */
+const EXECUTABLE_ACTION_JSON_SCHEMA = JSON.stringify(
+  z.toJSONSchema(executableActionSchema, { target: "draft-7" }),
+  null,
+  2
+);
 
 type ExportedTrajectoryStep = {
   actor?: string;
@@ -280,8 +295,17 @@ function buildPredictionPrompt(args: {
 }): string {
   return [
     "You are predicting Zora's most likely immediate next action in Agent Cowork.",
-    "Return ONLY JSON.",
-    'Schema: {"actionType":"file_edit|edit_verifier|edit_workflow|brain_edit|message|stop|unknown","draftText":"string","confidence":0.0,"rationale":"string"}',
+    "Return ONLY JSON, matching this top-level shape:",
+    '{"actionType":"file_edit|edit_verifier|edit_workflow|brain_edit|message|stop|unknown","confidence":0.0,"rationale":"string","executable":<ExecutableAction or null>}',
+    "`executable` is REQUIRED for every actionType except `unknown` (use null there). It must match this JSON Schema for ExecutableAction:",
+    "```json",
+    EXECUTABLE_ACTION_JSON_SCHEMA,
+    "```",
+    "`actionType` must equal `executable.type` when executable is non-null. For unknown, set executable to null.",
+    "For edit_workflow, emit the FULL new workflow tree (not a diff). Copy unchanged nodes verbatim from the workflow summary.",
+    "For edit_verifier, emit the target nodeId plus the new verifier criterion list.",
+    "For file_edit, emit the path AND the full new contents of the file.",
+    "For brain_edit, set kind=\"memory\" for user memory edits or \"skill\" for skill files; sections is a list of {fileName, content}. Use deletedFileNames for removals.",
     "Use actionType \"stop\" liberally when appropriate: if the agent's latest output plausibly satisfies the user's original request, if remaining issues are minor/optional, or if another prompt would mostly be scope creep — prefer \"stop\" over speculative follow-ups.",
     "When uncertain between \"stop\" and a vague or low-value \"message\", choose \"stop\". Reserve \"message\" for clear, necessary next steps that stay on-task.",
     "Use actionType \"stop\" when the user is most likely done for now (satisfied, switching tasks, or not sending another prompt/structural edit). This is intentional completion — not a model error.",
@@ -293,9 +317,6 @@ function buildPredictionPrompt(args: {
     "Use edit_workflow when the user would likely adjust the task tree or steps; edit_verifier when they would tweak criteria or checks; file_edit when they would open and edit a specific file path next; brain_edit when they would change saved memory/skills.",
     "If the workflow summary shows failing or stale verifiers the user would plausibly fix before chatting, prefer edit_verifier or edit_workflow over message.",
     "The transcript uses \"User:\" for chat prompts and \"UserAction: edit_workflow\" / \"UserAction: edit_verifier\" / \"UserAction: file_edit(path)\" / \"UserAction: brain_edit\" for non-chat actions. Prefer the action type that matches how the user has been acting.",
-    "draftText should be the most likely next user message if actionType is message.",
-    "If actionType is stop, draftText should be empty.",
-    "If the likely action is not message, draftText may be empty or a short representative utterance.",
     "Optimize for the immediate next move, not the long-term intent.",
     "",
     args.sessionTitle ? `Session title: ${args.sessionTitle}` : "",
@@ -337,16 +358,50 @@ export async function predictNextUserAction(args: {
       confidence: 0.2,
       rationale: rawResponse.trim() || "Model returned an unparsable prediction.",
       rawResponse,
+      executable: null,
     };
   }
 
+  const validated = parseExecutable(parsed.executable);
+  // Prefer the validated executable's discriminator over the loose actionType
+  // string — it's the canonical source of truth when present.
+  const actionType = validated
+    ? validated.type
+    : normalizeActionType(parsed.actionType);
+  const draftText = deriveDraftText(validated, parsed.draftText);
+
   return {
-    actionType: normalizeActionType(parsed.actionType),
-    draftText: asString(parsed.draftText).trim(),
+    actionType,
+    draftText,
     confidence: clamp01(parsed.confidence, 0.5),
     rationale: asString(parsed.rationale).trim(),
     rawResponse,
+    executable: validated,
   };
+}
+
+function parseExecutable(value: unknown): ExecutableAction | null {
+  if (value == null) return null;
+  const result = executableActionSchema.safeParse(value);
+  return result.success ? result.data : null;
+}
+
+/** UI-side draft hint: derived from the structured action when available. */
+function deriveDraftText(
+  action: ExecutableAction | null,
+  fallback: unknown
+): string {
+  if (action) {
+    switch (action.type) {
+      case "message":
+        return action.text;
+      case "file_edit":
+        return action.path;
+      default:
+        return "";
+    }
+  }
+  return asString(fallback).trim();
 }
 
 function buildJudgePrompt(args: {

@@ -20,6 +20,24 @@ export function findNextRunnableWorkflowNodeId(
   return null;
 }
 
+/**
+ * True iff the workflow tree is non-empty and every node in it (recursively)
+ * is still `pending` — i.e. the plan was just generated and nothing has been
+ * started, completed, or errored yet. Used to detect the "post-initial-planning"
+ * moment so prediction can run there too.
+ */
+export function isWorkflowUntouched(tree: WorkflowNode[]): boolean {
+  if (tree.length === 0) return false;
+  const visit = (nodes: WorkflowNode[]): boolean => {
+    for (const n of nodes) {
+      if (n.status !== "pending") return false;
+      if (n.children.length > 0 && !visit(n.children)) return false;
+    }
+    return true;
+  };
+  return visit(tree);
+}
+
 const pendingAutoAdvanceSessions = new Set<string>();
 
 export function markPendingWorkflowAutoAdvance(sessionId: string) {
