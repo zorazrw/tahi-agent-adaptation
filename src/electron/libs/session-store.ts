@@ -116,6 +116,19 @@ export type SessionHistory = {
   messages: StreamMessage[];
 };
 
+export type PredictionEventKind = "shown" | "accepted" | "dismissed" | "ignored";
+
+export type PredictionEventInput = {
+  predictionId: string;
+  sessionId: string;
+  event: PredictionEventKind;
+  actionType: string;
+  confidence?: number | null;
+  draftText?: string | null;
+  rationale?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
 export class SessionStore {
   private sessions = new Map<string, Session>();
   private db: Database.Database;
@@ -528,6 +541,47 @@ export class SessionStore {
       /* column exists */
     }
     this.db.exec(`create index if not exists messages_session_id on messages(session_id)`);
+
+    this.db.exec(
+      `create table if not exists prediction_events (
+        id text primary key,
+        session_id text not null,
+        prediction_id text not null,
+        event text not null,
+        action_type text not null,
+        confidence real,
+        draft_text text,
+        rationale text,
+        metadata text,
+        created_at integer not null,
+        foreign key (session_id) references sessions(id)
+      )`
+    );
+    this.db.exec(`create index if not exists prediction_events_session_id on prediction_events(session_id)`);
+    this.db.exec(`create index if not exists prediction_events_event on prediction_events(event)`);
+    this.db.exec(`create index if not exists prediction_events_prediction_id on prediction_events(prediction_id)`);
+  }
+
+  recordPredictionEvent(input: PredictionEventInput): void {
+    if (!input.predictionId || !input.sessionId || !input.event || !input.actionType) return;
+    this.db
+      .prepare(
+        `insert into prediction_events
+          (id, session_id, prediction_id, event, action_type, confidence, draft_text, rationale, metadata, created_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        crypto.randomUUID(),
+        input.sessionId,
+        input.predictionId,
+        input.event,
+        input.actionType,
+        input.confidence ?? null,
+        input.draftText ?? null,
+        input.rationale ?? null,
+        input.metadata != null ? JSON.stringify(input.metadata) : null,
+        Date.now()
+      );
   }
 
   private loadSessions(): void {

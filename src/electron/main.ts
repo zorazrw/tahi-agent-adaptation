@@ -297,6 +297,48 @@ app.on("ready", () => {
         }
     });
 
+    ipcMainHandle("record-prediction-event", (_: any, payload: unknown) => {
+        try {
+            const e = payload as {
+                predictionId?: unknown;
+                sessionId?: unknown;
+                event?: unknown;
+                actionType?: unknown;
+                confidence?: unknown;
+                draftText?: unknown;
+                rationale?: unknown;
+                metadata?: unknown;
+            };
+            const predictionId = typeof e.predictionId === "string" ? e.predictionId : "";
+            const sessionId = typeof e.sessionId === "string" ? e.sessionId : "";
+            const eventName = typeof e.event === "string" ? e.event : "";
+            const actionType = typeof e.actionType === "string" ? e.actionType : "";
+            if (!predictionId || !sessionId || !eventName || !actionType) {
+                return { success: false };
+            }
+            if (!["shown", "accepted", "dismissed", "ignored"].includes(eventName)) {
+                return { success: false };
+            }
+            sessions.recordPredictionEvent({
+                predictionId,
+                sessionId,
+                event: eventName as "shown" | "accepted" | "dismissed" | "ignored",
+                actionType,
+                confidence: typeof e.confidence === "number" ? e.confidence : null,
+                draftText: typeof e.draftText === "string" ? e.draftText : null,
+                rationale: typeof e.rationale === "string" ? e.rationale : null,
+                metadata:
+                    e.metadata && typeof e.metadata === "object"
+                        ? (e.metadata as Record<string, unknown>)
+                        : null,
+            });
+            return { success: true };
+        } catch (error) {
+            console.error("Failed to record prediction event:", error);
+            return { success: false };
+        }
+    });
+
     ipcMainHandle("get-user-profile", (_: any, cwd?: string | null) => {
         try {
             return readUserProfile(typeof cwd === "string" && cwd.trim() ? cwd : undefined);

@@ -1,5 +1,18 @@
 # Data Export and Agent Update
 
+## Prediction-tab telemetry
+
+`prediction_stats.py` aggregates the `prediction_events` table (rows written
+by the renderer for each user-prediction surface: `shown`, `accepted`,
+`dismissed`, `ignored`).
+
+```bash
+python scripts/prediction_stats.py                    # overall accept / dismiss / ignore rates
+python scripts/prediction_stats.py --since-days 7
+python scripts/prediction_stats.py --session-id <uuid>
+python scripts/prediction_stats.py --json
+```
+
 ## Data Export
 
 `export_task_sessions.py` is a standalone Python 3 script (stdlib only) to export task sessions from the Agent Cowork SQLite database to JSON.

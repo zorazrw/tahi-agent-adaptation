@@ -133,6 +133,19 @@ type PredictedUserActionSuggestion = {
     profilePath?: string;
 }
 
+type PredictionEventKind = "shown" | "accepted" | "dismissed" | "ignored";
+
+type PredictionEventInput = {
+    predictionId: string;
+    sessionId: string;
+    event: PredictionEventKind;
+    actionType: PredictedUserActionType;
+    confidence?: number | null;
+    draftText?: string | null;
+    rationale?: string | null;
+    metadata?: Record<string, unknown> | null;
+}
+
 type UserProfileLoadResult = {
     markdown: string;
     profilePath: string;
@@ -172,6 +185,7 @@ type EventPayloadMapping = {
     getStaticData: StaticData;
     "generate-session-title": string;
     "predict-next-user-action": PredictedUserActionSuggestion | null;
+    "record-prediction-event": { success: boolean };
     "get-user-profile": UserProfileLoadResult;
     "save-user-profile": UserProfileSaveResult;
     "generate-user-profile": UserProfileGenerationResult;
@@ -218,6 +232,7 @@ interface Window {
         onServerEvent: (callback: (event: any) => void) => UnsubscribeFunction;
         generateSessionTitle: (userInput: string | null) => Promise<string>;
         predictNextUserAction: (sessionId: string) => Promise<PredictedUserActionSuggestion | null>;
+        recordPredictionEvent: (event: PredictionEventInput) => Promise<{ success: boolean }>;
         getUserProfile: (cwd?: string | null) => Promise<UserProfileLoadResult>;
         saveUserProfile: (payload: UserProfileSaveInput) => Promise<UserProfileSaveResult>;
         generateUserProfile: (payload: UserProfileGenerationInput) => Promise<UserProfileGenerationResult>;

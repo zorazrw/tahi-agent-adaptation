@@ -54,6 +54,7 @@ interface PromptInputProps {
   predictedSuggestion?: PredictedUserActionSuggestion | null;
   isPredictingSuggestion?: boolean;
   onClearPredictedSuggestion?: () => void;
+  onAcceptPredictedSuggestion?: () => void;
 }
 
 export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
@@ -137,6 +138,7 @@ export function PromptInput({
   predictedSuggestion,
   isPredictingSuggestion = false,
   onClearPredictedSuggestion,
+  onAcceptPredictedSuggestion,
 }: PromptInputProps) {
   const { prompt, setPrompt, isRunning, handleSend, handleStop } = usePromptActions(sendEvent);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
@@ -194,6 +196,7 @@ export function PromptInput({
     if (t === "message") {
       const draftText = predictedSuggestion.draftText.trim();
       if (!draftText) return;
+      onAcceptPredictedSuggestion?.();
       onSendMessage?.();
       sendEvent({
         type: "session.continue",
@@ -208,12 +211,14 @@ export function PromptInput({
     }
 
     if (t === "brain_edit") {
+      onAcceptPredictedSuggestion?.();
       sendEvent({ type: "session.recordBrainEdit", payload: { sessionId: activeSessionId } });
       onSendMessage?.();
       return;
     }
 
     if (t === "edit_workflow") {
+      onAcceptPredictedSuggestion?.();
       if (isFakeUserPrediction(predictedSuggestion) && activeSessionId) {
         const next = appendFakeVisualizationStep(activeSession?.workflowTree);
         const newStep = next[next.length - 1];
@@ -226,14 +231,16 @@ export function PromptInput({
     }
 
     if (t === "edit_verifier") {
+      onAcceptPredictedSuggestion?.();
       onSendMessage?.();
       return;
     }
 
     if (t === "file_edit" || t === "stop" || t === "unknown") {
+      onAcceptPredictedSuggestion?.();
       onSendMessage?.();
     }
-  }, [activeSession, activeSessionId, onSendMessage, predictedSuggestion, selectedNodeId, sendEvent, setPrompt]);
+  }, [activeSession, activeSessionId, onAcceptPredictedSuggestion, onSendMessage, predictedSuggestion, selectedNodeId, sendEvent, setPrompt]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Escape" && predictedSuggestion) {

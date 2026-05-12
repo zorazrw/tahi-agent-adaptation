@@ -80,6 +80,51 @@ function App() {
   const [isPredictingSuggestion, setIsPredictingSuggestion] = useState(false);
   const [lastAutofillKey, setLastAutofillKey] = useState<string | null>(null);
   const explicitlyStoppedSessionIdsRef = useRef(new Set<string>());
+  const currentPredictionRef = useRef<{
+    predictionId: string;
+    sessionId: string;
+    suggestion: PredictedUserActionSuggestion;
+    resolved: boolean;
+  } | null>(null);
+
+  const sendPredictionEvent = useCallback(
+    (
+      entry: { predictionId: string; sessionId: string; suggestion: PredictedUserActionSuggestion },
+      kind: "shown" | "accepted" | "dismissed" | "ignored",
+      metadata?: Record<string, unknown>,
+    ) => {
+      window.electron
+        .recordPredictionEvent({
+          predictionId: entry.predictionId,
+          sessionId: entry.sessionId,
+          event: kind,
+          actionType: entry.suggestion.actionType,
+          confidence: entry.suggestion.confidence,
+          draftText: entry.suggestion.draftText || null,
+          rationale: entry.suggestion.rationale || null,
+          metadata: metadata ?? null,
+        })
+        .catch((err) => console.error("Failed to record prediction event:", err));
+    },
+    [],
+  );
+
+  const flushIgnoredIfUnresolved = useCallback(() => {
+    const current = currentPredictionRef.current;
+    if (!current || current.resolved) return;
+    current.resolved = true;
+    sendPredictionEvent(current, "ignored");
+  }, [sendPredictionEvent]);
+
+  const resolveCurrentPrediction = useCallback(
+    (kind: "accepted" | "dismissed", metadata?: Record<string, unknown>) => {
+      const current = currentPredictionRef.current;
+      if (!current || current.resolved) return;
+      current.resolved = true;
+      sendPredictionEvent(current, kind, metadata);
+    },
+    [sendPredictionEvent],
+  );
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -283,16 +328,20 @@ function App() {
     setHasNewMessages(false);
     prevMessagesLengthRef.current = 0;
     animatedIndicesRef.current = new Set();
+    flushIgnoredIfUnresolved();
+    currentPredictionRef.current = null;
     setPredictedSuggestion(null);
     setIsPredictingSuggestion(false);
     setLastAutofillKey(null);
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, 100);
-  }, [activeSessionId]);
+  }, [activeSessionId, flushIgnoredIfUnresolved]);
 
   useEffect(() => {
     if (predictionAssistMode === "off") {
+      flushIgnoredIfUnresolved();
+      currentPredictionRef.current = null;
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
       return;
@@ -305,6 +354,8 @@ function App() {
       !explicitlyStoppedSessionIdsRef.current.has(activeSessionId);
 
     if (!isNaturalStop || messages.length === 0) {
+      flushIgnoredIfUnresolved();
+      currentPredictionRef.current = null;
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
       return;
@@ -317,6 +368,8 @@ function App() {
       lastMessage.type === "user_prompt" ||
       (lastMessage.type === "run_result" && lastMessage.status !== "success")
     ) {
+      flushIgnoredIfUnresolved();
+      currentPredictionRef.current = null;
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
       return;
@@ -328,11 +381,27 @@ function App() {
     window.electron.predictNextUserAction(sessionId)
       .then((suggestion) => {
         if (cancelled) return;
+        if (suggestion) {
+          flushIgnoredIfUnresolved();
+          const entry = {
+            predictionId: crypto.randomUUID(),
+            sessionId,
+            suggestion,
+            resolved: false,
+          };
+          currentPredictionRef.current = entry;
+          sendPredictionEvent(entry, "shown");
+        } else {
+          flushIgnoredIfUnresolved();
+          currentPredictionRef.current = null;
+        }
         setPredictedSuggestion(suggestion);
       })
       .catch((error) => {
         if (cancelled) return;
         console.error("Failed to predict next user action:", error);
+        flushIgnoredIfUnresolved();
+        currentPredictionRef.current = null;
         setPredictedSuggestion(null);
       })
       .finally(() => {
@@ -344,7 +413,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeSession, activeSessionId, predictionAssistMode, hasNextRunnableWorkflowNode, messages]);
+  }, [activeSession, activeSessionId, predictionAssistMode, hasNextRunnableWorkflowNode, messages, flushIgnoredIfUnresolved, sendPredictionEvent]);
 
   useEffect(() => {
     if (predictionAssistMode !== "autofill") return;
@@ -356,6 +425,8 @@ function App() {
     if (lastAutofillKey === sourceKey) return;
 
     setLastAutofillKey(sourceKey);
+    resolveCurrentPrediction("accepted", { auto: true });
+    currentPredictionRef.current = null;
     setPredictedSuggestion(null);
     setShouldAutoScroll(true);
     setHasNewMessages(false);
@@ -379,6 +450,7 @@ function App() {
     resetToLatest,
     selectedNodeId,
     sendClientEvent,
+    resolveCurrentPrediction,
   ]);
 
   // Track new finalized messages for badge / auto-scroll
@@ -704,7 +776,12 @@ function App() {
           rightOffset={undefined}
           predictedSuggestion={predictionAssistMode === "off" ? null : predictedSuggestion}
           isPredictingSuggestion={isPredictingSuggestion}
-          onClearPredictedSuggestion={() => setPredictedSuggestion(null)}
+          onAcceptPredictedSuggestion={() => resolveCurrentPrediction("accepted")}
+          onClearPredictedSuggestion={() => {
+            resolveCurrentPrediction("dismissed");
+            currentPredictionRef.current = null;
+            setPredictedSuggestion(null);
+          }}
         />
         </>
         )}
