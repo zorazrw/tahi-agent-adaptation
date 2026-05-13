@@ -14,8 +14,14 @@ Weight JSON structure (output of ``export_task_sessions.py --format weight``):
         .output_files               → (Pi only) artifacts the agent wrote/edited
                                        this round; used for artifact-only
                                        completion construction
+        .reinforce_prompt (optional)→ cached full REINFORCE prompt (cross-unit accumulated
+                                       context + this round's opening user); written on first extract
       .human_trajectories           → [{type, round_index, prompt}, ...]
       .verifiers                    → [{criterion, status}, ...]
+      .reward (optional)            → list of ``0.0`` / ``1.0``, one per **session rubric**
+                                    (same length as the last task_unit's verifier criteria);
+                                    when valid, REINFORCE extraction skips LLM regrading.
+                                    Training rows still use scalar ``reward`` = mean of this list.
 
 Completion mode: artifact-only. Each round's completion is reconstructed from
 ``output_files`` as a single ``write`` tool_call per file (assistant message
@@ -38,7 +44,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .reward import compute_per_traj_rewards
+from .reward import compute_llm_rubric_file_scores
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +242,34 @@ def _augment_with_feedback(
     return augmented
 
 
+def _session_tools_prefix(
+    system_prompt: str,
+    tool_schemas: list[dict] | None,
+    renderer: Any | None,
+) -> list[dict]:
+    """System + tool-prefix messages only (no user turn).
+
+    Matches the initial segment of :func:`_build_file_version_index` so REINFORCE
+    and DPO share the same cross-unit accumulated-context head.
+    """
+    tools_prefix: list[dict] = []
+    tools = _normalise_tool_schemas(tool_schemas)
+    if renderer is not None and tools:
+        try:
+            prefix = renderer.create_conversation_prefix_with_tools(tools, system_prompt or "")
+            tools_prefix.extend(dict(m) for m in prefix)
+        except NotImplementedError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "renderer.create_conversation_prefix_with_tools failed (%s); "
+                "falling back to plain system prompt", e,
+            )
+    if not tools_prefix and system_prompt:
+        tools_prefix = [{"role": "system", "content": system_prompt}]
+    return tools_prefix
+
+
 # ---------------------------------------------------------------------------
 # DPO extraction
 # ---------------------------------------------------------------------------
@@ -280,24 +314,9 @@ def _build_file_version_index(
 
     Only filenames with ≥2 versions are useful for DPO; the caller filters.
     """
-    # Build system+tools prefix (no user message yet — appended per round).
-    tools_prefix: list[dict] = []
-    tools = _normalise_tool_schemas(tool_schemas)
-    if renderer is not None and tools:
-        try:
-            prefix = renderer.create_conversation_prefix_with_tools(tools, system_prompt or "")
-            tools_prefix.extend(dict(m) for m in prefix)
-        except NotImplementedError:
-            pass
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "renderer.create_conversation_prefix_with_tools failed (%s); "
-                "falling back to plain system prompt", e,
-            )
-    if not tools_prefix and system_prompt:
-        tools_prefix = [{"role": "system", "content": system_prompt}]
-
-    accumulated: list[dict] = list(tools_prefix)  # grows as we walk through rounds
+    accumulated: list[dict] = list(
+        _session_tools_prefix(system_prompt, tool_schemas, renderer),
+    )
     file_index: dict[str, list[dict]] = {}
 
     for unit in session.get("task_units", []):
@@ -499,57 +518,167 @@ def extract_opd_examples(
 # REINFORCE extraction
 # ---------------------------------------------------------------------------
 
+def _reward_cache_is_binary_rubric_row(values: list[Any]) -> bool:
+    """Each entry must be exactly 0 or 1 (float or int), not bool subtype quirks."""
+    for x in values:
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            return False
+        xf = float(x)
+        if xf != 0.0 and xf != 1.0:
+            return False
+    return True
+
+
+def _unit_reward_cache_valid(unit: dict[str, Any], n_rubrics: int) -> bool:
+    """True if ``unit['reward']`` is a per-rubric 0/1 list matching ``n_rubrics``."""
+    r = unit.get("reward")
+    if n_rubrics == 0:
+        return r is None or (isinstance(r, list) and len(r) == 0)
+    if not isinstance(r, list) or len(r) != n_rubrics:
+        return False
+    return _reward_cache_is_binary_rubric_row(r)
+
+
+def _reinforce_prompt_cache_valid(value: Any) -> bool:
+    """True if ``value`` looks like a frozen OpenAI-style message list."""
+    if not isinstance(value, list) or not value:
+        return False
+    return all(isinstance(m, dict) and isinstance(m.get("role"), str) for m in value)
+
+
+def _reinforce_exec_unit_sample_indices(n_exec: int) -> set[int]:
+    """Indices (0-based) of execution task_units to keep for REINFORCE: first, middle, last.
+
+    With fewer than three execution units, keeps all that exist (one or two).
+    """
+    if n_exec <= 0:
+        return set()
+    if n_exec == 1:
+        return {0}
+    if n_exec == 2:
+        return {0, 1}
+    return {0, n_exec // 2, n_exec - 1}
+
+
 def extract_reinforce_examples(
     sessions: list[dict],
     renderer: Any | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Extract REINFORCE examples from weight-format sessions.
 
-    For each round k, builds the accumulated context as prompt, round k's
-    artifact-only completion (from ``rounds[k].output_files``), and computes
-    a scalar reward from verifier pass rate and human intervention count.
+    For each round *k*, the **prompt** is built like DPO file-indexing: a single
+    session-level ``accumulated`` transcript (system/tools prefix, then all prior
+    rounds' ``messages[1:]`` and follow-ups across **all** task_units in session order),
+    plus this round's opening ``messages[0]``. That matches
+    :func:`_build_file_version_index` so later units see full prior agent traffic,
+    not only the current unit's slice.
+
+    The **completion** is still artifact-only from ``rounds[k].output_files``.
+
+    If a task_unit already has a ``reward`` list of length ``len(session rubrics)``
+    (the last task_unit's verifier criteria) with only ``0.0`` / ``1.0`` entries, it is
+    reused and no LLM is called. Otherwise scores are computed and ``unit['reward']`` is
+    set to that per-rubric binary list (``sessions`` is mutated).
+
+    Each round may store ``reinforce_prompt`` (full message list used as the training
+    prompt): on first extract it is computed and written onto ``agent_trajectories[k]``;
+    on later loads it is reused so the cross-unit accumulated transcript need not be
+    recomputed (invalidate by deleting that field if the source ``messages`` change).
+
+    Each extracted training row still carries scalar ``reward`` = mean of the unit's
+    rubric 0/1 scores (same for every trajectory index in that unit under LLM grading).
+
+    Only **three** execution task_units per session emit training data (first, middle,
+    and last in execution order), **plus** every task_unit whose ``intent`` is
+    ``"planning"``. Other execution units still advance ``accumulated`` but do not call
+    the rubric LLM, write ``reward`` / ``reinforce_prompt``, or append examples.
 
     Rounds without ``output_files`` (no artifact produced) are skipped.
 
-    Returns list of::
+    Returns ``(examples, session_dirty)`` where ``session_dirty`` is True if any
+    ``reward`` and/or ``reinforce_prompt`` cache was newly written (caller may persist
+    ``sessions`` to disk).
+
+    Each example is::
 
         {prompt, completion, is_agent, reward}
     """
     examples: list[dict[str, Any]] = []
+    session_dirty = False
 
     for session in sessions:
         system_prompt = session.get("system_prompt", "")
         tool_schemas = session.get("tool_schemas")
+        # Rubrics: last task_unit's verifiers. Reward LLM runs for planning + sampled execution units.
+        rubrics = session.get("task_units", [])[-1].get("verifiers", [])
+        rubrics = [v["criterion"] for v in rubrics]  # list[str]
 
-        for unit in session.get("task_units", []):
+        accumulated: list[dict] = list(
+            _session_tools_prefix(system_prompt, tool_schemas, renderer),
+        )
+
+        task_units_list = session.get("task_units", [])
+        n_exec_units = sum(1 for u in task_units_list if u.get("intent") != "planning")
+        exec_unit_keep = _reinforce_exec_unit_sample_indices(n_exec_units)
+        exec_unit_idx = -1
+
+        for unit in task_units_list:
             if unit.get("intent") == "planning":
-                continue
+                include_unit = True
+            else:
+                exec_unit_idx += 1
+                include_unit = exec_unit_idx in exec_unit_keep
             rounds = unit.get("agent_trajectories", [])
             human_traj = unit.get("human_trajectories", [])
             if not rounds:
                 continue
 
-            first_user = rounds[0]["messages"][0]["content"] if rounds[0].get("messages") else ""
-            base_prompt = _build_base_prompt(system_prompt, tool_schemas, first_user, renderer)
-            per_traj_rewards = compute_per_traj_rewards(unit)
+            n_rubrics = len(rubrics)
+            if include_unit:
+                if _unit_reward_cache_valid(unit, n_rubrics):
+                    rubric_scores = [float(x) for x in unit["reward"]]
+                    mean_r = sum(rubric_scores) / len(rubric_scores) if rubric_scores else 1.0
+                    per_traj_rewards = [mean_r] * len(rounds)
+                    logger.debug("Using cached rubric 0/1 scores (%d criteria)", len(rubric_scores))
+                else:
+                    mean_r, rubric_scores = compute_llm_rubric_file_scores(
+                        unit, rubrics, model="claude-haiku-4-5-20251001",
+                    )
+                    per_traj_rewards = [mean_r] * len(rounds)
+                    unit["reward"] = [float(x) for x in rubric_scores]
+                    session_dirty = True
+            else:
+                per_traj_rewards = []
 
             for k, rnd in enumerate(rounds):
-                completion, is_agent = _build_artifact_completion(rnd.get("output_files"))
-                if not completion:
+                messages = rnd.get("messages", [])
+                if not messages:
                     continue
+                if include_unit:
+                    cached = rnd.get("reinforce_prompt")
+                    if _reinforce_prompt_cache_valid(cached):
+                        prompt = json.loads(json.dumps(cached))
+                    else:
+                        prompt = accumulated + [dict(messages[0])]
+                        rnd["reinforce_prompt"] = json.loads(json.dumps(prompt))
+                        session_dirty = True
+                    completion, is_agent = _build_artifact_completion(rnd.get("output_files"))
+                    if completion:
+                        examples.append({
+                            "prompt": prompt,
+                            "completion": completion,
+                            "is_agent": is_agent,
+                            "reward": per_traj_rewards[k],
+                        })
 
-                prompt = _build_conversation_context(
-                    base_prompt, rounds, human_traj, up_to_round=k,
-                )
+                accumulated.extend(messages[1:])
+                for h in human_traj:
+                    if h.get("type") == "follow_up" and h.get("round_index") == k:
+                        text = h.get("prompt", "")
+                        if text:
+                            accumulated.append({"role": "user", "content": text})
 
-                examples.append({
-                    "prompt": prompt,
-                    "completion": completion,
-                    "is_agent": is_agent,
-                    "reward": per_traj_rewards[k],
-                })
-
-    return examples
+    return examples, session_dirty
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +744,7 @@ def main() -> None:
             print(f"  completion: {len(u['completion'])} msgs (agent: {sum(u['is_agent'])})")
 
     else:
-        units = extract_reinforce_examples(sessions)
+        units, _ = extract_reinforce_examples(sessions)
         print(f"Extracted {len(units)} REINFORCE examples")
         for i, u in enumerate(units):
             print(f"\n── Example {i} ──")

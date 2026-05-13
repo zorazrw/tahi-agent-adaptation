@@ -109,14 +109,29 @@ def _hydrate_tool_calls(conversation: list[dict]) -> list[dict]:
     return out
 
 
-def _load_sessions(path: str) -> list[dict]:
+def _load_json_root(path: str) -> Any:
+    """Load the full JSON document from disk (list of sessions, or wrapper dict)."""
     with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    if isinstance(raw, list):
-        return raw
-    if isinstance(raw, dict) and "sessions" in raw:
-        return raw["sessions"]
-    return [raw]
+        return json.load(f)
+
+
+def _sessions_from_json_root(root: Any) -> list[dict]:
+    """Same session list resolution as ``_load_sessions``, without reading a file."""
+    if isinstance(root, list):
+        return root
+    if isinstance(root, dict) and "sessions" in root:
+        return root["sessions"]
+    return [root]
+
+
+def _load_sessions(path: str) -> list[dict]:
+    return _sessions_from_json_root(_load_json_root(path))
+
+
+def _save_sessions_json(path: str, root: Any) -> None:
+    """Write weight JSON back; preserves top-level shape (array vs ``{"sessions":...}``)."""
+    text = json.dumps(root, indent=2, ensure_ascii=False) + "\n"
+    Path(path).write_text(text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +147,7 @@ class WeightDPODataBuilder(ChatDatasetBuilder):
     pair_mode: str = "adjacent"
 
     def _load(self, path: str) -> list[dict]:
-        sessions = _load_sessions(path)
+        sessions = _sessions_from_json_root(_load_json_root(path))
         # Pass the renderer so tool schemas are injected into the system prefix
         # via ``Renderer.create_conversation_prefix_with_tools`` rather than
         # hand-rolled into the system prompt text. Falls back to plain system
@@ -226,9 +241,16 @@ class WeightReinforceDataBuilder(ChatDatasetBuilder):
     test_path: str | None = None
 
     def _build_dataset(self, path: str, batch_size: int) -> _ReinforceDataset:
-        sessions = _load_sessions(path)
-        examples = extract_reinforce_examples(sessions, renderer=self.renderer)
+        root = _load_json_root(path)
+        sessions = _sessions_from_json_root(root)
+        examples, session_dirty = extract_reinforce_examples(sessions, renderer=self.renderer)
         logger.info("Loaded %d REINFORCE examples from %s", len(examples), path)
+        if session_dirty:
+            try:
+                _save_sessions_json(path, root)
+                logger.info("Wrote REINFORCE cache (reward and/or reinforce_prompt) to %s", path)
+            except OSError as e:
+                logger.warning("Could not persist REINFORCE session cache to %s: %s", path, e)
 
         datums: list[tinker.Datum] = []
         rewards: list[float] = []

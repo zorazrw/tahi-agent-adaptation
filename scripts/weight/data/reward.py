@@ -4,12 +4,23 @@ R_total = w_success * verifier_pass_rate + w_efficiency * exp(-alpha * n_follow_
 
 Per-trajectory variant uses each trajectory's own verifiers (finer-grained signal)
 and positional decay via follow-ups-after-round-k instead of a flat efficiency term.
+
+LLM rubric variant (``compute_llm_rubric_file_scores`` / ``compute_llm_rubric_file_reward``):
+grades file text merged from ``agent_trajectories[*].output_files`` (``path`` + ``content``),
+in round order (later rounds win per path). Uses Anthropic (``scripts/induce.py``); requires ``anthropic``.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import math
+import re
+import sys
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _verifier_pass_rate(verifiers: list[dict]) -> float | None:
@@ -98,7 +109,6 @@ def _interpolate_traj_rates(trajs: list[dict], unit_verifiers: list[dict]) -> li
 
     return resolved
 
-
 def compute_per_traj_rewards(
     unit: dict,
     w_success: float = 0.6,
@@ -168,3 +178,223 @@ def compute_per_round_rewards(
         base = total * base_fraction
         return [base + (i / (n - 1)) * (total - base) for i in range(n)]
     return [total] * n
+
+
+# ---------------------------------------------------------------------------
+# LLM rubric grading (unit file text vs string rubrics)
+# ---------------------------------------------------------------------------
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+def _ensure_scripts_on_path() -> None:
+    s = str(_SCRIPTS_DIR)
+    if s not in sys.path:
+        sys.path.insert(0, s)
+
+
+def _unit_files_to_blocks(unit: dict[str, Any]) -> list[tuple[str, str]]:
+    """Build ``(path, content)`` blocks for rubric grading from ``output_files`` only.
+
+    Each round's ``output_files`` entries use weight shape ``{"path": "...", "content": "..."}``.
+    Rounds are walked in order; the same ``path`` in a later round overwrites earlier
+    snapshots. Returns ``[]`` when there are no usable files (grader sees no file body).
+    """
+    merged: dict[str, str] = {}
+    for rnd in unit.get("agent_trajectories", []) or []:
+        if not isinstance(rnd, dict):
+            continue
+        for f in rnd.get("output_files") or []:
+            if not isinstance(f, dict):
+                continue
+            path = str(f.get("path", "") or "").strip()
+            content = f.get("content")
+            if not path or not isinstance(content, str):
+                continue
+            merged[path] = content
+
+    return sorted(merged.items(), key=lambda kv: kv[0])
+
+
+def _truncate_file_text(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "\n... [truncated]"
+
+
+def _build_rubric_grader_prompt(
+    rubrics: list[str],
+    file_blocks: list[tuple[str, str]],
+    *,
+    max_file_chars: int = 14_000,
+) -> str:
+    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(rubrics))
+    rendered: list[str] = []
+    for rel, text in file_blocks:
+        body = _truncate_file_text(text, max_file_chars) if text else "(file missing or empty)"
+        rendered.append(f"### {rel}\n\n{body}")
+    files_joined = "\n\n---\n\n".join(rendered) if rendered else "(no output files)"
+
+    return "\n".join(
+        [
+            "You are an automated checker for a coding task output.",
+            "Given rubric lines and the current output files (below), decide whether each rubric is satisfied.",
+            'Reply with ONLY a JSON object of this exact shape: {"results":[{"pass":true},{"pass":false},...]}',
+            "The results array must have exactly one object per rubric line, in the same order (indices 0 .. n-1).",
+            "pass: true means satisfied; false means not satisfied.",
+            "",
+            "Rubric lines (in order):",
+            numbered,
+            "",
+            "Output files and contents:",
+            files_joined,
+        ]
+    )
+
+
+def _pass_from_result_item(item: Any) -> bool | None:
+    """Interpret one ``results`` element: ``bool``, ``{"pass":...}``, or common aliases."""
+    if isinstance(item, bool):
+        return item
+    if isinstance(item, (int, float)) and item in (0, 1):
+        return bool(item)
+    if not isinstance(item, dict):
+        return None
+    # Case-insensitive key match for pass-like fields (models vary).
+    lower_map = {str(k).lower(): v for k, v in item.items()}
+    for alias in ("pass", "passed", "satisfied", "ok", "success"):
+        if alias in lower_map:
+            v = lower_map[alias]
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                return bool(v)
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in ("true", "yes", "1", "pass", "ok"):
+                    return True
+                if s in ("false", "no", "0", "fail"):
+                    return False
+    return None
+
+
+def _parse_rubric_results_json(text: str, n: int) -> tuple[list[bool | None], list[Any]]:
+    """Extract pass/fail per rubric from model text.
+
+    Returns ``(parsed, raw_results)`` where ``parsed[i]`` is ``True``/``False``/``None``
+    (``None`` = model gave no usable score for rubric *i*). ``raw_results`` is the
+    decoded ``results`` array for error messages.
+    """
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    raw = (fence.group(1) if fence else text).strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object in model response")
+    parsed_json = json.loads(raw[start : end + 1])
+    results = parsed_json.get("results")
+    if not isinstance(results, list):
+        raise ValueError("Missing results array")
+    out: list[bool | None] = [None] * n
+    for i in range(n):
+        if i >= len(results):
+            break
+        out[i] = _pass_from_result_item(results[i])
+    return out, results
+
+
+def compute_llm_rubric_file_scores(
+    unit: dict[str, Any],
+    rubrics: list[str],
+    *,
+    client: Any | None = None,
+    model: str | None = None,
+    max_tokens: int = 1024,
+    max_file_chars: int = 14_000,
+) -> tuple[float, list[float]]:
+    """Grade unit file text (see ``_unit_files_to_blocks``) against ``rubrics`` with one LLM call.
+
+    Returns ``(mean_pass, rubric_scores)`` where ``rubric_scores`` has length
+    ``len(rubrics)``, each entry ``0.0`` or ``1.0`` (fail/pass per criterion).
+    ``mean_pass`` is the arithmetic mean of those scores in ``[0, 1]``.
+
+    Empty ``rubrics`` returns ``(1.0, [])`` (no criteria to violate).
+
+    Uses Anthropic Messages API via ``induce.anthropic_user_text`` when ``client`` /
+    ``model`` are omitted (resolves credentials like ``scripts/induce.py``).
+    """
+    if not rubrics:
+        return 1.0, []
+
+    file_blocks = _unit_files_to_blocks(unit)
+    user_prompt = _build_rubric_grader_prompt(rubrics, file_blocks, max_file_chars=max_file_chars)
+
+    _ensure_scripts_on_path()
+    import induce  # noqa: PLC0415 — optional until this function runs
+
+    if client is None or model is None:
+        cfg = induce.resolve_anthropic_config()
+        client = induce.make_anthropic_client(cfg)
+        model = model or cfg.model
+
+    raw = induce.anthropic_user_text(
+        client,
+        model,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+    passes, results_list = _parse_rubric_results_json(raw, len(rubrics))
+    missing_idx = [i for i, p in enumerate(passes) if p is None]
+    if missing_idx:
+        logger.warning(
+            "LLM rubric parse: %d/%d usable (missing indices %s); len(results)=%d. "
+            "Missing slots scored as 0.0.",
+            len(rubrics) - len(missing_idx),
+            len(rubrics),
+            missing_idx[:20],
+            len(results_list),
+        )
+    scored = [1.0 if p is True else 0.0 for p in passes]
+    mean = sum(scored) / len(rubrics)
+    return mean, scored
+
+
+def compute_llm_rubric_file_reward(
+    unit: dict[str, Any],
+    rubrics: list[str],
+    *,
+    client: Any | None = None,
+    model: str | None = None,
+    max_tokens: int = 1024,
+    max_file_chars: int = 14_000,
+) -> float:
+    """Same grading as ``compute_llm_rubric_file_scores``; returns only the mean pass rate."""
+    mean, _ = compute_llm_rubric_file_scores(
+        unit,
+        rubrics,
+        client=client,
+        model=model,
+        max_tokens=max_tokens,
+        max_file_chars=max_file_chars,
+    )
+    return mean
+
+
+def compute_per_traj_rewards_llm_rubrics(
+    unit: dict[str, Any],
+    rubrics: list[str],
+    **kwargs: Any,
+) -> list[float]:
+    """Same length as ``unit['agent_trajectories']``; each entry is the shared LLM rubric mean.
+
+    ``rubrics`` is caller-defined (e.g. session-final verifiers from the last task_unit only);
+    it need not match ``unit['verifiers']``.
+
+    Drop-in alternative to ``compute_per_traj_rewards`` when rewards should come from
+    grading merged ``output_files`` text against string rubrics instead of stored verifier metadata.
+    """
+    trajs = unit.get("agent_trajectories", [])
+    if not trajs:
+        return []
+    mean, _ = compute_llm_rubric_file_scores(unit, rubrics, **kwargs)
+    return [mean] * len(trajs)
