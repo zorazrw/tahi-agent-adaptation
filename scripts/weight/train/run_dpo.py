@@ -317,7 +317,7 @@ def do_update(
     ml_logger: ml_log.Logger,
     log_path: str,
     tokenizer: Tokenizer,
-    rolling_mgr: checkpoint_utils.CheckpointManager | None = None,
+    rolling_mgr: checkpoint_utils.RollingCheckpointManager | None = None,
 ) -> None:
     step = epoch_idx * n_batches + batch_idx
     metrics: dict[str, int | float | str] = {"epoch": epoch_idx}
@@ -591,7 +591,7 @@ def main() -> None:
         )
 
     tokenizer = get_tokenizer(args.model_name)
-    rolling_mgr = checkpoint_utils.CheckpointManager(
+    rolling_mgr = checkpoint_utils.RollingCheckpointManager(
         training_client=training_client,
         service_client=service_client,
         log_path=log_path,
