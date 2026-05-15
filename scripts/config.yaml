@@ -9,22 +9,32 @@ logprobs: false
 update_every_n_sessions: 1
 
 # -- Training (shared) --
-lora_rank: 32
+lora_rank: 64
 dry_run: false
-learning_rate: 5.0e-5
-num_epochs: 1
-batch_size: 2
-lr_schedule: constant
+learning_rate: 5e-5
+num_epochs: 20
+batch_size: 4
+lr_schedule: linear
 max_steps: null
 
 # -- DPO-specific --
 dpo_beta: 0.1
 
 # -- OPD-specific --
-opd_max_tokens: 2048
-opd_temperature: 1.0
+opd_max_tokens: 16384
+opd_temperature: 0.0
 opd_topk: 20
 opd_max_context_length: 32768
+
+# -- OPD follow-up summarization --
+# When true, every session is annotated with an LLM-generated `summary`
+# (used as the in-context golden answer) before joining the training queue.
+# Requires OPENAI_API_KEY (and optionally OPENAI_BASE_URL) in the env.
+summarize_followups: false
+# summarize_model: gpt-5-mini-2025-08-07
+# summarize_granularity: session   # session | task | unit
+# summarize_concurrency: 8
+# summarize_cache_path: summarize_followups.cache.json
 
 # -- REINFORCE-specific --
 reward_alpha: 0.05

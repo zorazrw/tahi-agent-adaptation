@@ -91,12 +91,25 @@ OPD_DEMO_TEMPLATE = (
     "Now provide an improved response that incorporates the feedback."
 )
 
+# Used in the list-style teacher prompt (when both question and golden_answer
+# are chat messages) to ask the model to redo the response from scratch. The
+# default text fits both the "next-iteration trajectory" golden and the
+# "LLM-summarized user intent" golden produced by ``summarize_followups.py``.
+OPD_REDO_MESSAGE = (
+    "The assistant message above is the canonical answer -- it may be a literal "
+    "previous response, or a summary of the user's intended outcome across all "
+    "of their follow-up corrections. "
+    "Now provide your response to the following user request accordingly. "
+)
+
 
 @runtime_checkable
 class SDFTBatchProvider(Protocol):
     """Protocol for SDFT datasets that return builders alongside golden answers."""
 
-    def get_batch(self, index: int) -> tuple[Sequence[EnvGroupBuilder], list[str], list[str]]:
+    def get_batch(
+        self, index: int
+    ) -> tuple[Sequence[EnvGroupBuilder], list[str | list[renderers.Message]], list[str]]:
         """Return (env_group_builders, questions, golden_answers) for a batch.
 
         Each list has the same length (one per problem in the batch).
@@ -107,20 +120,49 @@ class SDFTBatchProvider(Protocol):
 
 
 def build_sdft_teacher_prompt(
-    question: str,
+    question: str | list[renderers.Message],
     golden_answer: str,
     renderer: renderers.Renderer,
     system_prompt: str | None = None,
     demo_template: str = OPD_DEMO_TEMPLATE,
+    chat_redo_message: str = OPD_REDO_MESSAGE,
 ) -> tinker.ModelInput:
     """Build teacher ModelInput with golden answer as an in-context demonstration.
 
     The teacher prompt presents the question alongside the golden answer so the
     model can attend to the demonstration when scoring student completions.
 
+    When ``question`` is a chat list and ``golden_answer`` is also a chat list
+    (the "next-iteration" or summary form), the prompt is built as
+    ``question + golden_answer + [redo]`` where ``redo`` carries the
+    ``chat_redo_message`` text. When ``question`` is a plain string, the
+    ``demo_template`` is used to build a single templated user turn.
+
     Returns a ModelInput suitable for appending student completion tokens and
     computing logprobs via a SamplingClient.
     """
+    if isinstance(question, list):
+        if not isinstance(golden_answer, list):
+            raise TypeError(
+                f"Expected list[Message] golden_answer when question is a list; got {type(golden_answer)}"
+            )
+        redo: renderers.Message = {
+            "role": "user",
+            "content": chat_redo_message,
+        }  # type: ignore[typeddict-item]
+
+        # Peel the trailing user turn(s) (the original task request) off the
+        # end of `question` and re-attach them AFTER the demo + redo so the
+        # task instruction is the last thing the teacher sees before
+        # generating its assistant turn.
+        head = list(question)
+        trailing_user: list[renderers.Message] = []
+        if head:
+            trailing_user.insert(0, head.pop())
+
+        teacher_messages = head + list(golden_answer) + [redo] + trailing_user
+        return renderer.build_generation_prompt(teacher_messages)
+
     teacher_content = demo_template.format(question=question, golden_answer=golden_answer)
     messages: list[renderers.Message] = []
     if system_prompt:
@@ -177,6 +219,35 @@ def _build_teacher_forced_sequence(
     for token in completion_tokens:
         teacher_forced = teacher_forced.append_int(token)
     return teacher_forced
+
+
+def _build_student_forced_sequence(datum: tinker.Datum) -> tinker.ModelInput:
+    """Reconstruct the full student prompt + sampled completion sequence."""
+    target_tokens = datum.loss_fn_inputs["target_tokens"].data
+    if not target_tokens:
+        return datum.model_input
+    return datum.model_input.append_int(cast(int, target_tokens[-1]))
+
+
+def _renormalized_topk_distribution(
+    topk_entries: Sequence[tuple[int, float]],
+    topk: int,
+    vocab_size: int | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Return filtered top-k token ids, logprobs, and probs renormalized over top-k."""
+    filtered = [
+        (tok_id, lp)
+        for tok_id, lp in topk_entries[:topk]
+        if vocab_size is None or tok_id < vocab_size
+    ]
+    if not filtered:
+        return None
+
+    token_ids = torch.tensor([tok_id for tok_id, _ in filtered], dtype=torch.long)
+    logprobs = torch.tensor([lp for _, lp in filtered], dtype=torch.float32)
+    logprobs -= torch.logsumexp(logprobs, dim=0)
+    probs = logprobs.exp()
+    return token_ids, logprobs, probs
 
 
 @trace.scope
@@ -298,6 +369,7 @@ async def build_topk_distillation_datums(
     metadata_D: list[dict[str, int]],
     teacher_client: tinker.SamplingClient,
     teacher_prompts_P: list[tinker.ModelInput],
+    student_client: tinker.SamplingClient | None = None,
     topk: int = 20,
     max_context_length: int = 32768,
     vocab_size: int | None = None,
@@ -329,6 +401,9 @@ async def build_topk_distillation_datums(
         teacher_client: SamplingClient for the teacher model.
         teacher_prompts_P: Per-problem teacher prompts (built by
             :func:`build_sdft_teacher_prompt`).
+        student_client: Optional SamplingClient for the current student. If
+            provided, a second forced top-K query is made on the student rollout
+            sequence to compute teacher/student top-K overlap and entropy gap.
         topk: Number of top tokens to distill (K). K=20 is recommended.
         max_context_length: Maximum teacher context length.
         vocab_size: If set, filter out token IDs >= vocab_size (handles
@@ -343,15 +418,18 @@ async def build_topk_distillation_datums(
     """
     # Step 1: Build teacher-forced sequences
     teacher_forced_sequences_D: list[tinker.ModelInput] = []
+    student_forced_sequences_D: list[tinker.ModelInput] = []
     teacher_prompt_lengths_D: list[int] = []
+    completion_starts_D: list[int] = []
     completion_lengths_D: list[int] = []
     truncated_count = 0
 
     for i, datum in enumerate(data_D):
         group_idx = metadata_D[i]["group_idx"]
         teacher_prompt = teacher_prompts_P[group_idx]
+        student_forced_sequences_D.append(_build_student_forced_sequence(datum))
 
-        completion_tokens, teacher_prompt_len, _, was_truncated = _extract_completion_tokens(
+        completion_tokens, teacher_prompt_len, completion_start, was_truncated = _extract_completion_tokens(
             datum, teacher_prompt, max_context_length
         )
         if was_truncated:
@@ -360,16 +438,18 @@ async def build_topk_distillation_datums(
         if not completion_tokens:
             teacher_forced_sequences_D.append(teacher_prompt)
             teacher_prompt_lengths_D.append(teacher_prompt_len)
+            completion_starts_D.append(completion_start)
             completion_lengths_D.append(0)
             continue
 
         teacher_forced = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
         teacher_forced_sequences_D.append(teacher_forced)
         teacher_prompt_lengths_D.append(teacher_prompt_len)
+        completion_starts_D.append(completion_start)
         completion_lengths_D.append(len(completion_tokens))
 
     # Step 2: Get top-K logprobs from teacher in parallel
-    topk_responses_D = await asyncio.gather(
+    teacher_topk_task = asyncio.gather(
         *[
             teacher_client.sample_async(
                 prompt=teacher_forced,
@@ -381,12 +461,46 @@ async def build_topk_distillation_datums(
             for teacher_forced in teacher_forced_sequences_D
         ]
     )
+    student_topk_task = None
+    if student_client is not None:
+        student_topk_task = asyncio.gather(
+            *[
+                student_client.sample_async(
+                    prompt=student_forced,
+                    num_samples=1,
+                    sampling_params=tinker.SamplingParams(max_tokens=1),
+                    include_prompt_logprobs=True,
+                    topk_prompt_logprobs=topk,
+                )
+                for student_forced in student_forced_sequences_D
+            ]
+        )
+    if student_topk_task is None:
+        topk_responses_D = await teacher_topk_task
+        student_topk_responses_D = None
+    else:
+        topk_responses_D, student_topk_responses_D = await asyncio.gather(
+            teacher_topk_task,
+            student_topk_task,
+        )
 
     # Step 3: Build new datums with (N, K) shaped target_tokens and weights.
     # First pass: collect raw weights and count completion tokens per datum.
     raw_datums: list[tuple[torch.Tensor, torch.Tensor, int]] = []  # (targets, weights, n_comp)
     total_completion_tokens = 0.0
     total_teacher_entropy = 0.0
+    total_teacher_entropy_positions = 0.0
+    total_topk_overlap = 0.0
+    total_student_entropy = 0.0
+    total_aligned_teacher_entropy = 0.0
+    total_topk_metric_positions = 0.0
+    # Top-K KL accumulators. For positions where both teacher and student
+    # top-K are available, we compute KL on the *union* of top-K token ids
+    # using the smallest top-K log-prob as a floor for tokens missing from
+    # the other side. Forward = KL(teacher || student) (the loss direction);
+    # reverse = KL(student || teacher); sym = mean of the two.
+    total_kl_forward = 0.0
+    total_kl_reverse = 0.0
 
     for i, datum in enumerate(data_D):
         mask = datum.loss_fn_inputs["mask"].to_torch()
@@ -394,6 +508,7 @@ async def build_topk_distillation_datums(
         N = datum.model_input.length
         completion_len = completion_lengths_D[i]
         teacher_prompt_len = teacher_prompt_lengths_D[i]
+        completion_start = completion_starts_D[i]
 
         target_tokens_NK = torch.zeros(N, topk, dtype=torch.long)
         weights_NK = torch.zeros(N, topk, dtype=torch.float32)
@@ -401,6 +516,11 @@ async def build_topk_distillation_datums(
 
         if completion_len > 0 and len(completion_mask_indices) > 0:
             topk_all = topk_responses_D[i].topk_prompt_logprobs
+            student_topk_all = (
+                None
+                if student_topk_responses_D is None
+                else student_topk_responses_D[i].topk_prompt_logprobs
+            )
 
             num_tokens = min(completion_len, len(completion_mask_indices))
             for t in range(num_tokens):
@@ -417,30 +537,84 @@ async def build_topk_distillation_datums(
                 if topk_entries is None:
                     continue
 
-                # Filter out token IDs that exceed the student's vocab size
-                # (teacher sampling may return IDs for special/added tokens)
-                filtered = [
-                    (tok_id, lp)
-                    for tok_id, lp in topk_entries[:topk]
-                    if vocab_size is None or tok_id < vocab_size
-                ]
-                if not filtered:
+                teacher_distribution = _renormalized_topk_distribution(
+                    topk_entries, topk=topk, vocab_size=vocab_size
+                )
+                if teacher_distribution is None:
                     continue
 
-                k_actual = len(filtered)
-                token_ids = torch.tensor([tok_id for tok_id, _ in filtered], dtype=torch.long)
-                logprobs = torch.tensor([lp for _, lp in filtered], dtype=torch.float32)
-
-                # Renormalize over top-K via logsumexp
-                logprobs -= torch.logsumexp(logprobs, dim=0)
-                probs = logprobs.exp()
+                token_ids, logprobs, probs = teacher_distribution
+                k_actual = len(token_ids)
 
                 target_tokens_NK[student_pos, :k_actual] = token_ids
                 weights_NK[student_pos, :k_actual] = probs
                 n_completion_positions += 1
 
                 # Teacher entropy for monitoring (H = -sum p log p)
-                total_teacher_entropy += -(probs * logprobs).sum().item()
+                teacher_entropy = -(probs * logprobs).sum().item()
+                total_teacher_entropy += teacher_entropy
+                total_teacher_entropy_positions += 1
+
+                if student_topk_all is None:
+                    continue
+
+                # ``topk_prompt_logprobs`` indexes the observed token in the
+                # forced prompt. ``student_pos`` is the left-shifted loss
+                # position, so the generated token itself is one position later.
+                student_topk_pos = completion_start + t
+                if student_topk_pos >= len(student_topk_all):
+                    continue
+                student_topk_entries = student_topk_all[student_topk_pos]
+                if student_topk_entries is None:
+                    continue
+
+                student_distribution = _renormalized_topk_distribution(
+                    student_topk_entries, topk=topk, vocab_size=vocab_size
+                )
+                if student_distribution is None:
+                    continue
+
+                student_token_ids, student_logprobs, student_probs = student_distribution
+                teacher_id_list = token_ids.tolist()
+                student_id_list = student_token_ids.tolist()
+                teacher_ids = set(teacher_id_list)
+                student_ids = set(student_id_list)
+                overlap_denominator = min(topk, len(teacher_ids), len(student_ids))
+                if overlap_denominator == 0:
+                    continue
+
+                total_topk_overlap += len(teacher_ids & student_ids) / overlap_denominator
+                total_student_entropy += -(student_probs * student_logprobs).sum().item()
+                total_aligned_teacher_entropy += teacher_entropy
+
+                # Top-K KL on the union of token ids. Tokens that fall outside
+                # the other distribution's top-K are floored to its smallest
+                # observed log-prob -- this is a biased underestimate when the
+                # modes agree and a slight overestimate when they diverge, but
+                # gives a stable monitoring signal.
+                teacher_lp_by_id = dict(zip(teacher_id_list, logprobs.tolist()))
+                teacher_p_by_id = dict(zip(teacher_id_list, probs.tolist()))
+                student_lp_by_id = dict(zip(student_id_list, student_logprobs.tolist()))
+                student_p_by_id = dict(zip(student_id_list, student_probs.tolist()))
+
+                teacher_floor_lp = float(logprobs.min().item())
+                student_floor_lp = float(student_logprobs.min().item())
+
+                kl_fwd = 0.0
+                for tid, p_t in teacher_p_by_id.items():
+                    log_p_t = teacher_lp_by_id[tid]
+                    log_p_s = student_lp_by_id.get(tid, student_floor_lp)
+                    kl_fwd += p_t * (log_p_t - log_p_s)
+
+                kl_rev = 0.0
+                for sid, p_s in student_p_by_id.items():
+                    log_p_s = student_lp_by_id[sid]
+                    log_p_t = teacher_lp_by_id.get(sid, teacher_floor_lp)
+                    kl_rev += p_s * (log_p_s - log_p_t)
+
+                total_kl_forward += kl_fwd
+                total_kl_reverse += kl_rev
+                total_topk_metric_positions += 1
 
             total_completion_tokens += num_tokens
 
@@ -470,7 +644,25 @@ async def build_topk_distillation_datums(
     }
     if total_completion_tokens > 0:
         metrics["sdft/total_completion_tokens"] = total_completion_tokens
-        metrics["sdft/mean_teacher_entropy"] = total_teacher_entropy / total_completion_tokens
+    if total_teacher_entropy_positions > 0:
+        metrics["sdft/mean_teacher_entropy"] = (
+            total_teacher_entropy / total_teacher_entropy_positions
+        )
+    if total_topk_metric_positions > 0:
+        mean_teacher_entropy = total_aligned_teacher_entropy / total_topk_metric_positions
+        mean_student_entropy = total_student_entropy / total_topk_metric_positions
+        metrics["sdft/topk_overlap_ratio"] = total_topk_overlap / total_topk_metric_positions
+        metrics["sdft/topk_metric_positions"] = total_topk_metric_positions
+        metrics["sdft/mean_student_entropy"] = mean_student_entropy
+        metrics["sdft/topk_entropy_gap_teacher_minus_student"] = (
+            mean_teacher_entropy - mean_student_entropy
+        )
+        metrics["sdft/topk_entropy_gap_abs"] = abs(mean_teacher_entropy - mean_student_entropy)
+        mean_kl_forward = total_kl_forward / total_topk_metric_positions
+        mean_kl_reverse = total_kl_reverse / total_topk_metric_positions
+        metrics["sdft/topk_kl_forward"] = mean_kl_forward
+        metrics["sdft/topk_kl_reverse"] = mean_kl_reverse
+        metrics["sdft/topk_kl_sym"] = 0.5 * (mean_kl_forward + mean_kl_reverse)
 
     return new_datums, metrics
 
@@ -510,9 +702,20 @@ class Config:
     # SDFT-specific
     topk: int = 20
     demo_template: str = OPD_DEMO_TEMPLATE
+    chat_redo_message: str = OPD_REDO_MESSAGE
     system_prompt: str | None = None
     teacher_sync_every: int | None = None
     max_context_length: int = 32768
+
+    # Renderer overrides applied after construction. Reasoning models (Qwen3,
+    # Kimi K2, DeepSeek V3 thinking, ...) default to stripping ``<think>...
+    # </think>`` blocks from non-last assistant messages so that HF-style
+    # multi-turn prompts match the served chat template. SDFT teacher prompts
+    # always end with the ``redo`` user message, which means *every* assistant
+    # turn (including the golden demonstration) sits in history and would
+    # otherwise lose its thinking. Default ``False`` here so the teacher can
+    # actually attend to the golden chain-of-thought.
+    strip_thinking_from_history: bool = False
 
     # Evaluation
     evaluator_builders: list[SamplingClientEvaluatorBuilder] = chz.field(default_factory=list)
@@ -530,3 +733,12 @@ class Config:
 
     enable_trace: bool = False
     span_chart_every: int = 0
+
+    # Debug: free-form teacher rollout. When ``debug_teacher_rollout`` is True,
+    # the trainer asks the teacher to generate from ``teacher_prompts_P`` (the
+    # same prompt used for top-K teacher forcing) every
+    # ``debug_teacher_rollout_every`` steps and logs the decoded text alongside
+    # the student rollout. Costs ~1 extra teacher sample per problem per
+    # eligible step, so keep the cadence sparse.
+    debug_teacher_rollout: bool = True
+    debug_teacher_rollout_every: int = 1

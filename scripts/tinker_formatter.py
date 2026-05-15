@@ -7,18 +7,10 @@ import datasets
 
 from tinker_cookbook import renderers
 from tinker_cookbook.renderers.base import ToolCall
-from tinker_cookbook.rl.types import EnvGroupBuilder
+from tinker_cookbook.rl.types import EnvGroupBuilder, StepResult
 from tinker_cookbook.supervised.data import SupervisedDatasetFromHFDataset, conversation_to_datum
 from tinker_cookbook.supervised.types import ChatDatasetBuilder, SupervisedDataset
-
-try:
-    from functools import partial
-
-    from tinker_cookbook.distillation.datasets import PromptOnlyEnv
-    from tinker_cookbook.rl.problem_env import ProblemGroupBuilder
-except ImportError:
-    ProblemGroupBuilder = None  # type: ignore[assignment,misc]
-    PromptOnlyEnv = None  # type: ignore[assignment,misc]
+from tinker_cookbook.third_party.openai_compat import openai_tools_to_tinker
 
 
 _TOOL_NAME_RE = re.compile(r"^([A-Za-z_][\w]*)\(")
@@ -148,7 +140,7 @@ def chat_to_text(messages: list[dict]) -> str:
     parts: list[str] = []
     for msg in messages:
         role = msg["role"]
-        content = msg.get("content", "")
+        content = msg.get("content", "") or ""
         if msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
@@ -158,14 +150,60 @@ def chat_to_text(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _fold_thinking_into_content(msg: dict) -> dict:
+    """Move a top-level ``thinking`` field into the renderer's structured content.
+
+    The session/OPD JSON stores assistant chain-of-thought as a sibling key
+    (``msg["thinking"]``), but ``tinker_cookbook.renderers.Message`` only
+    recognizes thinking when it appears as a ``ThinkingPart`` inside
+    ``content``. Without this conversion the renderer silently drops the
+    reasoning, so neither the in-context history nor the golden demonstration
+    ever expose the chain-of-thought to the teacher / student.
+
+    Returns a new dict with the top-level ``thinking`` key removed; ``content``
+    becomes ``[ThinkingPart, TextPart]`` (or just ``[ThinkingPart]`` when the
+    visible content is empty). When ``content`` is already a structured list,
+    a ThinkingPart is only prepended if none is present.
+    """
+    if msg.get("role") != "assistant":
+        return {k: v for k, v in msg.items() if k != "thinking"}
+
+    thinking = msg.get("thinking")
+    if not isinstance(thinking, str) or not thinking.strip():
+        return {k: v for k, v in msg.items() if k != "thinking"}
+
+    new_msg = {k: v for k, v in msg.items() if k != "thinking"}
+    content = new_msg.get("content")
+    thinking_part = {"type": "thinking", "thinking": thinking}
+
+    if isinstance(content, list):
+        if not any(
+            isinstance(p, dict) and p.get("type") == "thinking" for p in content
+        ):
+            new_msg["content"] = [thinking_part, *content]
+        return new_msg
+
+    text = content if isinstance(content, str) else ""
+    if text:
+        new_msg["content"] = [thinking_part, {"type": "text", "text": text}]
+    else:
+        new_msg["content"] = [thinking_part]
+    return new_msg
+
+
 def _hydrate_tool_calls(conversation: list[dict]) -> list[dict]:
     """Convert plain-dict tool_calls to ToolCall pydantic objects for the renderer.
 
     Also strips ``tool_calls`` keys that Arrow set to ``None`` so the
-    renderer never encounters them.
+    renderer never encounters them, and folds any top-level ``thinking``
+    field into the structured content list (see
+    :func:`_fold_thinking_into_content`).
     """
     out = []
     for msg in conversation:
+        msg = _fold_thinking_into_content(dict(msg))
+        if msg.get("content") is None:
+            msg["content"] = ""
         if msg.get("tool_calls"):
             msg = {
                 **msg,
@@ -184,6 +222,27 @@ def _hydrate_tool_calls(conversation: list[dict]) -> list[dict]:
             msg = {k: v for k, v in msg.items() if k != "tool_calls"}
         out.append(msg)
     return out
+
+
+def _prepare_messages_with_tools(
+    renderer: renderers.Renderer,
+    messages: list[dict],
+    tool_schemas: list[dict] | None,
+) -> list[renderers.Message]:
+    """Inject OpenAI-format tool schemas using the renderer-native tool prefix."""
+    normalized: list[renderers.Message] = _hydrate_tool_calls([dict(msg) for msg in messages])  # type: ignore[list-item]
+    if not tool_schemas:
+        return normalized
+
+    tool_specs = openai_tools_to_tinker(tool_schemas)
+    system_prompt = ""
+    remaining = normalized
+    if normalized and normalized[0].get("role") == "system":
+        content = normalized[0].get("content") or ""
+        system_prompt = content if isinstance(content, str) else ""
+        remaining = normalized[1:]
+
+    return renderer.create_conversation_prefix_with_tools(tool_specs, system_prompt) + remaining
 
 
 @chz.chz
@@ -260,6 +319,83 @@ class DPODataBuilder(ChatDatasetBuilder):
         return train_dataset, test_dataset
 
 
+def _opd_build_unit(
+    unit: dict, system_prompt: str | None, tool_schemas: list[dict] | None
+) -> dict | None:
+    """Convert a learning unit into ``{student_prompt, golden_answer, tool_schemas}``.
+
+    Prefers an LLM-generated ``summary`` (string) as the golden response, which
+    represents the user's final intent across all remaining follow-up actions.
+    Falls back to the original ``response_messages`` (one or more
+    assistant/tool turns produced after the trigger) when no ``summary`` is
+    present.
+
+    The leading ``user_messages`` (typically the task instruction for
+    ``sub_index=0`` units) are appended to ``student_prompt`` so the student
+    rollout actually sees what it's being asked to do. ``golden_answer``
+    therefore contains only the assistant turn(s); the teacher prompt assembled
+    by :func:`build_sdft_teacher_prompt` is ``student_prompt + golden_answer +
+    [redo]``, which still ends up as ``system + history + user + golden +
+    redo`` -- structurally identical to the previous formulation, but now the
+    student is conditioned on the same user message the teacher sees.
+
+    Continuation sub-units (one assistant turn after a tool result) are
+    skipped: their student prompt would end with a tool result rather than a
+    user request, the teacher prompt's user-request relocation has nothing to
+    relocate, and the gradient signal at those positions is dominated by
+    template tokens that the student already matches.
+    """
+    if unit.get("is_continuation"):
+        return None
+    history = unit.get("history") or []
+    user_messages = [m for m in (unit.get("user_messages") or []) if m]
+    if not user_messages and history:
+        return None
+    summary = unit.get("summary")
+
+    if isinstance(summary, str) and summary.strip():
+        teacher_demo: list[dict] = [
+            {"role": "assistant", "content": summary.strip()}
+        ]
+    else:
+        followup_actions = unit.get("followup_actions") or []
+        followup_texts = [
+            a["prompt"].strip()
+            for a in followup_actions
+            if isinstance(a, dict)
+            and a.get("type") == "follow_up"
+            and isinstance(a.get("prompt"), str)
+            and a["prompt"].strip()
+        ]
+        teacher_demo: list[dict] = [
+            {"role": "user", "content": text} for text in followup_texts
+        ]
+
+    if not teacher_demo:
+        return None
+
+    # A unit must have at least *some* signal beyond the system prompt: either
+    # a user message that anchors the prompt, an assistant response in the
+    # demo, or a non-empty history that pins the prediction position.
+    if not user_messages and not history and not any(
+        m.get("role") == "assistant" for m in teacher_demo
+    ):
+        return None
+
+    student_prompt: list[dict] = []
+    if system_prompt:
+        student_prompt.append({"role": "system", "content": system_prompt})
+    student_prompt.extend(history)
+    student_prompt.extend({"role": "user", "content": um} for um in user_messages)
+
+    return {
+        "student_prompt": student_prompt,
+        "golden_answer": teacher_demo,   # used by build_sdft_teacher_prompt
+        "tool_schemas": tool_schemas,
+        "uses_summary": isinstance(summary, str) and bool(summary.strip()),
+    }
+
+
 @chz.chz
 class OPDDataBuilder:
 
@@ -283,40 +419,33 @@ class OPDDataBuilder:
             return units
         return []
 
+    @staticmethod
+    def _build_unit(unit: dict, system_prompt: str | None, tool_schemas: list[dict] | None) -> dict | None:
+        return _opd_build_unit(unit, system_prompt, tool_schemas)
+
     def _load(self, path: str) -> list[dict]:
         with open(path, "r") as f:
             raw = json.load(f)
-        rows = []
-        # student_prompt = [
-        #     {
-        #         "role": "user",
-        #         "content": raw["initial_message"]["steps"][0]["action"].strip("message(").strip(")"),
-        #     }
-        # ]
-        units = self._load_units(raw)
-        units = units[1:]
-        for unit in units:
-            question = "\n".join(unit["user_messages"])
-            golden_answer = chat_to_text(traj_to_chat(unit["human_trajectory"]))
-            student_prompt = [{"role": "user", "content": msg} for msg in unit["user_messages"]]
-            teacher_prompt = student_prompt + [
-                {
-                    "role": "user",
-                    "content": (
-                        "Here is the user's response after the original agent's "
-                        "response was executed. Please use this to improve your "
-                        "response:\n" + golden_answer
-                    ),
-                }
-            ]
-            rows.append(
-                {
-                    "student_prompt": student_prompt,
-                    "teacher_prompt": teacher_prompt,
-                    "question": question,
-                    "golden_answer": golden_answer,
-                }
-            )
+        rows: list[dict] = []
+        if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
+            for session in raw["sessions"]:
+                if not isinstance(session, dict):
+                    continue
+                system_prompt = session.get("system_prompt")
+                tool_schemas = session.get("tool_schemas")
+                for unit in self._load_units(session):
+                    row = self._build_unit(unit, system_prompt, tool_schemas)
+                    if row is not None:
+                        rows.append(row)
+            return rows
+
+        system_prompt = raw.get("system_prompt") if isinstance(raw, dict) else None
+        tool_schemas = raw.get("tool_schemas") if isinstance(raw, dict) else None
+        for unit in self._load_units(raw):
+            row = self._build_unit(unit, system_prompt, tool_schemas)
+            if row is not None:
+                rows.append(row)
+
         return rows
 
     def __call__(
@@ -326,12 +455,14 @@ class OPDDataBuilder:
         group_size: int = 1,
     ) -> "OPDSDFTDataset":
         rows = self._load(self.train_path)
-        questions = [r["question"] for r in rows]
+        questions = [r["student_prompt"] for r in rows]
         golden_answers = [r["golden_answer"] for r in rows]
+        tool_schemas_by_question = [r.get("tool_schemas") for r in rows]
         return OPDSDFTDataset(
             questions=questions,
             golden_answers=golden_answers,
             renderer=renderer,
+            tool_schemas_by_question=tool_schemas_by_question,
             batch_size=batch_size,
             group_size=group_size,
         )
@@ -348,9 +479,11 @@ class OPDSDFTDataset:
 
     def __init__(
         self,
-        questions: list[str],
+        questions: list[list[dict]],  # list of OpenAI-style chat messages
         golden_answers: list[str],
         renderer: renderers.Renderer,
+        tool_schemas: list[dict] | None = None,
+        tool_schemas_by_question: list[list[dict] | None] | None = None,
         batch_size: int = 4,
         group_size: int = 1,
     ):
@@ -362,6 +495,14 @@ class OPDSDFTDataset:
         self._questions = questions
         self._golden_answers = golden_answers
         self._renderer = renderer
+        if tool_schemas_by_question is not None:
+            if len(tool_schemas_by_question) != len(questions):
+                raise ValueError(
+                    "tool_schemas_by_question must have one entry per question"
+                )
+            self._tool_schemas_by_question = tool_schemas_by_question
+        else:
+            self._tool_schemas_by_question = [tool_schemas for _ in questions]
         self._batch_size = batch_size
         self._group_size = group_size
 
@@ -382,6 +523,12 @@ class OPDSDFTDataset:
                     units.extend(u for u in lu if isinstance(u, dict))
             return units
         return []
+    
+    @staticmethod
+    def _build_unit(
+        unit: dict, system_prompt: str | None, tool_schemas: list[dict] | None
+    ) -> dict | None:
+        return _opd_build_unit(unit, system_prompt, tool_schemas)
 
     @classmethod
     def from_json(
@@ -391,28 +538,41 @@ class OPDSDFTDataset:
         batch_size: int = 4,
         group_size: int = 1,
     ) -> "OPDSDFTDataset":
-        """Load OPD data from a JSON file.
-
-        Skips ``learning_units[0]`` (the initial attempt with no prior
-        human correction to distil from).
-        """
+        """Load OPD data from a JSON file."""
         with open(data_path, "r") as f:
             raw = json.load(f)
 
-        questions: list[str] = []
-        golden_answers: list[str] = []
+        questions: list[list[dict]] = []
+        golden_answers: list[list[dict]] = []
+        tool_schemas_by_question: list[list[dict] | None] = []
 
-        units = cls._load_units(raw)
-        for unit in units[1:]:
-            questions.append("\n".join(unit["user_messages"]))
-            golden_answers.append(
-                chat_to_text(traj_to_chat(unit["human_trajectory"]))
-            )
+        def _consume(unit: dict, system_prompt: str | None, tool_schemas: list[dict] | None) -> None:
+            row = cls._build_unit(unit, system_prompt, tool_schemas)
+            if row is None:
+                return
+            questions.append(row["student_prompt"])
+            golden_answers.append(row["golden_answer"])
+            tool_schemas_by_question.append(row.get("tool_schemas"))
+
+        if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
+            for session in raw["sessions"]:
+                if not isinstance(session, dict):
+                    continue
+                system_prompt = session.get("system_prompt")
+                tool_schemas = session.get("tool_schemas")
+                for unit in cls._load_units(session):
+                    _consume(unit, system_prompt, tool_schemas)
+        else:
+            system_prompt = raw.get("system_prompt") if isinstance(raw, dict) else None
+            tool_schemas = raw.get("tool_schemas") if isinstance(raw, dict) else None
+            for unit in cls._load_units(raw):
+                _consume(unit, system_prompt, tool_schemas)
 
         return cls(
             questions=questions,
             golden_answers=golden_answers,
             renderer=renderer,
+            tool_schemas_by_question=tool_schemas_by_question,
             batch_size=batch_size,
             group_size=group_size,
         )
@@ -426,35 +586,41 @@ class OPDSDFTDataset:
 
     def get_batch(
         self, index: int
-    ) -> tuple[Sequence[EnvGroupBuilder], list[str], list[str]]:
+    ) -> tuple[Sequence[EnvGroupBuilder], list[list[renderers.Message]], list[str]]:
         # Wrap so training can run multiple epochs (``tinker_opd`` uses ``index`` up to
         # ``len(dataset) * epochs - 1``) without empty batches past the first epoch.
         idx = index % self._num_batch_slots()
         start = idx * self._batch_size
         end = min(start + self._batch_size, len(self._questions))
 
-        batch_questions = self._questions[start:end]
+        raw_batch_questions = self._questions[start:end]
+        batch_tool_schemas = self._tool_schemas_by_question[start:end]
+        batch_questions = [
+            self._prepare_question(q, tool_schemas)
+            for q, tool_schemas in zip(raw_batch_questions, batch_tool_schemas)
+        ]
         batch_golden = self._golden_answers[start:end]
         builders: list[EnvGroupBuilder] = [
             self._make_builder(q) for q in batch_questions
         ]
         return builders, batch_questions, batch_golden
 
-    def _make_builder(self, question: str) -> EnvGroupBuilder:
+    def _prepare_question(
+        self, question: list[dict], tool_schemas: list[dict] | None
+    ) -> list[renderers.Message]:
+        return _prepare_messages_with_tools(self._renderer, question, tool_schemas)
+
+    def _make_builder(self, question: list[renderers.Message]) -> EnvGroupBuilder:
         """Create an EnvGroupBuilder for a single student prompt.
 
-        Prefers the cookbook's ``ProblemGroupBuilder`` / ``PromptOnlyEnv``
-        when available, otherwise falls back to a local minimal builder.
+        Uses a local builder because the cookbook's ``PromptOnlyEnv`` expects a
+        string question, while OPD passes an already-rendered ``ModelInput``.
         """
-        if ProblemGroupBuilder is not None and PromptOnlyEnv is not None:
-            return ProblemGroupBuilder(
-                env_thunk=partial(PromptOnlyEnv, question, self._renderer),
-                num_envs=self._group_size,
-                dataset_name="opd",
-            )
+        prompt = self._renderer.build_generation_prompt(question)
+
         return _OPDEnvGroupBuilder(
-            question=question,
-            renderer=self._renderer,
+            prompt=prompt,
+            stop_condition=self._renderer.get_stop_sequences(),
             group_size=self._group_size,
         )
 
@@ -576,22 +742,18 @@ class _OPDEnvGroupBuilder(EnvGroupBuilder):
 
     def __init__(
         self,
-        question: str,
-        renderer: renderers.Renderer,
+        prompt: object,
+        stop_condition: object,
         group_size: int = 1,
     ):
-        self._question = question
-        self._renderer = renderer
+        self._prompt = prompt
+        self._stop_condition = stop_condition
         self._group_size = group_size
 
     async def make_envs(self) -> Sequence:
-        messages: list[renderers.Message] = [
-            {"role": "user", "content": self._question}  # type: ignore[typeddict-item]
-        ]
-        prompt = self._renderer.build_generation_prompt(messages)
         envs = []
         for _ in range(self._group_size):
-            envs.append(_PromptOnlyEnv(prompt))
+            envs.append(_PromptOnlyEnv(self._prompt, self._stop_condition))
         return envs
 
     def logging_tags(self) -> list[str]:
@@ -606,17 +768,19 @@ class _PromptOnlyEnv:
     from ``tinker_cookbook.rl.types``.
     """
 
-    def __init__(self, prompt: object):
+    def __init__(self, prompt: object, stop_condition: object):
         self._prompt = prompt
-        self._done = False
+        self._stop_condition = stop_condition
 
-    def get_initial_observation(self) -> object:
-        return self._prompt
+    async def initial_observation(self) -> tuple[object, object]:
+        return self._prompt, self._stop_condition
 
-    async def step(self, action: object) -> tuple[object | None, float, bool, dict]:
-        self._done = True
-        return None, 0.0, True, {}
-
-    async def reset(self) -> object:
-        self._done = False
-        return self._prompt
+    async def step(self, action: object, *, extra: object | None = None) -> StepResult:
+        return StepResult(
+            reward=0.0,
+            episode_done=True,
+            next_observation=self._prompt,  # Unused after terminal transition.
+            next_stop_condition=self._stop_condition,
+            metrics={},
+            logs={},
+        )

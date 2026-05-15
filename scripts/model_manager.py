@@ -114,6 +114,7 @@ class ModelUpdate:
     base_model: str | None
     renderer_name: str | None
     mode: str
+    state_path: str | None = None
     updated_at: float = field(default_factory=time.time)
 
     def to_event(self) -> dict:
@@ -177,6 +178,9 @@ class ModelManager:
         # slug -> model path (either "org/Model" for a base model or
         # "tinker://..." for a saved checkpoint).
         self.models: dict[str, str] = {}
+        # sampler checkpoint path -> training state checkpoint path. Inference
+        # uses sampler paths; create_training_client_from_state needs state paths.
+        self.training_state_paths: dict[str, str] = {}
         # The currently "active" model path (base or checkpoint). Updated
         # when a chat completion selects a slug and after a successful
         # training round swaps in a new checkpoint.
@@ -271,10 +275,25 @@ class ModelManager:
         """
         self.model_path = model_path
 
-    def register_checkpoint(self, slug: str, model_path: str) -> None:
-        """Add a newly produced checkpoint to the registry and persist."""
+    def register_checkpoint(self, slug: str, model_path: str, state_path: str | None = None) -> None:
+        """Add a newly produced sampler checkpoint to the registry and persist."""
         self.models[slug] = model_path
+        if state_path is not None:
+            self.training_state_paths[model_path] = state_path
         self.save_state()
+
+    def training_state_path_for(self, model_path: str) -> str | None:
+        """Return the resumable training state path for a sampler checkpoint."""
+        state_path = self.training_state_paths.get(model_path)
+        if state_path is not None:
+            return state_path
+
+        # Backfill checkpoints saved before state paths were persisted. Tinker
+        # uses sibling namespaces for resumable state and sampler weights.
+        if "/sampler_weights/" in model_path:
+            return model_path.replace("/sampler_weights/", "/weights/", 1)
+
+        return None
 
     def next_slug(self, mode: str) -> str:
         """Compute the next available ``<base>-<mode>-vN`` slug.
@@ -637,12 +656,19 @@ class ModelManager:
             return
 
         self.models.update(state.get("models", {}))
+        self.training_state_paths.update(state.get("training_state_paths", {}))
         self.latest_update = state.get("latest_update")
+        if self.latest_update is not None:
+            model_path = self.latest_update.get("model_path")
+            state_path = self.latest_update.get("state_path")
+            if model_path and state_path:
+                self.training_state_paths.setdefault(model_path, state_path)
         self.model_path = state.get("model_path")
         log.info(
-            "Loaded state from %s: %d model slugs, model_path=%s, latest_update=%s",
+            "Loaded state from %s: %d model slugs, %d training states, model_path=%s, latest_update=%s",
             self._state_path,
             len(self.models),
+            len(self.training_state_paths),
             self.model_path,
             "present" if self.latest_update is not None else "none",
         )
@@ -651,6 +677,7 @@ class ModelManager:
         Path(self._state_path).parent.mkdir(parents=True, exist_ok=True)
         state = {
             "models": self.models,
+            "training_state_paths": self.training_state_paths,
             "latest_update": self.latest_update,
             "model_path": self.model_path,
         }
@@ -661,9 +688,10 @@ class ModelManager:
             log.exception("Failed to save state to %s", self._state_path)
             return
         log.info(
-            "Saved state to %s: %d model slugs, model_path=%s, latest_update=%s",
+            "Saved state to %s: %d model slugs, %d training states, model_path=%s, latest_update=%s",
             self._state_path,
             len(self.models),
+            len(self.training_state_paths),
             self.model_path,
             "present" if self.latest_update is not None else "none",
         )

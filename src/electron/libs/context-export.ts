@@ -191,6 +191,8 @@ export async function postSessionToTrainer(
         sessionId,
         "--output",
         fullJsonPath,
+        "--format",
+        "weight",
       ],
       { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
     );

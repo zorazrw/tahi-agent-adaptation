@@ -4,6 +4,7 @@ import torch
 import logging
 import datetime
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,18 @@ from tinker_opd import (
 )
 
 
+@dataclass(frozen=True)
+class TrainingCheckpoint:
+    """Checkpoint paths produced by a training round.
+
+    ``sampler_path`` is servable by inference. ``state_path`` is resumable by
+    ``create_training_client_from_state``.
+    """
+
+    sampler_path: str
+    state_path: str
+
+
 class Trainer():
     """Base class for long-lived online-RL trainers.
 
@@ -64,7 +77,7 @@ class Trainer():
     it's deliberately not part of the base contract.
     """
 
-    async def do_update(self, dataset: SupervisedDataset) -> str:
+    async def do_update(self, dataset: SupervisedDataset) -> TrainingCheckpoint:
         raise NotImplementedError("Subclass must implement do_update")
     
     async def save_state(self):
@@ -142,14 +155,14 @@ class REINFORCETrainer(Trainer):
     async def do_update(
         self,
         dataset: SupervisedDataset,
-    ) -> str:
+    ) -> TrainingCheckpoint:
         """Run ``num_epochs`` passes over ``dataset`` and save a checkpoint.
 
         The dataset is expected to expose ``get_batch(i)`` (standard
         ``SupervisedDataset`` interface) as well as ``get_batch_rewards(i)``,
         which :class:`~tinker_formatter.ReinforceDataset` provides.
 
-        Returns the sampler path of the final checkpoint produced this round.
+        Returns sampler and state paths for the final checkpoint produced this round.
         """
         self.round_idx += 1
         n_batches = len(dataset)
@@ -182,7 +195,7 @@ class REINFORCETrainer(Trainer):
             f"{self.config.model_name.split('/')[-1]}_"
             f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
-        await checkpoint_utils.save_checkpoint_async(
+        paths = await checkpoint_utils.save_checkpoint_async(
             training_client=self.training_client,
             name=save_name,
             log_path=self.config.log_path,
@@ -195,12 +208,13 @@ class REINFORCETrainer(Trainer):
             self.round_idx, self.step_idx - round_start_step, self.step_idx, self.baseline,
         )
 
-        last = checkpoint_utils.get_last_checkpoint(self.config.log_path)
-        if last is None or last.sampler_path is None:
+        sampler_path = paths.get("sampler_path")
+        state_path = paths.get("state_path")
+        if sampler_path is None or state_path is None:
             raise RuntimeError(
-                f"Round {self.round_idx} produced no sampler path in {self.config.log_path}"
+                f"Round {self.round_idx} produced incomplete checkpoint paths in {self.config.log_path}: {paths}"
             )
-        return last.sampler_path
+        return TrainingCheckpoint(sampler_path=sampler_path, state_path=state_path)
 
     async def step(
         self,
@@ -363,7 +377,7 @@ class DPOTrainer(Trainer):
     async def do_update(
         self, 
         dataset: SupervisedDataset,
-    ) -> str:
+    ) -> TrainingCheckpoint:
         """Run ``num_epochs`` passes over the incoming ``dataset`` and save a checkpoint.
 
         In online RL this is called once per arriving batch of session data.
@@ -372,8 +386,7 @@ class DPOTrainer(Trainer):
         read ``get_last_checkpoint`` here because the disk state can only
         ever be stale relative to the live ``TrainingClient``.
 
-        Returns the sampler path of the checkpoint produced by this round
-        so the server can flip the active model onto it.
+        Returns sampler and state paths for the checkpoint produced by this round.
         """
         self.round_idx += 1
         n_batches = len(dataset)
@@ -408,7 +421,7 @@ class DPOTrainer(Trainer):
             f"{self.config.model_name.split('/')[-1]}_"
             f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
-        await checkpoint_utils.save_checkpoint_async(
+        paths = await checkpoint_utils.save_checkpoint_async(
             training_client=self.training_client,
             name=save_name,
             log_path=self.config.log_path,
@@ -421,12 +434,13 @@ class DPOTrainer(Trainer):
             self.round_idx, self.step_idx - round_start_step, self.step_idx,
         )
 
-        last = checkpoint_utils.get_last_checkpoint(self.config.log_path)
-        if last is None or last.sampler_path is None:
+        sampler_path = paths.get("sampler_path")
+        state_path = paths.get("state_path")
+        if sampler_path is None or state_path is None:
             raise RuntimeError(
-                f"Round {self.round_idx} produced no sampler path in {self.config.log_path}"
+                f"Round {self.round_idx} produced incomplete checkpoint paths in {self.config.log_path}: {paths}"
             )
-        return last.sampler_path
+        return TrainingCheckpoint(sampler_path=sampler_path, state_path=state_path)
         
     async def step(
         self,
@@ -661,6 +675,18 @@ class OPDTrainer(Trainer):
             "OPDTrainer requires config.renderer_name (resolve before constructing the trainer)"
         )
         self.renderer = renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
+        # Reasoning-aware renderers (Qwen3, Kimi K2, DeepSeek V3 thinking, ...)
+        # carry a per-instance ``strip_thinking_from_history`` flag controlling
+        # whether ``<think>...</think>`` survives in non-last assistant
+        # messages. Surface OPDConfig.strip_thinking_from_history here so the
+        # SDFT teacher can attend to the golden answer's chain-of-thought.
+        if hasattr(self.renderer, "strip_thinking_from_history"):
+            self.renderer.strip_thinking_from_history = config.strip_thinking_from_history
+            self.logger.info(
+                "Renderer %s: strip_thinking_from_history=%s",
+                type(self.renderer).__name__,
+                config.strip_thinking_from_history,
+            )
 
         # Evaluators run every ``eval_every`` steps against the student
         # sampling client (same semantics as tinker_opd.main).
@@ -706,13 +732,14 @@ class OPDTrainer(Trainer):
     async def do_update(
         self,
         dataset: SDFTBatchProvider,
-    ) -> str:
+        num_epochs: int,
+    ) -> TrainingCheckpoint:
         """Run one pass over the incoming batches and save a checkpoint.
 
         OPD's ``Config`` has no ``num_epochs`` -- each batch is consumed
         exactly once per round (matching ``tinker_opd.main``). The per-round
-        sampler checkpoint follows the same naming / return conventions as
-        DPO and REINFORCE so the server can swap onto it uniformly.
+        sampler checkpoint follows the same naming conventions as DPO and
+        REINFORCE. The paired state checkpoint lets the server resume training.
         """
         await self._ensure_sampling_client()
 
@@ -724,14 +751,16 @@ class OPDTrainer(Trainer):
             "Round %d: step_idx=%d, n_batches=%d",
             self.round_idx, self.step_idx, n_batches,
         )
-
-        for batch_idx in range(n_batches):
-            if (
-                self.config.max_steps is not None
-                and self.step_idx >= self.config.max_steps
-            ):
-                break
-            await self.step(epoch_idx=0, batch_idx=batch_idx, dataset=dataset)
+        
+        self.logger.info(f"Training for {num_epochs} epochs")
+        for epoch_idx in range(num_epochs):
+            for batch_idx in range(n_batches):
+                if (
+                    self.config.max_steps is not None
+                    and self.step_idx >= self.config.max_steps
+                ):
+                    break
+                await self.step(epoch_idx=epoch_idx, batch_idx=batch_idx, dataset=dataset)
 
         # Final sampler-ready checkpoint for the server to swap onto. Same
         # rationale as DPOTrainer: always produce one, even if max_steps
@@ -741,7 +770,7 @@ class OPDTrainer(Trainer):
             f"{self.config.model_name.split('/')[-1]}_"
             f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
-        await checkpoint_utils.save_checkpoint_async(
+        paths = await checkpoint_utils.save_checkpoint_async(
             training_client=self.training_client,
             name=save_name,
             log_path=self.config.log_path,
@@ -754,12 +783,13 @@ class OPDTrainer(Trainer):
             self.round_idx, self.step_idx - round_start_step, self.step_idx,
         )
 
-        last = checkpoint_utils.get_last_checkpoint(self.config.log_path)
-        if last is None or last.sampler_path is None:
+        sampler_path = paths.get("sampler_path")
+        state_path = paths.get("state_path")
+        if sampler_path is None or state_path is None:
             raise RuntimeError(
-                f"Round {self.round_idx} produced no sampler path in {self.config.log_path}"
+                f"Round {self.round_idx} produced incomplete checkpoint paths in {self.config.log_path}: {paths}"
             )
-        return last.sampler_path
+        return TrainingCheckpoint(sampler_path=sampler_path, state_path=state_path)
 
     async def step(
         self,
@@ -834,10 +864,6 @@ class OPDTrainer(Trainer):
                 advantages_P = compute_advantages(trajectory_groups_P)
                 data_D, metadata_D = assemble_training_data(trajectory_groups_P, advantages_P)
 
-            # Log one example on the very first step of the trainer's life
-            if step == 0 and data_D:
-                self.logger.info(colorize_example(data_D[0], self.tokenizer, key="mask"))
-
             # Teacher prompts: one per problem, conditioned on the golden answer.
             teacher_prompts_P = [
                 build_sdft_teacher_prompt(
@@ -846,9 +872,65 @@ class OPDTrainer(Trainer):
                     renderer=self.renderer,
                     system_prompt=self.config.system_prompt,
                     demo_template=self.config.demo_template,
+                    chat_redo_message=self.config.chat_redo_message,
                 )
                 for question, golden_answer in zip(questions_P, golden_answers_P)
             ]
+            
+            # Log rollouts and teacher prompts 
+            for idx, datum in enumerate(data_D):
+                self.logger.info(f"Example {idx}: ")
+                self.logger.info("Student rollout: ")
+                self.logger.info(colorize_example(datum, self.tokenizer, key="mask"))
+                self.logger.info("Teacher prompt: ")
+                teacher_prompt = self.renderer.tokenizer.decode(teacher_prompts_P[idx].to_ints())
+                self.logger.info(teacher_prompt)
+
+            # Optional: free-form teacher rollout for debugging. The teacher
+            # samples from ``teacher_prompts_P`` (which already includes the
+            # golden answer + redo) so we can eyeball whether the teacher's
+            # "ideal" generation actually matches what we want the student to
+            # learn. Gated behind a config flag + cadence to bound extra cost.
+            do_teacher_rollout = (
+                getattr(self.config, "debug_teacher_rollout", False)
+                and self.teacher_client is not None
+                and len(teacher_prompts_P) > 0
+                and (
+                    getattr(self.config, "debug_teacher_rollout_every", 0) <= 0
+                    or step % self.config.debug_teacher_rollout_every == 0
+                )
+            )
+            if do_teacher_rollout:
+                async with trace.scope_span("debug_teacher_sample"):
+                    teacher_sampling_params = tinker.SamplingParams(
+                        max_tokens=self.config.max_tokens,
+                        temperature=self.config.temperature,
+                        stop=self.renderer.get_stop_sequences(),
+                    )
+                    teacher_samples_P = await asyncio.gather(
+                        *[
+                            self.teacher_client.sample_async(
+                                prompt=tp,
+                                num_samples=1,
+                                sampling_params=teacher_sampling_params,
+                            )
+                            for tp in teacher_prompts_P
+                        ]
+                    )
+                for idx, resp in enumerate(teacher_samples_P):
+                    sequences = getattr(resp, "sequences", None) or []
+                    if not sequences:
+                        self.logger.info(f"Teacher rollout (Example {idx}): <empty>")
+                        continue
+                    out_tokens = list(getattr(sequences[0], "tokens", []) or [])
+                    stop_reason = getattr(sequences[0], "stop_reason", None)
+                    out_text = self.renderer.tokenizer.decode(out_tokens)
+                    self.logger.info(
+                        f"Teacher rollout (Example {idx}, "
+                        f"n_tokens={len(out_tokens)}, stop={stop_reason}): "
+                    )
+                    self.logger.info("Teacher rollout: ")
+                    self.logger.info(out_text)
 
             if self.config.topk > 0:
                 # Top-K CE distillation (the validated path).
@@ -858,6 +940,7 @@ class OPDTrainer(Trainer):
                         metadata_D,
                         self.teacher_client,
                         teacher_prompts_P,
+                        student_client=self.sampling_client,
                         topk=self.config.topk,
                         max_context_length=self.config.max_context_length,
                         vocab_size=len(self.tokenizer),
@@ -865,7 +948,7 @@ class OPDTrainer(Trainer):
                 metrics.update(topk_metrics)
 
                 async with trace.scope_span("train"):
-                    await train_step(
+                    training_logprobs_D = await train_step(
                         data_D=topk_datums,
                         training_client=self.training_client,
                         learning_rate=self.config.learning_rate,
@@ -873,6 +956,9 @@ class OPDTrainer(Trainer):
                         loss_fn="cross_entropy",
                         metrics=metrics,
                     )
+                    
+                # Compute loss and log it
+                
             else:
                 # Importance-sampling fallback (topk=0): compute per-token
                 # teacher_lp - student_lp advantages, then train with the

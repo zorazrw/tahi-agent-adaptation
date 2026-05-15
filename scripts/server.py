@@ -28,6 +28,12 @@ import session_export_common as s
 from export_opd_data import _session as _opd_session
 from export_dpo_data import _session as _dpo_session
 from export_reinforce_data import _session as _reinforce_session
+from summarize_followups import (
+    SYSTEM_PROMPT as SUMMARIZE_SYSTEM_PROMPT,
+    _annotate_session_async as _summarize_annotate_session_async,
+    _load_cache as _summarize_load_cache,
+    _make_client as _summarize_make_client,
+)
 from tinker_cookbook import renderers
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
@@ -37,7 +43,7 @@ from tinker_reinforce import Config as ReinforceConfig
 from tinker_formatter import DPODataBuilder, OPDSDFTDataset, ReinforceDataBuilder
 
 from model_manager import ModelManager, ModelUpdate
-from trainer import DPOTrainer, OPDTrainer, REINFORCETrainer, Trainer
+from trainer import DPOTrainer, OPDTrainer, REINFORCETrainer, Trainer, TrainingCheckpoint
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -72,6 +78,21 @@ class Config:
     opd_temperature: float = 1.0
     opd_topk: int = 20
     opd_max_context_length: int = 32768
+
+    # -- OPD follow-up summarization (LLM-generated golden) --
+    # When enabled, every freshly-exported session has its learning units
+    # annotated with a ``summary`` string built by ``summarize_followups``
+    # before it joins the training queue. ``OPDSDFTDataset`` then prefers
+    # the summary as the in-context golden answer over the raw response
+    # messages. Requires ``OPENAI_API_KEY`` (and optionally
+    # ``OPENAI_BASE_URL``) to be set in the environment; otherwise the
+    # session is enqueued un-summarized and the trainer falls back to the
+    # original assistant turns.
+    summarize_followups: bool = True
+    summarize_model: str = "gpt-4o-mini"
+    summarize_granularity: Literal["session", "task", "unit"] = "session"
+    summarize_concurrency: int = 8
+    summarize_cache_path: str = "summarize_followups.cache.json"
 
     # -- REINFORCE-specific --
     reward_alpha: float = 0.05
@@ -151,6 +172,25 @@ class Server:
         self.training_event = asyncio.Event()
         self.training_lock = asyncio.Lock()
 
+        # Lazy-initialized state for follow-up summarization. The
+        # AsyncOpenAI client is constructed on first use so that a missing
+        # ``OPENAI_API_KEY`` only matters when summarization actually runs
+        # (rather than failing the whole server at startup). A single cache
+        # file is shared across sessions so re-runs of the same content
+        # (e.g. after restart) are free.
+        self._summarize_cache_path: Path = Path(config.summarize_cache_path)
+        self._summarize_cache: dict[str, str] = (
+            _summarize_load_cache(self._summarize_cache_path)
+            if config.summarize_followups else {}
+        )
+        self._summarize_cache_lock = asyncio.Lock()
+        self._summarize_semaphore = asyncio.Semaphore(
+            max(1, int(config.summarize_concurrency))
+        )
+        self._summarize_client = None  # AsyncOpenAI | None, lazy
+        self._summarize_client_lock = asyncio.Lock()
+        self._summarize_disabled_reason: str | None = None
+
     def _build_app(self) -> FastAPI:
         app = FastAPI(title=self._TITLE, lifespan=lifespan)
         app.state.owner = self
@@ -161,23 +201,15 @@ class Server:
 
         @app.post("/session")
         async def _handle_session(request: Request):
-            body = await request.json()
-
+            body = (await request.json())[0]
+            
             session_id = body.get("uuid")
             name = body.get("name", "")
-            trajectory = body.get("trajectory")
-
-            if not isinstance(trajectory, list) or len(trajectory) == 0:
-                raise HTTPException(status_code=400, detail="trajectory must be a non-empty list")
-
-            await self.sessions_queue.put({
-                "uuid": session_id,
-                "name": name,
-                "trajectory": trajectory,
-            })
-
-            log.info("Session enqueued: id=%s name=%r steps=%d queue_depth=%d",
-                     session_id, name, len(trajectory), self.sessions_queue.qsize())
+            
+            await self.sessions_queue.put(body)
+            
+            log.info("Session enqueued: id=%s name=%r queue_depth=%d",
+                     session_id, name, self.sessions_queue.qsize())
             return {"ok": True, "session_id": session_id}
 
         @app.get("/v1/models")
@@ -274,6 +306,12 @@ class Server:
             except Exception:
                 log.exception("Failed to resolve renderer for %s; streaming without rewrite", model_path)
                 base_model, renderer_name = None, None
+                
+            print("=" * 80, flush=True)
+            print("CHAT COMPLETIONS REQUEST:", flush=True)
+            print(json.dumps(body, indent=2, default=str), flush=True)
+            print("=" * 80, flush=True)
+
 
             if base_model is not None:
                 # Fire-and-forget. If a warmup is already in flight, the
@@ -290,7 +328,7 @@ class Server:
             body["logprobs"] = self.config.logprobs
 
             client = self.model_manager.inference_client
-
+            
             if stream:
 
                 async def generate():
@@ -321,31 +359,107 @@ class Server:
 
         return app
 
+    async def _get_summarize_client(self):
+        """Return a shared :class:`openai.AsyncOpenAI` client, or ``None`` if unavailable.
+
+        The client is constructed lazily on first use so that a missing
+        ``OPENAI_API_KEY`` (or an absent ``openai`` install) only matters
+        when summarization actually runs. Failures are recorded once in
+        ``self._summarize_disabled_reason`` and then suppressed so the
+        per-session log lines aren't noisy.
+        """
+        if self._summarize_disabled_reason is not None:
+            return None
+        if self._summarize_client is not None:
+            return self._summarize_client
+        async with self._summarize_client_lock:
+            if self._summarize_client is not None:
+                return self._summarize_client
+            if not os.getenv("OPENAI_API_KEY"):
+                self._summarize_disabled_reason = "OPENAI_API_KEY not set"
+                log.warning(
+                    "Follow-up summarization disabled: %s",
+                    self._summarize_disabled_reason,
+                )
+                return None
+            try:
+                self._summarize_client = _summarize_make_client()
+            except Exception as e:
+                self._summarize_disabled_reason = f"client init failed: {e}"
+                log.warning(
+                    "Follow-up summarization disabled: %s",
+                    self._summarize_disabled_reason,
+                )
+                return None
+        return self._summarize_client
+
+    async def _summarize_session_inplace(self, session: dict) -> None:
+        """Best-effort: stamp ``summary`` onto ``session['learning_units']``.
+
+        Calls :func:`summarize_followups._annotate_session_async` under the
+        server-wide semaphore + cache. Any failure is logged and swallowed
+        so the trainer falls back to the raw response messages instead of
+        blocking the queue.
+        """
+        if not self.config.summarize_followups or self.config.mode != "opd":
+            return
+        if not session or not session.get("learning_units"):
+            return
+        client = await self._get_summarize_client()
+        if client is None:
+            return
+        try:
+            n_written, n_cached, n_skipped = await _summarize_annotate_session_async(
+                session,
+                client=client,
+                model=self.config.summarize_model,
+                system_prompt=SUMMARIZE_SYSTEM_PROMPT,
+                cache=self._summarize_cache,
+                cache_path=self._summarize_cache_path,
+                cache_lock=self._summarize_cache_lock,
+                dry_run=False,
+                overwrite=False,
+                semaphore=self._summarize_semaphore,
+                granularity=self.config.summarize_granularity,
+            )
+            log.info(
+                "Summarized session id=%s wrote=%d cached=%d skipped=%d granularity=%s",
+                session.get("uuid"), n_written, n_cached, n_skipped,
+                self.config.summarize_granularity,
+            )
+        except Exception:
+            log.exception(
+                "Follow-up summarization failed for session id=%s; "
+                "training will fall back to raw response messages",
+                session.get("uuid"),
+            )
+
     async def _process_sessions(self):
         loop = asyncio.get_running_loop()
         while True:
             session_data = await self.sessions_queue.get()
             try:
-                for session_blob in s.blobs(session_data):
-                    if self.config.mode == "dpo":
-                        data = await loop.run_in_executor(None, _dpo_session, session_blob)
-                    elif self.config.mode == "opd":
-                        data = await loop.run_in_executor(None, _opd_session, session_blob)
-                    elif self.config.mode == "reinforce":
-                        data = await loop.run_in_executor(None, _reinforce_session, session_blob)
-                    else:
-                        raise ValueError(f"Unknown training mode: {self.config.mode} (expected one of 'dpo', 'opd', 'reinforce')")
+                # for session_blob in s.blobs(session_data):
+                if self.config.mode == "dpo":
+                    data = await loop.run_in_executor(None, _dpo_session, session_data)
+                elif self.config.mode == "opd":
+                    data = await loop.run_in_executor(None, _opd_session, session_data)
+                elif self.config.mode == "reinforce":
+                    data = await loop.run_in_executor(None, _reinforce_session, session_data)
+                else:
+                    raise ValueError(f"Unknown training mode: {self.config.mode} (expected one of 'dpo', 'opd', 'reinforce')")
 
-                    if data:
-                        await self.training_queue.put(data)
-                        log.info("Session processed: id=%s mode=%s units=%d training_queue=%d/%d",
-                                session_data.get('uuid'), self.config.mode,
-                                len(data.get('learning_units', [])),
-                                self.training_queue.qsize(), self.config.update_every_n_sessions)
+                if data:
+                    await self._summarize_session_inplace(data)
+                    await self.training_queue.put(data)
+                    log.info("Session processed: id=%s mode=%s units=%d training_queue=%d/%d",
+                            session_data.get('uuid'), self.config.mode,
+                            len(data.get('learning_units', [])),
+                            self.training_queue.qsize(), self.config.update_every_n_sessions)
 
-                    # trigger training if the queue has reached the update threshold
-                    if self.training_queue.qsize() >= self.config.update_every_n_sessions:
-                        self.training_event.set()
+                # trigger training if the queue has reached the update threshold
+                if self.training_queue.qsize() >= self.config.update_every_n_sessions:
+                    self.training_event.set()
 
             except Exception:
                 log.exception("Session processing failed: id=%s mode=%s",
@@ -392,28 +506,41 @@ class Server:
                     # Gate inference while we swap in the new checkpoint.
                     self.model_manager.model_ready.clear()
                     try:
-                        log.info("Updating model path to %s", checkpoint)
-                        await self.model_manager.update_model_path(checkpoint, timeout=600.0)
+                        log.info("Updating model path to %s", checkpoint.sampler_path)
+                        await self.model_manager.update_model_path(checkpoint.sampler_path, timeout=600.0)
 
                         new_model_name = self.model_manager.next_slug(self.config.mode)
-                        self.model_manager.register_checkpoint(new_model_name, checkpoint)
-                        log.info("Model updated: name=%s path=%s", new_model_name, checkpoint)
+                        self.model_manager.register_checkpoint(
+                            new_model_name,
+                            checkpoint.sampler_path,
+                            state_path=checkpoint.state_path,
+                        )
+                        log.info(
+                            "Model updated: name=%s sampler_path=%s state_path=%s",
+                            new_model_name, checkpoint.sampler_path, checkpoint.state_path,
+                        )
 
                         # Broadcast to SSE subscribers so the Electron app can
                         # atomically rotate the Tinker provider config onto the
                         # new slug without polling.
                         try:
-                            base_model_name, renderer_name = self.model_manager.resolve_renderer(checkpoint)
+                            base_model_name, renderer_name = self.model_manager.resolve_renderer(
+                                checkpoint.sampler_path
+                            )
                         except Exception:
-                            log.exception("Failed to resolve renderer for %s; broadcasting without renderer", checkpoint)
+                            log.exception(
+                                "Failed to resolve renderer for %s; broadcasting without renderer",
+                                checkpoint.sampler_path,
+                            )
                             base_model_name, renderer_name = None, None
 
                         self.model_manager.broadcast(ModelUpdate(
                             slug=new_model_name,
-                            model_path=checkpoint,
+                            model_path=checkpoint.sampler_path,
                             base_model=base_model_name,
                             renderer_name=renderer_name,
                             mode=self.config.mode,
+                            state_path=checkpoint.state_path,
                         ))
                         # Persist the updated latest_update alongside the
                         # registry entry written by register_checkpoint.
@@ -421,12 +548,12 @@ class Server:
 
                     except TimeoutError:
                         log.error("Checkpoint %s never became ready, keeping previous model %s",
-                                checkpoint, prev_model)
+                                checkpoint.sampler_path, prev_model)
                     finally:
                         self.model_manager.model_ready.set()
 
                     log.info("Training complete: mode=%s sessions=%d model=%s (was %s)",
-                             self.config.mode, len(items), checkpoint, prev_model)
+                             self.config.mode, len(items), checkpoint.sampler_path, prev_model)
                 except Exception:
                     log.exception("Training failed: mode=%s sessions=%d",
                                   self.config.mode, len(items))
@@ -440,12 +567,21 @@ class Server:
         f.close()
         return f.name
 
-    def _check_if_use_checkpoint(self) -> bool:
-        # helper function to decide whether to start training from scratch or from the current model checkpoint
+    def _load_checkpoint_path_for_active_model(self) -> str | None:
+        """Return the resumable state path for the current active checkpoint."""
         model_path = self.model_manager.model_path
-        return bool(model_path and model_path.startswith("tinker://"))
+        if not model_path or not model_path.startswith("tinker://"):
+            return None
 
-    async def _train_round(self, items: list) -> str:
+        state_path = self.model_manager.training_state_path_for(model_path)
+        if state_path is None:
+            raise RuntimeError(
+                f"Active checkpoint {model_path!r} has no persisted training state path. "
+                "Select a base model or a checkpoint created after training_state_paths support was added."
+            )
+        return state_path
+
+    async def _train_round(self, items: list) -> TrainingCheckpoint:
         """Run one online training round using the persistent mode-specific Trainer.
 
         The Trainer is obtained via :meth:`ModelManager.get_trainer`, which
@@ -456,7 +592,7 @@ class Server:
         state, running baselines, etc. carry over.
 
         A fresh dataset is assembled from ``items`` every round and handed to
-        ``trainer.do_update``, which returns the sampler path of the
+        ``trainer.do_update``, which returns sampler and state paths for the
         checkpoint produced this round.
         """
         train_path = self._write_sessions_file(items)
@@ -465,7 +601,7 @@ class Server:
             if model_path is None:
                 raise RuntimeError("No active model; cannot run a training round")
             model_name, renderer_name = self.model_manager.resolve_renderer(model_path)
-            load_checkpoint_path = model_path if self._check_if_use_checkpoint() else None
+            load_checkpoint_path = self._load_checkpoint_path_for_active_model()
 
             if self.config.mode == "dpo":
                 dataset, build = self._prepare_dpo(train_path, model_name, renderer_name)
@@ -484,7 +620,10 @@ class Server:
                 build=build,
                 load_checkpoint_path=load_checkpoint_path,
             )
-            checkpoint = await trainer.do_update(dataset)
+            if self.config.mode == "opd":
+                checkpoint = await trainer.do_update(dataset, num_epochs=self.config.num_epochs)
+            else:
+                checkpoint = await trainer.do_update(dataset)
             return checkpoint
         finally:
             os.unlink(train_path)
