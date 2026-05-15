@@ -15,6 +15,7 @@ import {
 import type { AppPermissionResult, PiAssistantBlock, PiLlmDebugMessage, ServerEvent, StreamMessage } from "../types.js";
 import { runWithLlmDebugContext } from "./llm-debug.js";
 import { createPiManagers, createPiResourceLoader, createPiSessionManager } from "./pi-config.js";
+import { readMemoryForPrompt } from "./memory-store.js";
 import type { Session } from "./session-store.js";
 import { hydrateWorkflowTree, type RawWorkflowNode } from "./workflow-tree-utils.js";
 
@@ -392,8 +393,11 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     // This stays correct even if model/provider switches change session-file behavior.
     const shouldForceWorkflowPlan = regenerateWorkflow || !hasExistingWorkflowPlan(session);
     const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, shouldForceWorkflowPlan);
+    const memoryBlock = readMemoryForPrompt().trimEnd();
+    const workflowAppend = shouldForceWorkflowPlan ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : "";
+    const appendSystemPrompt = [memoryBlock, workflowAppend].filter(Boolean).join("\n\n") || undefined;
     const resourceLoader = await createPiResourceLoader(cwd, {
-      appendSystemPrompt: shouldForceWorkflowPlan ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : undefined,
+      appendSystemPrompt,
     });
     let planRegistered = false;
     let lastUsage: Record<string, unknown> | undefined;

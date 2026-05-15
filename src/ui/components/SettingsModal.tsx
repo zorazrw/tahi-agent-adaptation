@@ -990,6 +990,7 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
 /* ---------- Skills Panel ---------- */
 
 function SkillsPanel() {
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
@@ -1059,13 +1060,24 @@ function SkillsPanel() {
             type="checkbox"
             className="mt-0.5 h-4 w-4 accent-primary"
             checked={autoContextInduction}
-            onChange={(e) => setAutoContextInduction(e.target.checked)}
+            onChange={(e) => {
+              const next = e.target.checked;
+              setAutoContextInduction(next);
+              if (activeSessionId && typeof window !== "undefined" && window.electron?.sendClientEvent) {
+                window.electron.sendClientEvent({
+                  type: "session.setAutoContextInduction",
+                  payload: { sessionId: activeSessionId, autoContextInduction: next },
+                });
+              }
+            }}
           />
           <div>
             <div className="text-sm font-medium text-ink-800">Auto-generate memory and skill</div>
             <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
-              When enabled, the app runs context induction at workflow completion to generate new memory/skill entries.
-              When disabled, no automatic generation runs during task sessions.
+              When enabled, the app exports the task session and runs context induction after each completed
+              workflow step (and after follow-up verification turns), updating memory and skill markdown under
+              your app data folder. The Brain control shows activity while induction runs. When disabled, no
+              automatic generation runs during task sessions.
             </p>
           </div>
         </label>

@@ -66,6 +66,8 @@ Usage:
   AGENT_COWORK_DB=/path/to/sessions.db python export_task_sessions.py
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import copy

@@ -285,14 +285,12 @@ async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Pr
   }
 }
 
-function runPostSolverExport(sessionId: string, _nodeId: string): void {
+function runPostSolverExport(sessionId: string): void {
   const store = initializeSessions();
   const session = store.getSession(sessionId);
   if (!session) return;
 
-  const treeAfter = session.workflowTree;
-  const planFullyDone = Boolean(treeAfter?.length && treeAfter.every(isNodeFullyComplete));
-  if (planFullyDone && session.autoContextInduction) {
+  if (session.autoContextInduction) {
     runFullSessionExportAndExtract(sessionId);
   }
 }
@@ -306,7 +304,7 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
 
   broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
 
-  runPostSolverExport(sessionId, nodeId);
+  runPostSolverExport(sessionId);
 
   emit({
     type: "session.status",
@@ -322,7 +320,7 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
 /** After a free-form session.continue finishes: re-check verifiers + export; no nodeCompleted (runner already set status). */
 async function finalizeContinueWithVerification(sessionId: string, nodeId: string) {
   await runVerifierLabelingForNode(sessionId, nodeId);
-  runPostSolverExport(sessionId, nodeId);
+  runPostSolverExport(sessionId);
   const session = initializeSessions().getSession(sessionId);
   if (!session) return;
   emit({
@@ -841,6 +839,14 @@ export function handleClientEvent(event: ClientEvent) {
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid) {
       recordBrainEditAction(sid);
+    }
+    return;
+  }
+
+  if (event.type === "session.setAutoContextInduction") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid && sessions.getSession(sid)) {
+      sessions.updateSession(sid, { autoContextInduction: Boolean(event.payload.autoContextInduction) });
     }
     return;
   }
