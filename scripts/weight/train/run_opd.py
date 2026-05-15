@@ -50,6 +50,45 @@ from .formatter import OfflineOPDDataset
 logger = logging.getLogger(__name__)
 
 
+def _metrics_dict_from_result(metrics: Any) -> dict[str, Any]:
+    if isinstance(metrics, dict):
+        return dict(metrics)
+    try:
+        return dict(metrics.items())  # type: ignore[union-attr]
+    except Exception:
+        return {}
+
+
+def _count_topk_supervision_tokens(
+    topk_datums: list[tinker.Datum], topk: int | None = None,
+) -> int:
+    """Count supervised completion positions across a batch.
+
+    Top-K datums store weights as a flattened ``(N, K)`` float tensor. The naive
+    "count positives" approach over-counts by a factor of K (each supervised
+    position has up to K positive entries). When ``topk`` is known, we reshape
+    to ``(N, K)`` and count rows whose sum is non-zero. Fallback heuristics
+    handle 1D weights (legacy IS path) and the rare case of unknown K.
+    """
+    total = 0
+    for d in topk_datums:
+        w = d.loss_fn_inputs["weights"].data
+        t = torch.as_tensor(w, dtype=torch.float32)
+        N = d.model_input.length
+        if t.dim() == 2:
+            total += int((t.abs().sum(dim=-1) > 1e-8).sum().item())
+        elif t.dim() == 1 and t.numel() == N * (topk or 0) and topk:
+            t2 = t.view(N, topk)
+            total += int((t2.abs().sum(dim=-1) > 1e-8).sum().item())
+        elif t.dim() == 1 and topk and t.numel() > N and t.numel() % N == 0:
+            k_eff = t.numel() // N
+            t2 = t.view(N, k_eff)
+            total += int((t2.abs().sum(dim=-1) > 1e-8).sum().item())
+        else:
+            total += int((t > 0).sum().item())
+    return max(total, 1)
+
+
 # ---------------------------------------------------------------------------
 # .env loader (shared with run_dpo / run_reinforce)
 # ---------------------------------------------------------------------------
@@ -481,20 +520,28 @@ def precompute_all_topk_datums(
     topk: int = 20,
     max_context_length: int = 32768,
     vocab_size: int | None = None,
-) -> list[tinker.Datum]:
+) -> tuple[list[tinker.Datum], dict[str, float]]:
     """Pre-compute top-K datums for every example in the dataset (offline optimisation).
 
     Since the teacher is frozen and completions are fixed (offline, not on-policy),
     top-K targets are identical across epochs and can be computed once upfront,
-    saving repeated API calls. Returns a list aligned 1-to-1 with the dataset's
-    internal un-shuffled order; use ``dataset.get_batch_topk_datums(batch_idx)``
-    to retrieve shuffled batches during training.
+    saving repeated API calls. Returns ``(datums, metrics)`` where ``datums`` is
+    aligned 1-to-1 with the dataset's internal un-shuffled order; use
+    ``dataset.get_batch_topk_datums(batch_idx)`` to retrieve shuffled batches
+    during training. ``metrics`` contains ``opd/mean_teacher_entropy`` etc.
     """
     all_student, _ = zip(
         *[dataset.get_batch(i) for i in range(len(dataset))],
     ) if len(dataset) > 0 else ([], [])
     all_student_flat = [d for batch in all_student for d in batch]
     teacher_prompt_inputs = dataset.get_all_teacher_prompt_inputs()
+    if not all_student_flat:
+        empty_metrics: dict[str, float] = {
+            "opd/topk_truncated": 0.0,
+            "opd/topk_num_datums": 0.0,
+            "opd/topk_k": float(topk),
+        }
+        return [], empty_metrics
     logger.info(
         "Pre-computing top-K=%d teacher targets for %d OPD examples",
         topk, len(all_student_flat),
@@ -504,7 +551,7 @@ def precompute_all_topk_datums(
         topk=topk, max_context_length=max_context_length, vocab_size=vocab_size,
     )
     logger.info("Top-K pre-computation done: %s", metrics)
-    return topk_datums
+    return topk_datums, metrics
 
 
 def do_update_topk(
@@ -515,6 +562,7 @@ def do_update_topk(
     topk_datums: list[tinker.Datum],
     ml_logger: "ml_log.Logger",
     log_path: str,
+    static_teacher_metrics: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Single training step for top-K distillation.
 
@@ -546,13 +594,24 @@ def do_update_topk(
     result = training_client.forward_backward(topk_datums, "cross_entropy").result()
     training_client.optim_step(adam_params).result()
 
+    rm = _metrics_dict_from_result(result.metrics)
+    loss_sum = float(rm.get("loss:sum", rm.get("loss", 0.0)))
+    batch_tokens = _count_topk_supervision_tokens(topk_datums, topk=config.topk)
+    per_token_ce = loss_sum / float(batch_tokens)
+
     metrics: dict[str, Any] = {
-        "opd_loss": result.metrics.get("loss", 0.0),
+        # Per-token CE comparable across batches (loss:sum is not).
+        "opd_loss": per_token_ce,
+        "opd/loss_sum": loss_sum,
+        "opd/batch_completion_tokens": float(batch_tokens),
+        "opd/per_token_ce": per_token_ce,
         "num_examples": len(topk_datums),
         "learning_rate": learning_rate,
         "progress": step / total_steps,
     }
-    metrics.update(result.metrics)
+    metrics.update(rm)
+    if static_teacher_metrics:
+        metrics.update({k: float(v) for k, v in static_teacher_metrics.items()})
     ml_logger.log_metrics(metrics=metrics, step=step)
     return metrics
 
@@ -600,6 +659,7 @@ def do_update(
         total_loss = torch.tensor(0.0)
         total_adv = 0.0
         total_tokens = 0
+        global_nll_sum = 0.0
 
         for i in range(len(data)):
             weights = torch.tensor(data[i].loss_fn_inputs["weights"].data)
@@ -617,14 +677,18 @@ def do_update(
             advantage = (teacher_at_comp - student_at_comp.detach())
             loss_per_token = -advantage * student_at_comp
             total_loss = total_loss + loss_per_token.sum() / max(n, 1)
+            global_nll_sum += float(loss_per_token.sum().item())
 
             total_adv += advantage.sum().item()
             total_tokens += n
 
         batch_loss = total_loss / max(len(data), 1)
+        per_token_ce = global_nll_sum / max(total_tokens, 1)
 
         loss_metrics = {
-            "opd_loss": batch_loss.item(),
+            "opd_loss": per_token_ce,
+            "opd/per_token_ce": per_token_ce,
+            "opd/batch_completion_tokens": float(total_tokens),
             "mean_advantage": total_adv / max(total_tokens, 1),
             "num_completion_tokens": total_tokens,
         }
@@ -712,7 +776,7 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
             "Pre-computing targets for all %d examples...",
             config.topk, config.model_name, n_batches * dataset._batch_size,
         )
-        topk_datums_all = precompute_all_topk_datums(
+        topk_datums_all, topk_pre_metrics = precompute_all_topk_datums(
             dataset, teacher_client, topk=config.topk,
         )
         logger.info("Top-K pre-computation complete (%d datums)", len(topk_datums_all))
@@ -784,6 +848,11 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
                     topk_datums=batch_topk,
                     ml_logger=ml_logger,
                     log_path=config.log_path,
+                    static_teacher_metrics=(
+                        topk_pre_metrics
+                        if (epoch_idx == 0 and batch_idx == start_batch)
+                        else None
+                    ),
                 )
             else:
                 teacher_lps = get_teacher_lps(student_datums, teacher_datums)
@@ -840,7 +909,7 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--base-url", default=None)
-    parser.add_argument("--save-every", type=int, default=0,
+    parser.add_argument("--save-every", type=int, default=20,
                         help="Save checkpoint every N steps (0 = only at end)")
     parser.add_argument(
         "--pair-mode", choices=["first_last", "adjacent"], default="first_last",
