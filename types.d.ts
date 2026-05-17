@@ -152,6 +152,9 @@ type EventPayloadMapping = {
     "get-memory-md": { dir: string; sections: MemorySectionDto[]; skillsDir: string; skillSections: MemorySectionDto[] };
     "save-memory-md": { success: boolean; error?: string };
     "save-skill-md": { success: boolean; error?: string };
+    "export-recordings-bundle":
+        | { success: true; path: string }
+        | { success: false; canceled?: boolean; error?: string };
 }
 
 interface Window {
@@ -197,5 +200,9 @@ interface Window {
         getMemoryMd: () => Promise<{ dir: string; sections: MemorySectionDto[]; skillsDir: string; skillSections: MemorySectionDto[] }>;
         saveMemoryMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
         saveSkillMd: (payload: MemorySavePayload) => Promise<{ success: boolean; error?: string }>;
+        exportRecordingsBundle: () => Promise<
+            | { success: true; path: string }
+            | { success: false; canceled?: boolean; error?: string }
+        >;
     }
 }

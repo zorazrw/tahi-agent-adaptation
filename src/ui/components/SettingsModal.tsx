@@ -13,7 +13,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "api" | "workflow" | "skills";
+type Tab = "api" | "workflow" | "skills" | "data";
 const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
 
 function readStoredAutoInduction(): boolean {
@@ -135,6 +135,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               >
                 Skills
               </button>
+              <button
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  tab === "data"
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+                onClick={() => setTab("data")}
+              >
+                Data
+              </button>
             </div>
 
             {/* Tab content */}
@@ -143,8 +153,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <ApiPanel onClose={onClose} />
               ) : tab === "workflow" ? (
                 <WorkflowPanel />
-              ) : (
+              ) : tab === "skills" ? (
                 <SkillsPanel />
+              ) : (
+                <DataPanel />
               )}
             </div>
           </div>
@@ -984,6 +996,64 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </>
+  );
+}
+
+/* ---------- Data / export panel ---------- */
+
+function DataPanel() {
+  const [exporting, setExporting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleExport = async () => {
+    setExporting(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const result = await window.electron.exportRecordingsBundle();
+      if (result.success) {
+        setMessage(`Saved to ${result.path}`);
+      } else if (result.canceled) {
+        setMessage(null);
+      } else {
+        setError(result.error ?? "Export failed.");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground leading-relaxed">
+        Package your local app data (database, memories, skills, session files) into a zip you can email or upload.
+        API keys are not included.
+      </p>
+      <button
+        type="button"
+        onClick={() => void handleExport()}
+        disabled={exporting}
+        className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+      >
+        {exporting ? (
+          <span className="inline-flex items-center gap-2">
+            <Spinner className="w-4 h-4" color="currentColor" />
+            Preparing zip…
+          </span>
+        ) : (
+          "Export recordings (zip)"
+        )}
+      </button>
+      {message ? <p className="text-xs text-ink-700 break-all">{message}</p> : null}
+      {error ? <p className="text-xs text-red-600">{error}</p> : null}
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        Includes <code className="bg-ink-900/5 px-1 rounded">sessions.db</code> and related files from your app data
+        folder. Choose where to save in the dialog, then send that zip back to the study team.
+      </p>
+    </div>
   );
 }
 
