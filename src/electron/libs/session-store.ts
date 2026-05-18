@@ -8,6 +8,7 @@ import type {
   WorkflowNode,
 } from "../types.js";
 import { migrateFromFlatSteps } from "./workflow-tree-utils.js";
+import type { ExportEnvironmentSnapshot } from "./message-state-snapshot.js";
 
 // ── Zod schemas for JSON columns ──────────────────────────────────────
 
@@ -606,6 +607,29 @@ export class SessionStore {
       .prepare(`SELECT data FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`)
       .all(sessionId) as Array<Record<string, unknown>>)
       .map((row) => JSON.parse(String(row.data)) as StreamMessage);
+  }
+
+  /** Messages with optional per-row environment snapshots (chronological). */
+  getMessageRowsWithSnapshots(sessionId: string): Array<{
+    message: StreamMessage;
+    snapshot: ExportEnvironmentSnapshot | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT data, state_snapshot FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`
+      )
+      .all(sessionId) as Array<{ data: string; state_snapshot: string | null }>;
+
+    return rows.map((row) => {
+      const message = JSON.parse(row.data) as StreamMessage;
+      if (!row.state_snapshot) return { message, snapshot: null };
+      try {
+        const snapshot = JSON.parse(row.state_snapshot) as ExportEnvironmentSnapshot;
+        return { message, snapshot };
+      } catch {
+        return { message, snapshot: null };
+      }
+    });
   }
 
   close(): void {

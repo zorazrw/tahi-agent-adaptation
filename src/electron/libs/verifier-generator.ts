@@ -29,7 +29,7 @@ function normalizeVerifierLines(input: unknown, fallback: string[]): string[] {
 
 /**
  * Refresh verifier criteria before a follow-up task execution call.
- * Uses prior user messages + latest user message + existing verifiers for the target node.
+ * Uses user messages, human file_edit diffs, verifier examples, and existing verifiers for the target node.
  */
 export async function generateUpdatedVerifiersForNode(
   session: Session,
@@ -37,7 +37,8 @@ export async function generateUpdatedVerifiersForNode(
   node: WorkflowNode,
   userMessages: string[],
   userRemovedExamples: string[] = [],
-  userAddedExamples: string[] = []
+  userAddedExamples: string[] = [],
+  fileEditDiffs: string[] = []
 ): Promise<string[] | null> {
   const config = loadApiConfig();
   if (!config) return null;
@@ -78,6 +79,9 @@ export async function generateUpdatedVerifiersForNode(
     "",
     "User-added verifier examples (positive; prefer similar/preserved criteria when relevant):",
     ...(userAddedExamples.length > 0 ? userAddedExamples.map((v: string, i: number) => `${i + 1}. ${v}`) : ["(none)"]),
+    "",
+    "Human file edits (line diff; - removed, + added, space = context):",
+    ...(fileEditDiffs.length > 0 ? fileEditDiffs : ["(none)"]),
   ].join("\n");
 
   const res = await fetch(messagesApiUrl(config.baseURL), {

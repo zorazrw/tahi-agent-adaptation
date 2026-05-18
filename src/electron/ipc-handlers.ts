@@ -33,84 +33,9 @@ import {
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 import { createPiSessionManager, getAgentSettings, getPiAgentDir, getPiSessionsDir } from "./libs/pi-config.js";
 import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
+import { gatherHumanFileEditDiffs } from "./libs/file-edit-diffs.js";
+import { buildTextDiff } from "./libs/text-diff.js";
 import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
-
-/** Build a compact line-based diff between original and current text, with only changed hunks and small context. */
-function buildTextDiff(original: string, current: string, maxHunks = 8, contextLines = 1): string {
-  const origLines = original.split(/\r?\n/);
-  const currLines = current.split(/\r?\n/);
-  const n = origLines.length;
-  const m = currLines.length;
-
-  // LCS DP table
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      if (origLines[i] === currLines[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
-      else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-
-  type Op = { type: "equal" | "del" | "add"; line: string; i: number; j: number };
-  const ops: Op[] = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (origLines[i] === currLines[j]) {
-      ops.push({ type: "equal", line: origLines[i], i, j });
-      i++; j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push({ type: "del", line: origLines[i], i, j });
-      i++;
-    } else {
-      ops.push({ type: "add", line: currLines[j], i, j });
-      j++;
-    }
-  }
-  while (i < n) {
-    ops.push({ type: "del", line: origLines[i], i, j });
-    i++;
-  }
-  while (j < m) {
-    ops.push({ type: "add", line: currLines[j], i, j });
-    j++;
-  }
-
-  // Group into hunks with context
-  const hunks: { start: number; end: number }[] = [];
-  for (let k = 0; k < ops.length; k++) {
-    if (ops[k].type === "equal") continue;
-    const start = Math.max(0, k - contextLines);
-    let end = Math.min(ops.length - 1, k + contextLines);
-    // extend end forward while within context window and diff continues
-    while (end + 1 < ops.length && ops[end + 1].type !== "equal") end++;
-    // merge with previous hunk if overlapping
-    if (hunks.length > 0 && start <= hunks[hunks.length - 1].end + 1) {
-      hunks[hunks.length - 1].end = Math.max(hunks[hunks.length - 1].end, end);
-    } else {
-      hunks.push({ start, end });
-    }
-  }
-
-  if (hunks.length === 0) return "";
-
-  const lines: string[] = [];
-  const limitedHunks = hunks.slice(0, maxHunks);
-  for (let h = 0; h < limitedHunks.length; h++) {
-    const { start: s, end: e } = limitedHunks[h];
-    if (h > 0) lines.push("...");
-    for (let k = s; k <= e; k++) {
-      const op = ops[k];
-      if (op.type === "equal") {
-        lines.push(`  ${op.line}`);
-      } else if (op.type === "del") {
-        lines.push(`- ${op.line}`);
-      } else {
-        lines.push(`+ ${op.line}`);
-      }
-    }
-  }
-  return lines.join("\n");
-}
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
@@ -556,7 +481,11 @@ async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNode
   if (targetNodeIds.length === 0) return;
 
   const promptHistory = gatherUserPromptHistory(sessionId);
-  if (promptHistory.length === 0) return;
+  const fileEditDiffs = gatherHumanFileEditDiffs(
+    store.getMessageRowsWithSnapshots(sessionId),
+    session.cwd
+  );
+  if (promptHistory.length === 0 && fileEditDiffs.length === 0) return;
 
   const byNodeExamples = sessionVerifierExamplesByNodeId.get(sessionId) ?? new Map<string, VerifierExampleState>();
   let didChangeAny = false;
@@ -572,7 +501,8 @@ async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNode
         node,
         promptHistory,
         examples?.removed ?? [],
-        examples?.added ?? []
+        examples?.added ?? [],
+        fileEditDiffs
       );
       if (!updated) continue;
       const nextVerifiers = uniqueByNormalized(updated);
@@ -1235,6 +1165,13 @@ export function recordFileEditAfterPreviewSave(
     type: "stream.message",
     payload: { sessionId, message: { type: "file_edit", path: pathForMessage } },
   });
+
+  const vNode = sessionLastVerificationNodeId.get(sessionId);
+  if (vNode) {
+    void autoRefineVerifiersFromUserMessages(sessionId, [vNode]);
+  } else if (sess.workflowTree?.length) {
+    void autoRefineVerifiersFromUserMessages(sessionId, flattenWorkflowNodeIds(sess.workflowTree));
+  }
 }
 
 export function cleanupAllSessions(): void {
