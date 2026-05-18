@@ -153,6 +153,10 @@ class Config:
     # K=20 matches full-vocabulary KL in practice (Shenfeld et al., 2026).
     topk: int = 20
 
+    # Teacher distribution softening (Hinton 2015).  τ=1.0 → no change; τ>1 →
+    # flattens teacher probs, raises effective teacher entropy, makes KD less
+    # like hard-label SFT.  τ=1.5–2.0 recommended when teacher entropy < 0.5 nat.
+    teacher_temperature: float = 1.0
 
 def _extract_completion_info(
     datum: tinker.Datum,
@@ -351,6 +355,7 @@ async def _build_offline_topk_datums_async(
     max_context_length: int = 32768,
     vocab_size: int | None = None,
     skip_first_n_tokens: int = 3,
+    teacher_temperature: float = 1.0,
 ) -> tuple[list[tinker.Datum], dict[str, float]]:
     """Build cross_entropy datums with top-K teacher soft targets (offline version).
 
@@ -469,6 +474,10 @@ async def _build_offline_topk_datums_async(
                 k_actual = len(filtered)
                 token_ids = torch.tensor([tid for tid, _ in filtered], dtype=torch.long)
                 logprobs = torch.tensor([lp for _, lp in filtered], dtype=torch.float32)
+                # Teacher temperature softening: scale log-probs by 1/τ before
+                # renormalising → flatter distribution when τ > 1.
+                if teacher_temperature != 1.0:
+                    logprobs = logprobs / teacher_temperature
                 logprobs -= torch.logsumexp(logprobs, dim=0)
                 probs = logprobs.exp()
 
@@ -504,12 +513,14 @@ def build_offline_topk_datums(
     topk: int = 20,
     max_context_length: int = 32768,
     vocab_size: int | None = None,
+    teacher_temperature: float = 1.0,
 ) -> tuple[list[tinker.Datum], dict[str, float]]:
     """Synchronous wrapper around :func:`_build_offline_topk_datums_async`."""
     return asyncio.run(
         _build_offline_topk_datums_async(
             student_datums, teacher_prompt_inputs, teacher_client,
             topk=topk, max_context_length=max_context_length, vocab_size=vocab_size,
+            teacher_temperature=teacher_temperature,
         )
     )
 
@@ -520,6 +531,7 @@ def precompute_all_topk_datums(
     topk: int = 20,
     max_context_length: int = 32768,
     vocab_size: int | None = None,
+    teacher_temperature: float = 1.0,
 ) -> tuple[list[tinker.Datum], dict[str, float]]:
     """Pre-compute top-K datums for every example in the dataset (offline optimisation).
 
@@ -549,6 +561,7 @@ def precompute_all_topk_datums(
     topk_datums, metrics = build_offline_topk_datums(
         all_student_flat, teacher_prompt_inputs, teacher_client,
         topk=topk, max_context_length=max_context_length, vocab_size=vocab_size,
+        teacher_temperature=teacher_temperature,
     )
     logger.info("Top-K pre-computation done: %s", metrics)
     return topk_datums, metrics
@@ -591,6 +604,7 @@ def do_update_topk(
         beta2=config.adam_beta2,
         eps=config.adam_eps,
     )
+
     result = training_client.forward_backward(topk_datums, "cross_entropy").result()
     training_client.optim_step(adam_params).result()
 
@@ -778,8 +792,12 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
         )
         topk_datums_all, topk_pre_metrics = precompute_all_topk_datums(
             dataset, teacher_client, topk=config.topk,
+            teacher_temperature=config.teacher_temperature,
         )
-        logger.info("Top-K pre-computation complete (%d datums)", len(topk_datums_all))
+        logger.info(
+            "Top-K pre-computation complete (%d datums, τ=%.2f)",
+            len(topk_datums_all), config.teacher_temperature,
+        )
         get_teacher_lps = None  # not used in top-K path
 
     elif not config.use_skyrl:
@@ -944,6 +962,15 @@ if __name__ == "__main__":
             "is unavailable on this backend."
         ),
     )
+    parser.add_argument(
+        "--teacher-temperature", type=float, default=1.0,
+        help=(
+            "Softening temperature τ for the teacher distribution (Hinton 2015). "
+            "τ=1.0 (default) leaves teacher probs unchanged. τ>1 flattens the "
+            "distribution (raises entropy), making KD less like hard-label SFT. "
+            "Recommended: τ=1.5–2.0 when opd/mean_teacher_entropy < 0.5 nat."
+        ),
+    )
     args = parser.parse_args()
 
     tokenizer = get_tokenizer(args.model_name)
@@ -976,6 +1003,7 @@ if __name__ == "__main__":
         pair_mode=args.pair_mode,
         use_gt=args.use_gt,
         topk=args.topk,
+        teacher_temperature=args.teacher_temperature,
     )
 
     main(cfg, dataset)
