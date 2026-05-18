@@ -4,6 +4,7 @@ import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/ui/components/ui/tooltip";
 import type { ClientEvent, WorkflowNode } from "../types";
 import { useAppStore } from "../store/useAppStore";
+import { ExpertiseExamplePicker } from "./ExpertiseExamplePicker";
 
 interface SidebarProps {
   connected: boolean;
@@ -789,6 +790,12 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
           </div>
         )}
       </div>
+
+      {!activeSessionId && (
+        <div className="shrink-0 pt-2 pb-2">
+          <ExpertiseExamplePicker />
+        </div>
+      )}
 
       {/* Progress: tree + slider + run button — only when a task is selected (hidden on new-task home) */}
       {activeSessionId && (
