@@ -521,14 +521,14 @@ async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNode
   const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
   broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
 
-  const rowId = store.recordMessage(sessionId, { type: "edit_verifier" });
+  const rowId = store.recordMessage(sessionId, { type: "update_verifiers" });
   const sessAfter = store.getSession(sessionId);
   if (sessAfter) {
     store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sessAfter));
   }
   broadcast({
     type: "stream.message",
-    payload: { sessionId, message: { type: "edit_verifier" } },
+    payload: { sessionId, message: { type: "update_verifiers" } },
   });
 }
 

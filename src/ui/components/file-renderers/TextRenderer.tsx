@@ -3,7 +3,14 @@ import { EditableTextPanel } from "./EditableTextPanel";
 
 type Props = { data: { kind: "txt"; content: string } } & EditableRendererProps;
 
-export function TextRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
+export function TextRenderer({
+  data,
+  filePath,
+  cwd,
+  sessionId,
+  onReload,
+  onTextSaveChromeChange,
+}: Props) {
   const canEdit = Boolean(filePath && onReload);
 
   if (canEdit) {
@@ -16,6 +23,7 @@ export function TextRenderer({ data, filePath, cwd, sessionId, onReload }: Props
           window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
         }
         onSaved={onReload}
+        onSaveChromeChange={onTextSaveChromeChange}
       />
     );
   }

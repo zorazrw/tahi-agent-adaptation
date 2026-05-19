@@ -17,7 +17,15 @@ import { runWithLlmDebugContext } from "./llm-debug.js";
 import { createPiManagers, createPiResourceLoader, createPiSessionManager } from "./pi-config.js";
 import { readMemoryForPrompt } from "./memory-store.js";
 import type { Session } from "./session-store.js";
-import { hydrateWorkflowTree, type RawWorkflowNode } from "./workflow-tree-utils.js";
+import {
+  isWorkflowPlanToolName,
+  normalizeWorkflowPlanToolInput,
+} from "../../lib/workflow-plan-parse.js";
+import {
+  extractTasksFromWorkflowPlanArgs,
+  registerWorkflowPlanFromTasks,
+  tryRecoverWorkflowPlanFromMessages,
+} from "./workflow-plan-recovery.js";
 
 export type RunnerOptions = {
   prompt: string;
@@ -48,13 +56,8 @@ const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
 const WORKFLOW_PLAN_APPEND_USER_PROMPT =
   "Before doing anything else, you MUST call the workflow_plan tool to register the workflow with structured JSON input, then stop.";
 
-function normalizeRoots(tasks: RawWorkflowNode[]): RawWorkflowNode[] {
-  let roots = tasks;
-  while (roots.length === 1 && roots[0].children && roots[0].children.length > 0) {
-    roots = roots[0].children;
-  }
-  return roots;
-}
+const WORKFLOW_PLAN_RETRY_USER_PROMPT =
+  "Your previous response did not register a workflow. Call the workflow_plan tool now as your only action with JSON: { \"tasks\": [ { \"description\": \"...\", \"outputFiles\": [], \"verifiers\": [], \"children\": [] } ] }. Use 3-5 top-level steps. Do not use any other tools. Do not reply with prose only.";
 
 function buildPromptForQuery(userPrompt: string, isFirstMessage: boolean): string {
   const trimmed = userPrompt.trim();
@@ -149,11 +152,18 @@ function normalizeAssistantBlocks(message: Record<string, unknown>, includeToolU
     } else if (block.type === "thinking" && "thinking" in block) {
       blocks.push({ type: "thinking", thinking: String(block.thinking ?? "") });
     } else if (includeToolUses && block.type === "toolCall") {
+      const toolName = String((block as { name?: unknown }).name ?? "tool");
+      const rawArgs = (block as { arguments?: unknown }).arguments;
+      const input = isWorkflowPlanToolName(toolName)
+        ? normalizeWorkflowPlanToolInput(rawArgs)
+        : ((rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+            ? rawArgs
+            : {}) as Record<string, unknown>);
       blocks.push({
         type: "tool_use",
         id: String((block as { id?: unknown }).id ?? crypto.randomUUID()),
-        name: String((block as { name?: unknown }).name ?? "tool"),
-        input: ((block as { arguments?: Record<string, unknown> }).arguments ?? {}) as Record<string, unknown>,
+        name: toolName,
+        input,
       });
     }
   }
@@ -263,7 +273,11 @@ function resolveRunStatus(planRegistered: boolean, regenerateWorkflow: boolean |
   return "completed";
 }
 
-function createWorkflowPlanTool(session: Session, onEvent: (event: ServerEvent) => void): ToolDefinition {
+function createWorkflowPlanTool(
+  session: Session,
+  onEvent: (event: ServerEvent) => void,
+  onPlanRegistered: () => void
+): ToolDefinition {
   const workflowNodeSchema = Type.Recursive((Self) =>
     Type.Object({
       description: Type.String(),
@@ -283,12 +297,20 @@ function createWorkflowPlanTool(session: Session, onEvent: (event: ServerEvent) 
       tasks: Type.Array(workflowNodeSchema),
     }),
     execute: async (_toolCallId, params) => {
-      const roots = normalizeRoots((params as { tasks: RawWorkflowNode[] }).tasks);
-      const tree = hydrateWorkflowTree(roots);
-      onEvent({
-        type: "workflow.plan",
-        payload: { sessionId: session.id, workflowTree: tree },
-      });
+      const tasks = extractTasksFromWorkflowPlanArgs(params);
+      if (!tasks) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: 'Invalid workflow_plan input: expected JSON { "tasks": [ { "description", "outputFiles", "verifiers", "children?" } ] }.',
+            },
+          ],
+          details: { error: "invalid_tasks" },
+        };
+      }
+      onPlanRegistered();
+      const tree = registerWorkflowPlanFromTasks(session, tasks, onEvent);
       return {
         content: [
           {
@@ -424,7 +446,12 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         createFindTool(cwd),
         createLsTool(cwd),
       ],
-      customTools: [createWorkflowPlanTool(session, onEvent), createAskUserQuestionTool(session, onEvent)],
+      customTools: [
+        createWorkflowPlanTool(session, onEvent, () => {
+          planRegistered = true;
+        }),
+        createAskUserQuestionTool(session, onEvent),
+      ],
     });
 
     piSessionAbort = () => piSession.abort();
@@ -509,7 +536,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
                   type: "tool_use",
                   id: event.toolCallId,
                   name: event.toolName,
-                  input: (event.args ?? {}) as Record<string, unknown>,
+                  input: isWorkflowPlanToolName(event.toolName)
+                    ? normalizeWorkflowPlanToolInput(event.args)
+                    : ((event.args ?? {}) as Record<string, unknown>),
                 },
               ],
               provider: piSession.model?.provider,
@@ -517,7 +546,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
             },
           },
         });
-        if (event.toolName === "workflow_plan") {
+        if (isWorkflowPlanToolName(event.toolName)) {
           planRegistered = true;
         }
         return;
@@ -605,10 +634,27 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         },
       );
 
-      if (shouldForceWorkflowPlan && !planRegistered) {
+      const sessionMessages = () => sessionManager.buildSessionContext().messages;
+
+      if (shouldForceWorkflowPlan && !hasExistingWorkflowPlan(session)) {
+        if (!planRegistered) {
+          tryRecoverWorkflowPlanFromMessages(sessionMessages(), session, onEvent);
+        }
+        if (!hasExistingWorkflowPlan(session)) {
+          await piSession.prompt(WORKFLOW_PLAN_RETRY_USER_PROMPT);
+          if (!planRegistered) {
+            tryRecoverWorkflowPlanFromMessages(sessionMessages(), session, onEvent);
+          }
+        }
+      }
+
+      if (shouldForceWorkflowPlan && !hasExistingWorkflowPlan(session)) {
         throw new Error(
           "Workflow plan was not registered. The model did not call workflow_plan, so left-panel modules could not be populated."
         );
+      }
+      if (shouldForceWorkflowPlan && !planRegistered && hasExistingWorkflowPlan(session)) {
+        planRegistered = true;
       }
 
       persistSessionFile();

@@ -12,13 +12,16 @@ import { HtmlRenderer } from "./HtmlRenderer";
 import { VideoRenderer } from "./VideoRenderer";
 import { AudioRenderer } from "./AudioRenderer";
 
-/** HTML preview Text/Shape toolbar: host (e.g. FilePreview header) can show Save next to Refresh. */
-export type HtmlVisualSaveChrome = {
+/** Preview header Save affordance (HTML visual edit or text/source editors). */
+export type PreviewSaveChrome = {
   save: () => void;
   disabled: boolean;
   saving: boolean;
   error: string | null;
 };
+
+/** @deprecated use PreviewSaveChrome */
+export type HtmlVisualSaveChrome = PreviewSaveChrome;
 
 export type EditableRendererProps = {
   filePath?: string;
@@ -27,7 +30,9 @@ export type EditableRendererProps = {
   sessionId?: string | null;
   onReload?: () => void;
   /** HTML preview only: fired when visual edit (Text/Shape) save affordance should appear or clear. */
-  onHtmlVisualSaveChromeChange?: (chrome: HtmlVisualSaveChrome | null) => void;
+  onHtmlVisualSaveChromeChange?: (chrome: PreviewSaveChrome | null) => void;
+  /** Markdown/code/text source editors: header Save + records ``file_edit`` on save. */
+  onTextSaveChromeChange?: (chrome: PreviewSaveChrome | null) => void;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

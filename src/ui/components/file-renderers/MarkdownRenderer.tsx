@@ -12,10 +12,17 @@ import { EditableTextPanel } from "./EditableTextPanel";
 
 type Props = { data: { kind: "md"; content: string } } & EditableRendererProps;
 
-export function MarkdownRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
-  const [mode, setMode] = useViewToggle("preview");
-  const codeRef = useRef<HTMLElement>(null);
+export function MarkdownRenderer({
+  data,
+  filePath,
+  cwd,
+  sessionId,
+  onReload,
+  onTextSaveChromeChange,
+}: Props) {
   const canEdit = Boolean(filePath && onReload);
+  const [mode, setMode] = useViewToggle(canEdit ? "source" : "preview");
+  const codeRef = useRef<HTMLElement>(null);
   const [editContent, setEditContent] = useState(data.content);
 
   useEffect(() => {
@@ -65,6 +72,7 @@ export function MarkdownRenderer({ data, filePath, cwd, sessionId, onReload }: P
             return window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined);
           }}
           onSaved={onReload}
+          onSaveChromeChange={onTextSaveChromeChange}
         />
       ) : (
         <pre className="text-sm overflow-x-auto">

@@ -216,6 +216,8 @@ export type BrainEditMessage = { type: "brain_edit" };
 export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string };
 export type EditWorkflowMessage = { type: "edit_workflow" };
 export type EditVerifierMessage = { type: "edit_verifier" };
+/** LLM auto-refinement of verifiers after user prompts / file edits (not manual sidebar edits). */
+export type UpdateVerifiersMessage = { type: "update_verifiers" };
 export type FileEditMessage = { type: "file_edit"; path: string };
 
 export type StreamMessage =
@@ -230,6 +232,7 @@ export type StreamMessage =
   | VerifierLabelMessage
   | EditWorkflowMessage
   | EditVerifierMessage
+  | UpdateVerifiersMessage
   | FileEditMessage
   | LegacyMessage;
 

@@ -130,6 +130,7 @@ export function HtmlRenderer({
   sessionId,
   onReload,
   onHtmlVisualSaveChromeChange,
+  onTextSaveChromeChange,
 }: Props) {
   const [mode, setMode] = useViewToggle("preview");
   const codeRef = useRef<HTMLElement>(null);
@@ -758,6 +759,7 @@ export function HtmlRenderer({
             return window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined);
           }}
           onSaved={onReload}
+          onSaveChromeChange={onTextSaveChromeChange ?? onHtmlVisualSaveChromeChange}
         />
       ) : (
         <pre className="text-sm overflow-x-auto">

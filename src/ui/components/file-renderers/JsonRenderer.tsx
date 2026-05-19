@@ -11,6 +11,7 @@ export function JsonRenderer({
   cwd,
   sessionId,
   onReload,
+  onTextSaveChromeChange,
 }: { data: { kind: "json"; content: string } } & EditableRendererProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("tree");
   const parsed = useMemo(() => {
@@ -47,6 +48,7 @@ export function JsonRenderer({
             window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
           }
           onSaved={onReload}
+          onSaveChromeChange={onTextSaveChromeChange}
         />
       </div>
     );
@@ -76,6 +78,7 @@ export function JsonRenderer({
               window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
             }
             onSaved={onReload}
+            onSaveChromeChange={onTextSaveChromeChange}
           />
         ) : (
           <pre className="text-sm text-ink-700 whitespace-pre-wrap font-mono">{data.content}</pre>

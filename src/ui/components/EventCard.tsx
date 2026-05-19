@@ -21,6 +21,7 @@ import { useAppStore } from "../store/useAppStore";
 import type { PermissionRequest } from "../store/useAppStore";
 import { DecisionPanel } from "./DecisionPanel";
 import { WorkflowCard } from "./WorkflowCard";
+import { isWorkflowPlanToolName, parseWorkflowPlanPayload } from "../../lib/workflow-plan-parse";
 import { NodeOutputSnippet } from "./StepOutputSnippet";
 
 // ai-elements
@@ -514,8 +515,7 @@ const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AnyAssist
   const setToolMeta = useAppStore((s) => s.setToolMeta);
   const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
 
-  const input = messageContent.input as { tasks?: Array<{ description: string; outputFiles: string[]; verifiers: string[]; children?: unknown[] }> } | null;
-  const tasks = input?.tasks ?? [];
+  const tasks = parseWorkflowPlanPayload(messageContent.input) ?? [];
 
   useEffect(() => {
     if (messageContent.id) {
@@ -733,6 +733,7 @@ export function MessageCard({
   if (
     message.type === "edit_workflow" ||
     message.type === "edit_verifier" ||
+    message.type === "update_verifiers" ||
     message.type === "file_edit" ||
     message.type === "brain_edit"
   ) {
@@ -789,13 +790,25 @@ export function MessageCard({
             return <ThinkingBlock key={idx} text={content.thinking} isStreaming={isLastContent && showIndicator} />;
           }
           if (content.type === "text") {
+            const planFromText = parseWorkflowPlanPayload(content.text);
+            if (planFromText && planFromText.length > 0) {
+              return (
+                <div key={idx} className="mt-4">
+                  <WorkflowCard
+                    steps={planFromText.map((s) => s.description)}
+                    outputFiles={planFromText.map((s) => s.outputFiles)}
+                    verifiers={planFromText.map((s) => s.verifiers)}
+                  />
+                </div>
+              );
+            }
             return <AssistantTextBlock key={idx} text={content.text} showIndicator={isLastContent && showIndicator} />;
           }
           if (content.type === "tool_use") {
             if (content.name === "ask_user_question") {
               return <AskUserQuestionCard key={idx} messageContent={content} permissionRequest={permissionRequest} onPermissionResult={onPermissionResult} />;
             }
-            if (content.name === "workflow_plan") {
+            if (isWorkflowPlanToolName(content.name)) {
               return <WorkflowPlanToolUseCard key={idx} messageContent={content} />;
             }
             return <ToolUseCard key={idx} messageContent={content} />;
@@ -822,13 +835,25 @@ export function MessageCard({
             return <ThinkingBlock key={idx} text={content.thinking} isStreaming={isLastContent && showIndicator} />;
           }
           if (content.type === "text") {
+            const planFromText = parseWorkflowPlanPayload(content.text);
+            if (planFromText && planFromText.length > 0) {
+              return (
+                <div key={idx} className="mt-4">
+                  <WorkflowCard
+                    steps={planFromText.map((s) => s.description)}
+                    outputFiles={planFromText.map((s) => s.outputFiles)}
+                    verifiers={planFromText.map((s) => s.verifiers)}
+                  />
+                </div>
+              );
+            }
             return <AssistantTextBlock key={idx} text={content.text} showIndicator={isLastContent && showIndicator} />;
           }
           if (content.type === "tool_use") {
             if (content.name === "AskUserQuestion") {
               return <AskUserQuestionCard key={idx} messageContent={content} permissionRequest={permissionRequest} onPermissionResult={onPermissionResult} />;
             }
-            if (content.name.includes("WorkflowPlan")) {
+            if (isWorkflowPlanToolName(content.name)) {
               return <WorkflowPlanToolUseCard key={idx} messageContent={content} />;
             }
             return <ToolUseCard key={idx} messageContent={content} />;

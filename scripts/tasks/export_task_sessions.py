@@ -1087,7 +1087,9 @@ def build_full_session_trajectory(
                 memory=m_ev,
                 skill=s_ev,
             )
-            wf_prev_u = wf_timeline[idx - 1] if idx > 0 else None
+            wf_prev_u = m.get("_synthetic_wf_before")
+            if not isinstance(wf_prev_u, list):
+                wf_prev_u = wf_timeline[idx - 1] if idx > 0 else None
             ev_tr_u = _edit_verifier_tool_result_from_snapshots(wf_prev_u, wf_after_ev)
             traj.append(trajectory_row("user", "edit_verifier()", step_env, tool_result=ev_tr_u))
             idx += 1
@@ -1108,8 +1110,12 @@ def build_full_session_trajectory(
             p_raw = m.get("path", "")
             p = str(p_raw) if p_raw is not None else ""
             act = f"edit({json.dumps(p, ensure_ascii=False)})"
-            prior = _prior_snapshot_message(msgs, idx)
-            before_raw = _snapshot_file_content(prior, p, cwd_val) if prior else None
+            synthetic_before = m.get("_synthetic_before")
+            if isinstance(synthetic_before, str):
+                before_raw = synthetic_before
+            else:
+                prior = _prior_snapshot_message(msgs, idx)
+                before_raw = _snapshot_file_content(prior, p, cwd_val) if prior else None
             after_raw = _snapshot_file_content(m, p, cwd_val)
             diff_blob = _file_edit_diff_from_raw_strings(before_raw, after_raw, p)
             traj.append(trajectory_row("user", act, step_env, tool_result=diff_blob))
@@ -1382,6 +1388,39 @@ def _is_export_noise_message(msg: dict) -> bool:
     return False
 
 
+def _edit_verifier_is_agent_driven(msgs: List[dict], idx: int) -> bool:
+    """
+  True when ``edit_verifier`` was almost certainly emitted by auto-refinement (after
+  user_prompt / file_edit / brain_edit), not a manual sidebar verifier edit.
+  """
+    if msgs[idx].get("type") != "edit_verifier":
+        return False
+    for j in range(idx - 1, -1, -1):
+        prev = msgs[j]
+        pt = prev.get("type")
+        if pt == "edit_verifier":
+            continue
+        if pt in ("user_prompt", "file_edit", "brain_edit"):
+            return True
+        if pt in ("edit_workflow", "edit_plan"):
+            return False
+        if pt == "update_verifiers":
+            return True
+    return False
+
+
+def reclassify_auto_verifier_edits(msgs: List[dict]) -> List[dict]:
+    """Map auto-refinement ``edit_verifier`` rows to agent ``update_verifiers`` for export."""
+    out: List[dict] = []
+    for i, m in enumerate(msgs):
+        row = dict(m)
+        if row.get("type") == "edit_verifier" and _edit_verifier_is_agent_driven(msgs, i):
+            row["role"] = "agent"
+            row["type"] = "update_verifiers"
+        out.append(row)
+    return out
+
+
 def normalize_pi_message(msg: dict) -> dict:
     msg_type = msg.get("type")
     role = msg.get("role")
@@ -1389,6 +1428,8 @@ def normalize_pi_message(msg: dict) -> dict:
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
     if msg_type in ("edit_workflow", "edit_plan"):
         return {"role": "user", "type": "edit_workflow"}
+    if msg_type == "update_verifiers":
+        return {"role": "agent", "type": "update_verifiers"}
     if msg_type == "edit_verifier":
         return {"role": "user", "type": "edit_verifier"}
     if msg_type == "file_edit":
@@ -1707,6 +1748,197 @@ def _prior_snapshot_message(msgs: List[dict], before_idx: int) -> Optional[dict]
         if isinstance(msgs[j].get("state_snapshot"), dict):
             return msgs[j]
     return None
+
+
+def _snapshot_files_content_map(norm: dict, cwd: Optional[str]) -> Dict[str, str]:
+    """Map canonical path key -> utf-8 file content from a message snapshot."""
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return {}
+    files = snap.get("file")
+    if not isinstance(files, list):
+        return {}
+    out: Dict[str, str] = {}
+    cwd_opt = str(cwd).strip() if cwd else None
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        if f.get("content_encoding") == "base64":
+            continue
+        content = f.get("content")
+        if not isinstance(content, str):
+            continue
+        path_s = str(f.get("path", "")).strip()
+        if not path_s:
+            continue
+        key = next(iter(_path_variant_strings(cwd_opt, path_s)), path_s.replace("\\", "/"))
+        out[key] = content
+    return out
+
+
+def _display_path_from_key(path_key: str) -> str:
+    return os.path.basename(path_key.replace("\\", "/")) or path_key
+
+
+def _workflow_structure_signature(wf: Optional[list]) -> str:
+    """Workflow tree shape for human edit detection (ignores verifier status)."""
+
+    def walk(nodes: Any) -> List[Any]:
+        if not isinstance(nodes, list):
+            return []
+        rows: List[Any] = []
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            rows.append(
+                {
+                    "description": str(n.get("description", "")),
+                    "outputFiles": [str(x) for x in (n.get("outputFiles") or [])],
+                    "children": walk(n.get("children")),
+                }
+            )
+        return rows
+
+    return json.dumps(walk(wf) if isinstance(wf, list) else [], sort_keys=True)
+
+
+def _human_verifier_signature(wf: Optional[list]) -> str:
+    """Verifier criterion text + marks only (ignore pass/fail status churn)."""
+
+    def walk(nodes: Any) -> List[Any]:
+        if not isinstance(nodes, list):
+            return []
+        rows: List[Any] = []
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            crits = n.get("verifiers") or []
+            marks = n.get("verifierMarks") or []
+            ver_rows: List[Any] = []
+            for i, v in enumerate(crits):
+                if isinstance(v, dict):
+                    crit = _one_line_verifier_field(v.get("criterion", ""))
+                elif isinstance(v, str):
+                    crit = _one_line_verifier_field(v)
+                else:
+                    crit = ""
+                mark = marks[i] if i < len(marks) and marks[i] is not None else None
+                ver_rows.append({"criterion": crit, "mark": mark})
+            rows.append({"id": n.get("id"), "verifiers": ver_rows, "children": walk(n.get("children"))})
+        return rows
+
+    return json.dumps(walk(wf) if isinstance(wf, list) else [], sort_keys=True)
+
+
+def _message_agent_wrote_file_basename(m: dict, path_key: str) -> bool:
+    """True if this agent row includes a write/edit tool call for ``path_key``'s basename."""
+    raw = m.get("raw")
+    if not isinstance(raw, dict):
+        return False
+    want_base = os.path.basename(path_key.replace("\\", "/"))
+    if not want_base:
+        return False
+    blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
+    if not isinstance(blocks, list):
+        return False
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") not in ("tool_use", "toolCall"):
+            continue
+        name = str(b.get("name", "")).lower()
+        if name not in ("write", "edit"):
+            continue
+        inp = b.get("input") or b.get("arguments") or {}
+        if not isinstance(inp, dict):
+            continue
+        fp = str(inp.get("path") or inp.get("file_path") or "").strip()
+        if fp and os.path.basename(fp.replace("\\", "/")) == want_base:
+            return True
+    return False
+
+
+def inject_synthetic_human_edits(msgs: List[dict], cwd: Optional[str]) -> List[dict]:
+    """
+    Insert synthetic human-action rows when snapshots show edits but the DB has no
+    ``file_edit`` / ``edit_workflow`` / ``edit_verifier`` message (preview save without
+    recording, or verifier edits lost between snapshots).
+    """
+    if not msgs:
+        return msgs
+    out: List[dict] = []
+    prev_files: Dict[str, str] = {}
+    prev_wf_struct: Optional[str] = None
+    prev_ver_sig: Optional[str] = None
+    prev_wf_tree: Optional[list] = None
+
+    for i, m in enumerate(msgs):
+        m_type = m.get("type")
+        curr_files = _snapshot_files_content_map(m, cwd)
+        curr_wf = _snapshot_workflow_tree(m)
+        curr_wf_struct = _workflow_structure_signature(curr_wf) if curr_wf is not None else None
+        curr_ver_sig = _human_verifier_signature(curr_wf) if curr_wf is not None else None
+
+        if m_type != "file_edit":
+            for path_key, after_content in curr_files.items():
+                before_content = prev_files.get(path_key)
+                if before_content is None or before_content == after_content:
+                    continue
+                # Only skip when the immediately prior row is the agent write/edit for this file.
+                if i > 0 and _message_agent_wrote_file_basename(msgs[i - 1], path_key):
+                    continue
+                out.append(
+                    {
+                        "role": "user",
+                        "type": "file_edit",
+                        "path": _display_path_from_key(path_key),
+                        "state_snapshot": copy.deepcopy(m.get("state_snapshot")),
+                        "_synthetic_before": before_content,
+                    }
+                )
+
+        if m_type not in ("edit_workflow", "edit_plan") and curr_wf_struct is not None:
+            if prev_wf_struct is not None and curr_wf_struct != prev_wf_struct:
+                out.append(
+                    {
+                        "role": "user",
+                        "type": "edit_workflow",
+                        "state_snapshot": copy.deepcopy(m.get("state_snapshot")),
+                        "_synthetic": True,
+                    }
+                )
+        if (
+            m_type not in ("edit_verifier", "update_verifiers")
+            and curr_ver_sig is not None
+            and prev_ver_sig is not None
+            and curr_ver_sig != prev_ver_sig
+            and (prev_wf_struct is None or curr_wf_struct == prev_wf_struct)
+        ):
+            prev_m = msgs[i - 1] if i > 0 else None
+            agent_driven = m.get("role") == "agent" or (
+                prev_m is not None
+                and prev_m.get("type") in ("file_edit", "brain_edit", "user_prompt")
+            )
+            out.append(
+                {
+                    "role": "agent" if agent_driven else "user",
+                    "type": "update_verifiers" if agent_driven else "edit_verifier",
+                    "state_snapshot": copy.deepcopy(m.get("state_snapshot")),
+                    "_synthetic": True,
+                    "_synthetic_wf_before": copy.deepcopy(prev_wf_tree),
+                }
+            )
+
+        out.append(m)
+        prev_files = curr_files if curr_files else prev_files
+        if curr_wf_struct is not None:
+            prev_wf_struct = curr_wf_struct
+        if curr_ver_sig is not None:
+            prev_ver_sig = curr_ver_sig
+        if curr_wf is not None:
+            prev_wf_tree = copy.deepcopy(curr_wf)
+
+    return out
 
 
 _SENTENCE_BREAK_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -2696,6 +2928,8 @@ def build_weight_based_session(
         action_trajectory = filter_out_stream_events(action_trajectory)
 
     initial_task_instruction = extract_initial_task_instruction(action_trajectory, last_prompt or "")
+    action_trajectory = reclassify_auto_verifier_edits(action_trajectory)
+    action_trajectory = inject_synthetic_human_edits(action_trajectory, export_cwd)
     full_traj = build_full_session_trajectory(
         action_trajectory,
         initial_task_instruction,

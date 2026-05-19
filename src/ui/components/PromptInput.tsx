@@ -42,6 +42,9 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   const handleSend = useCallback(async () => {
     if (!prompt.trim()) return;
 
+    window.dispatchEvent(new CustomEvent("preview-flush-save"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
     if (!activeSessionId) {
       let title = "";
       try {
