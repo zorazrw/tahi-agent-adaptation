@@ -54,7 +54,12 @@ function BrainMdField({
         <ViewToggle mode={mode} onChange={setMode} />
       </div>
       {mode === "preview" ? (
-        <div className="md-prose min-h-[120px] max-h-[min(360px,50vh)] overflow-auto rounded-lg border border-ink-900/10 bg-surface px-3 py-2">
+        <div
+          className="md-prose min-h-0 h-[min(400px,45vh)] overflow-y-auto overscroll-y-contain rounded-lg border border-ink-900/10 bg-surface px-3 py-2"
+          tabIndex={0}
+          role="region"
+          aria-label={`${ariaLabel} preview`}
+        >
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeRaw]}
@@ -64,7 +69,7 @@ function BrainMdField({
         </div>
       ) : (
         <textarea
-          className="min-h-[120px] w-full rounded-lg border border-ink-900/10 bg-surface px-3 py-2 text-sm text-ink-800 font-mono leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-primary/25 focus:border-primary/30"
+          className="min-h-[120px] h-[min(400px,45vh)] max-h-[min(400px,45vh)] w-full overflow-y-auto rounded-lg border border-ink-900/10 bg-surface px-3 py-2 text-sm text-ink-800 font-mono leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-primary/25 focus:border-primary/30"
           value={content}
           onChange={(e) => onChange(e.target.value)}
           spellCheck={false}
