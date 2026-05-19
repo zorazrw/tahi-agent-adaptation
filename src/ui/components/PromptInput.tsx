@@ -703,6 +703,8 @@ export function PromptInput({
     selectedNode.status !== "running"
   );
 
+  const isAcceptingPredictionRef = useRef(false);
+
   const canAcceptPrediction = Boolean(
     predictedSuggestion &&
     activeSessionId &&
@@ -722,7 +724,9 @@ export function PromptInput({
   const setGlobalError = useAppStore((s) => s.setGlobalError);
 
   const acceptPredictedSuggestion = useCallback(async () => {
+    if (isAcceptingPredictionRef.current) return;
     if (!predictedSuggestion || !activeSessionId) return;
+    isAcceptingPredictionRef.current = true;
     const sessionCwd = activeSession?.cwd;
 
     // Fake `edit_workflow` UI test hook: append a "Visualization" step locally
@@ -777,16 +781,20 @@ export function PromptInput({
         const message = err instanceof Error ? err.message : String(err);
         console.error("Failed to execute predicted action:", err);
         setGlobalError(`Failed to execute ${action.type}: ${message}`);
+        isAcceptingPredictionRef.current = false;
       }
       return;
     }
 
     // Legacy fallback: model returned no validated executable. Preserve the
-    // previous behaviour (message → continue, brain_edit → record, others → dismiss).
+    // previous behaviour (message -> continue, brain_edit -> record, others -> dismiss).
     const t = predictedSuggestion.actionType;
     if (t === "message") {
       const draftText = predictedSuggestion.draftText.trim();
-      if (!draftText) return;
+      if (!draftText) {
+        isAcceptingPredictionRef.current = false;
+        return;
+      }
       onAcceptPredictedSuggestion?.();
       onSendMessage?.();
       sendEvent({
@@ -820,13 +828,31 @@ export function PromptInput({
     setPrompt,
   ]);
 
+  useEffect(() => {
+    isAcceptingPredictionRef.current = false;
+  }, [predictedSuggestion]);
+
+  useEffect(() => {
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+        return;
+      }
+      if (!canAcceptPrediction) return;
+      event.preventDefault();
+      void acceptPredictedSuggestion();
+    };
+
+    window.addEventListener("keydown", handleWindowKeyDown);
+    return () => window.removeEventListener("keydown", handleWindowKeyDown);
+  }, [acceptPredictedSuggestion, canAcceptPrediction]);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Escape" && predictedSuggestion) {
       e.preventDefault();
       onClearPredictedSuggestion?.();
       return;
     }
-    // Tab to start next pending step (prediction accept uses the suggestion “Accept” button, not Tab)
+    // If no prediction is available, Tab can still start the selected pending step.
     if (e.key === "Tab" && hasPendingNode && selectedNodeId && !prompt.trim() && !canAcceptPrediction) {
       e.preventDefault();
       setRunningNodeId(selectedNodeId);
