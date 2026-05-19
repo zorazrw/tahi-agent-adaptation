@@ -4,6 +4,7 @@ import { z } from "zod";
 import type {
   PredictedUserActionSuggestion,
   StreamMessage,
+  UserPredictionPairwiseJudgeResult,
   UserPredictionJudgeResult,
   WorkflowNode,
 } from "../types.js";
@@ -150,6 +151,17 @@ function normalizeJudgeVerdict(value: unknown): UserPredictionJudgeResult["verdi
     return raw;
   }
   return "inaccurate";
+}
+
+function normalizePairwiseWinner(value: unknown): UserPredictionPairwiseJudgeResult["winner"] {
+  const raw = asString(value).trim().toLowerCase();
+  if (raw === "personalized" || raw === "with_profile" || raw === "with profile") {
+    return "personalized";
+  }
+  if (raw === "baseline" || raw === "without_profile" || raw === "without profile" || raw === "no_profile") {
+    return "baseline";
+  }
+  return "tie";
 }
 
 export function loadUserProfileMarkdown(cwd?: string): { profileMarkdown: string; profilePath?: string } {
@@ -448,6 +460,74 @@ function buildJudgePrompt(args: {
     .join("\n");
 }
 
+function predictionForPairwisePrompt(
+  label: string,
+  prediction: PredictedUserActionSuggestion | null,
+  predictionError?: string
+): string {
+  if (!prediction) {
+    return [
+      `${label}:`,
+      "status: invalid_or_null_prediction",
+      `error: ${predictionError || "Prediction model returned no valid executable action."}`,
+    ].join("\n");
+  }
+
+  return [
+    `${label}:`,
+    `actionType: ${prediction.actionType}`,
+    `draftText: ${prediction.draftText || "(empty)"}`,
+    `confidence: ${prediction.confidence}`,
+    `rationale: ${prediction.rationale || "(empty)"}`,
+  ].join("\n");
+}
+
+function buildPairwiseJudgePrompt(args: {
+  transcript: string;
+  workflowSummary?: string;
+  baselinePrediction: PredictedUserActionSuggestion | null;
+  baselinePredictionError?: string;
+  personalizedPrediction: PredictedUserActionSuggestion | null;
+  personalizedPredictionError?: string;
+  actualActionType: string;
+  actualActionText: string;
+}): string {
+  return [
+    "You are comparing two predicted next user actions against the actual next user step.",
+    "Return ONLY JSON.",
+    'Schema: {"winner":"personalized|baseline|tie","rationale":"string"}',
+    "Rank the two predictions by which one would have been more useful for anticipating the user's actual next action.",
+    "Judge underlying intent more than exact UI action label.",
+    "Use winner='tie' when both predictions are similarly useful, similarly wrong, or impossible to distinguish.",
+    "",
+    "RECENT CONTEXT:",
+    args.transcript || "(none)",
+    "",
+    args.workflowSummary
+      ? ["WORKFLOW / VERIFIER SUMMARY:", args.workflowSummary, ""].join("\n")
+      : "",
+    predictionForPairwisePrompt(
+      "PREDICTION A - WITHOUT USER PROFILE",
+      args.baselinePrediction,
+      args.baselinePredictionError
+    ),
+    "",
+    predictionForPairwisePrompt(
+      "PREDICTION B - WITH USER PROFILE",
+      args.personalizedPrediction,
+      args.personalizedPredictionError
+    ),
+    "",
+    "ACTUAL NEXT USER STEP:",
+    `actionType: ${args.actualActionType}`,
+    `actionText: ${args.actualActionText || "(empty)"}`,
+    "",
+    "Which prediction should rank higher: personalized, baseline, or tie?",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export async function judgePredictedAction(args: {
   cwd: string;
   transcript: string;
@@ -474,6 +554,38 @@ export async function judgePredictedAction(args: {
   return {
     verdict: normalizeJudgeVerdict(parsed.verdict),
     score: clamp01(parsed.score, 0),
+    rationale: asString(parsed.rationale).trim(),
+    rawResponse,
+  };
+}
+
+export async function judgePredictionPair(args: {
+  cwd: string;
+  transcript: string;
+  workflowSummary?: string;
+  baselinePrediction: PredictedUserActionSuggestion | null;
+  baselinePredictionError?: string;
+  personalizedPrediction: PredictedUserActionSuggestion | null;
+  personalizedPredictionError?: string;
+  actualActionType: string;
+  actualActionText: string;
+}): Promise<UserPredictionPairwiseJudgeResult> {
+  const rawResponse = await runPiTextPrompt({
+    cwd: args.cwd,
+    prompt: buildPairwiseJudgePrompt(args),
+  });
+
+  const parsed = extractJsonObject(rawResponse);
+  if (!parsed) {
+    return {
+      winner: "tie",
+      rationale: rawResponse.trim() || "Model returned an unparsable pairwise judgment.",
+      rawResponse,
+    };
+  }
+
+  return {
+    winner: normalizePairwiseWinner(parsed.winner),
     rationale: asString(parsed.rationale).trim(),
     rawResponse,
   };

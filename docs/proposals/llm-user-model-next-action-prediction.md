@@ -259,7 +259,7 @@ That keeps the system:
 - `src/electron/libs/user-predict.ts`
   run next-action / next-message prediction using raw markdown user state
 
-This integrates naturally with the existing memory pipeline in [`memory-store.ts`](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/libs/memory-store.ts).
+This integrates naturally with the existing memory pipeline in [`memory-store.ts`](../../src/electron/libs/memory-store.ts).
 
 ## Architecture: Backtesting on Historical Conversations
 
@@ -367,7 +367,7 @@ Later, this can expand to:
 
 ### Important interaction constraint
 
-The app already uses `Tab` in [`PromptInput.tsx`](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/ui/components/PromptInput.tsx) to start the next pending workflow step when the prompt is empty.
+The app already uses `Tab` in [`PromptInput.tsx`](../../src/ui/components/PromptInput.tsx) to start the next pending workflow step when the prompt is empty.
 
 So the safest precedence rule is:
 
@@ -391,7 +391,7 @@ type PredictedUserReply = {
 };
 ```
 
-Suggested store additions in [`useAppStore.ts`](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/ui/store/useAppStore.ts):
+Suggested store additions in [`useAppStore.ts`](../../src/ui/store/useAppStore.ts):
 
 - `predictedUserReply`
 - `setPredictedUserReply`
@@ -401,7 +401,7 @@ Suggested store additions in [`useAppStore.ts`](/Users/jettchen/dev/human-empowe
 
 Relevant file:
 
-- [`PromptInput.tsx`](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/ui/components/PromptInput.tsx)
+- [`PromptInput.tsx`](../../src/ui/components/PromptInput.tsx)
 
 Behavior:
 

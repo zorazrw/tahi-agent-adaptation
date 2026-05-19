@@ -33,6 +33,8 @@ export type {
   TinkerModelConfig,
   TinkerProviderConfig,
   TinkerProviderInput,
+  UserPredictionPairwiseJudgeResult,
+  UserPredictionPairwiseWinner,
   UserPromptMessage,
   UserPredictionJudgeResult,
   VerifierMark,

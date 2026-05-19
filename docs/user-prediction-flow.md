@@ -35,7 +35,7 @@ Backtesting uses the same predictor, then runs a second LLM pass as a judge.
 
 ### Main entry point
 
-The live prediction entry point is registered in [src/electron/main.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/main.ts).
+The live prediction entry point is registered in [src/electron/main.ts](../src/electron/main.ts).
 
 IPC handler:
 
@@ -51,13 +51,13 @@ That handler:
 
 ### Preload bridge
 
-The renderer calls prediction through [src/electron/preload.cts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/preload.cts):
+The renderer calls prediction through [src/electron/preload.cts](../src/electron/preload.cts):
 
 - `window.electron.predictNextUserAction(sessionId)`
 
 ### Renderer trigger
 
-The renderer-side trigger lives in [src/ui/App.tsx](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/ui/App.tsx).
+The renderer-side trigger lives in [src/ui/App.tsx](../src/ui/App.tsx).
 
 The prediction request is made when:
 
@@ -70,7 +70,7 @@ So prediction is currently **post-turn**, not streaming and not per-keystroke.
 
 ## What LLM Is Used
 
-The prediction flow uses the same Pi runtime stack as the rest of the app, but through a lightweight helper in [src/electron/libs/pi-prompt.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/libs/pi-prompt.ts).
+The prediction flow uses the same Pi runtime stack as the rest of the app, but through a lightweight helper in [src/electron/libs/pi-prompt.ts](../src/electron/libs/pi-prompt.ts).
 
 ### Model/provider selection
 
@@ -129,7 +129,7 @@ Important implications:
 
 ## Context Sent to the Predictor
 
-The prediction input is assembled in [src/electron/libs/user-predict.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/libs/user-predict.ts).
+The prediction input is assembled in [src/electron/libs/user-predict.ts](../src/electron/libs/user-predict.ts).
 
 ### 1. User profile markdown
 
@@ -220,7 +220,7 @@ Notes:
 
 ## UI Suggestion Flow
 
-The current UI surface is implemented in [src/ui/components/PromptInput.tsx](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/ui/components/PromptInput.tsx).
+The current UI surface is implemented in [src/ui/components/PromptInput.tsx](../src/ui/components/PromptInput.tsx).
 
 ### What the user sees
 
@@ -251,7 +251,7 @@ Otherwise, the existing prompt behavior remains:
 
 ## Backtest Flow
 
-The backtest entry point is [scripts/backtest_user_profile.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/scripts/backtest_user_profile.ts).
+The backtest entry point is [scripts/backtest_user_profile.ts](../scripts/backtest_user_profile.ts).
 
 ### Dataset
 
@@ -266,8 +266,9 @@ For each sampled user intervention point:
 1. take the trajectory prefix up to but not including the real next user step
 2. build transcript + workflow summary from that prefix
 3. run the same `predictNextUserAction(...)` call used by the app
-4. compare the prediction to the actual next user step
-5. run a second LLM pass as judge
+4. when baseline is enabled, run the same predictor again with an empty user profile
+5. run a second LLM pass that directly ranks the with-profile prediction against the empty-profile prediction
+6. when baseline is skipped, use the legacy single-prediction judge score
 
 ### Judge LLM
 
@@ -275,7 +276,18 @@ The judge uses the **same Pi-backed text prompt path** as the predictor.
 
 It is therefore typically the same configured provider/model unless the user changes Pi settings between calls.
 
-The judge returns:
+For the normal baseline-vs-profile backtest, the judge returns:
+
+```json
+{
+  "winner": "personalized|baseline|tie",
+  "rationale": "string"
+}
+```
+
+The judge is instructed to rank which prediction would have been more useful for anticipating the actual next user step, while caring more about underlying intent than exact UI action label.
+
+When the baseline is skipped, the script falls back to the older single-prediction judge shape:
 
 ```json
 {
@@ -284,8 +296,6 @@ The judge returns:
   "rationale": "string"
 }
 ```
-
-The judge is instructed to care more about underlying intent than exact UI action label.
 
 ## Current Limitations
 
@@ -313,10 +323,11 @@ Each prediction is a fresh Pi call after the session becomes idle.
 
 ## Relevant Files
 
-- [src/electron/main.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/main.ts)
-- [src/electron/preload.cts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/preload.cts)
-- [src/electron/libs/pi-prompt.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/libs/pi-prompt.ts)
-- [src/electron/libs/user-predict.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/electron/libs/user-predict.ts)
-- [src/ui/App.tsx](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/ui/App.tsx)
-- [src/ui/components/PromptInput.tsx](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/src/ui/components/PromptInput.tsx)
-- [scripts/backtest_user_profile.ts](/Users/jettchen/dev/human-empowerment-agent/agent-cowork/scripts/backtest_user_profile.ts)
+- [src/electron/main.ts](../src/electron/main.ts)
+- [src/electron/preload.cts](../src/electron/preload.cts)
+- [src/electron/libs/pi-prompt.ts](../src/electron/libs/pi-prompt.ts)
+- [src/electron/libs/user-predict.ts](../src/electron/libs/user-predict.ts)
+- [src/ui/App.tsx](../src/ui/App.tsx)
+- [src/ui/components/PromptInput.tsx](../src/ui/components/PromptInput.tsx)
+- [scripts/backtest_user_profile.ts](../scripts/backtest_user_profile.ts)
+- [docs/user-prediction-backtest.md](user-prediction-backtest.md)

@@ -3,11 +3,13 @@ import { dirname, resolve } from "path";
 import type {
   PredictedUserActionSuggestion,
   PredictionJudgeVerdict,
+  UserPredictionPairwiseJudgeResult,
   UserPredictionJudgeResult,
 } from "../src/electron/types.ts";
 import {
   buildTranscriptFromExportedSteps,
   buildWorkflowSummaryFromExportedSteps,
+  judgePredictionPair,
   judgePredictedAction,
   loadUserProfileMarkdown,
   predictNextUserAction,
@@ -44,7 +46,7 @@ type BacktestCase = {
 type PredictionRun = {
   prediction: PredictedUserActionSuggestion | null;
   predictionError?: string;
-  judge: UserPredictionJudgeResult;
+  judge?: UserPredictionJudgeResult;
 };
 
 type BacktestRow = {
@@ -58,6 +60,7 @@ type BacktestRow = {
   actualActionText: string;
   baseline: PredictionRun | null;
   personalized: PredictionRun;
+  pairwiseJudge: UserPredictionPairwiseJudgeResult | null;
 };
 
 type MetricsBucket = {
@@ -80,6 +83,23 @@ type MetricsBucket = {
   >;
 };
 
+type PairwiseMetricsBucket = {
+  totalCases: number;
+  personalizedWins: number;
+  baselineWins: number;
+  ties: number;
+  personalizedNullPredictions: number;
+  baselineNullPredictions: number;
+};
+
+const DEFAULT_REPORT_NAME_PREFIX = "user-simulator-backtest";
+
+function defaultReportName(date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${DEFAULT_REPORT_NAME_PREFIX}-${month}-${day}`;
+}
+
 function actionType(action: string): string {
   const m = String(action).match(/^([A-Za-z_]+)/);
   return m?.[1] ?? "unknown";
@@ -90,7 +110,7 @@ function parseArgs(argv: string[]): CliOptions {
     caseSelection: "all",
     casesPerSession: 2,
     includeBaseline: true,
-    reportName: "user-simulator-backtest",
+    reportName: defaultReportName(),
     outDir: "docs/backtests",
   };
 
@@ -155,7 +175,7 @@ Options:
   --cases-per-session N                Sampling count for representative mode (default: 2)
   --include-baseline                   Include empty-profile baseline (default)
   --no-baseline                        Skip baseline calls
-  --report-name NAME                   Output basename (default: user-simulator-backtest)
+  --report-name NAME                   Output basename (default: user-simulator-backtest-MM-DD)
   --out-dir DIR                        Output directory (default: docs/backtests)
 `);
 }
@@ -200,19 +220,21 @@ function pickCases(session: SessionBlob, options: CliOptions): BacktestCase[] {
   return pickAllUserCases(session);
 }
 
-function failedPredictionRun(message: string): PredictionRun {
+function failedPredictionRun(message: string, includeJudge = false): PredictionRun {
   return {
     prediction: null,
     predictionError: message,
-    judge: {
-      verdict: "inaccurate",
-      score: 0,
-      rationale: message,
-    },
+    judge: includeJudge
+      ? {
+          verdict: "inaccurate",
+          score: 0,
+          rationale: message,
+        }
+      : undefined,
   };
 }
 
-async function runPredictionCase(args: {
+async function runPrediction(args: {
   cwd: string;
   userProfileMarkdown: string;
   transcript: string;
@@ -234,34 +256,57 @@ async function runPredictionCase(args: {
       return failedPredictionRun("Prediction model returned no valid executable action.");
     }
 
-    const judge = await judgePredictedAction({
-      cwd: args.cwd,
-      transcript: args.transcript,
-      workflowSummary: args.workflowSummary,
-      prediction,
-      actualActionType: args.actualActionType,
-      actualActionText: args.actualActionText,
-    });
-
-    return { prediction, judge };
+    return { prediction };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return failedPredictionRun(message);
   }
 }
 
+async function judgeSinglePrediction(args: {
+  cwd: string;
+  transcript: string;
+  workflowSummary: string;
+  run: PredictionRun;
+  actualActionType: string;
+  actualActionText: string;
+}): Promise<PredictionRun> {
+  if (!args.run.prediction) {
+    return {
+      ...args.run,
+      judge: {
+        verdict: "inaccurate",
+        score: 0,
+        rationale: args.run.predictionError || "Prediction model returned no valid executable action.",
+      },
+    };
+  }
+
+  const judge = await judgePredictedAction({
+    cwd: args.cwd,
+    transcript: args.transcript,
+    workflowSummary: args.workflowSummary,
+    prediction: args.run.prediction,
+    actualActionType: args.actualActionType,
+    actualActionText: args.actualActionText,
+  });
+
+  return { ...args.run, judge };
+}
+
 function verdictCount(rows: BacktestRow[], selector: (row: BacktestRow) => PredictionRun | null, verdict: PredictionJudgeVerdict): number {
-  return rows.filter((row) => selector(row)?.judge.verdict === verdict).length;
+  return rows.filter((row) => selector(row)?.judge?.verdict === verdict).length;
 }
 
 function buildMetrics(rows: BacktestRow[], selector: (row: BacktestRow) => PredictionRun | null): MetricsBucket {
-  const usableRows = rows.filter((row) => selector(row));
+  const usableRows = rows.filter((row) => selector(row)?.judge);
   const scoreSum = usableRows.reduce((sum, row) => sum + (selector(row)?.judge.score ?? 0), 0);
   const byActualActionType: MetricsBucket["byActualActionType"] = {};
 
   for (const row of usableRows) {
     const run = selector(row);
     if (!run) continue;
+    if (!run.judge) continue;
     const key = row.actualActionType;
     byActualActionType[key] ??= {
       totalCases: 0,
@@ -295,6 +340,20 @@ function buildMetrics(rows: BacktestRow[], selector: (row: BacktestRow) => Predi
   };
 }
 
+function buildPairwiseMetrics(rows: BacktestRow[]): PairwiseMetricsBucket | null {
+  const usableRows = rows.filter((row) => row.pairwiseJudge);
+  if (usableRows.length === 0) return null;
+
+  return {
+    totalCases: usableRows.length,
+    personalizedWins: usableRows.filter((row) => row.pairwiseJudge?.winner === "personalized").length,
+    baselineWins: usableRows.filter((row) => row.pairwiseJudge?.winner === "baseline").length,
+    ties: usableRows.filter((row) => row.pairwiseJudge?.winner === "tie").length,
+    personalizedNullPredictions: usableRows.filter((row) => !row.personalized.prediction).length,
+    baselineNullPredictions: usableRows.filter((row) => !row.baseline?.prediction).length,
+  };
+}
+
 function jsonForMarkdown(value: string, maxLength = 600): string {
   const compact = value.replace(/\s+/g, " ").trim();
   return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
@@ -305,6 +364,7 @@ function predictionSummary(run: PredictionRun | null): string {
   const prediction = run.prediction;
   const action = prediction ? `\`${prediction.actionType}\`` : "`null`";
   const draft = prediction?.draftText ? ` - ${jsonForMarkdown(prediction.draftText, 240)}` : "";
+  if (!run.judge) return `${action}${draft}`;
   return `${action}${draft} | ${run.judge.verdict} (${run.judge.score.toFixed(3)})`;
 }
 
@@ -353,12 +413,36 @@ async function main(): Promise<void> {
     };
 
     const baseline = options.includeBaseline
-      ? await runPredictionCase({ ...common, userProfileMarkdown: "" })
+      ? await runPrediction({ ...common, userProfileMarkdown: "" })
       : null;
-    const personalized = await runPredictionCase({
+    let personalized = await runPrediction({
       ...common,
       userProfileMarkdown: profileMarkdown,
     });
+    let pairwiseJudge: UserPredictionPairwiseJudgeResult | null = null;
+
+    if (baseline) {
+      pairwiseJudge = await judgePredictionPair({
+        cwd,
+        transcript,
+        workflowSummary,
+        baselinePrediction: baseline.prediction,
+        baselinePredictionError: baseline.predictionError,
+        personalizedPrediction: personalized.prediction,
+        personalizedPredictionError: personalized.predictionError,
+        actualActionType,
+        actualActionText,
+      });
+    } else {
+      personalized = await judgeSinglePrediction({
+        cwd,
+        transcript,
+        workflowSummary,
+        run: personalized,
+        actualActionType,
+        actualActionText,
+      });
+    }
 
     rows.push({
       caseId: `${session.uuid}:${i}`,
@@ -371,11 +455,13 @@ async function main(): Promise<void> {
       actualActionText,
       baseline,
       personalized,
+      pairwiseJudge,
     });
   }
 
-  const baselineMetrics = options.includeBaseline ? buildMetrics(rows, (row) => row.baseline) : null;
-  const personalizedMetrics = buildMetrics(rows, (row) => row.personalized);
+  const pairwiseMetrics = buildPairwiseMetrics(rows);
+  const baselineMetrics = !pairwiseMetrics && options.includeBaseline ? buildMetrics(rows, (row) => row.baseline) : null;
+  const personalizedMetrics = !pairwiseMetrics ? buildMetrics(rows, (row) => row.personalized) : null;
   const payload = {
     generatedAt: new Date().toISOString(),
     profilePath,
@@ -387,9 +473,10 @@ async function main(): Promise<void> {
     sessionCount: sessions.length,
     totalCases: rows.length,
     metrics: {
+      pairwise: pairwiseMetrics,
       baseline: baselineMetrics,
       personalized: personalizedMetrics,
-      delta: baselineMetrics
+      delta: baselineMetrics && personalizedMetrics
         ? {
             averageJudgeScore: personalizedMetrics.averageJudgeScore - baselineMetrics.averageJudgeScore,
             accurate: personalizedMetrics.accurate - baselineMetrics.accurate,
@@ -416,11 +503,16 @@ async function main(): Promise<void> {
     "## Summary",
     "",
     `- Total cases: ${rows.length}`,
+    pairwiseMetrics
+      ? `- Pairwise ranking: personalized wins ${pairwiseMetrics.personalizedWins}, baseline wins ${pairwiseMetrics.baselineWins}, ties ${pairwiseMetrics.ties}`
+      : "- Pairwise ranking: not run",
     baselineMetrics
       ? `- Baseline average judge score: ${baselineMetrics.averageJudgeScore.toFixed(3)} (${baselineMetrics.accurate} accurate, ${baselineMetrics.partiallyAccurate} partial, ${baselineMetrics.inaccurate} inaccurate, ${baselineMetrics.nullPredictions} null)`
-      : "- Baseline: not run",
-    `- Personalized average judge score: ${personalizedMetrics.averageJudgeScore.toFixed(3)} (${personalizedMetrics.accurate} accurate, ${personalizedMetrics.partiallyAccurate} partial, ${personalizedMetrics.inaccurate} inaccurate, ${personalizedMetrics.nullPredictions} null)`,
-    baselineMetrics
+      : "",
+    personalizedMetrics
+      ? `- Personalized average judge score: ${personalizedMetrics.averageJudgeScore.toFixed(3)} (${personalizedMetrics.accurate} accurate, ${personalizedMetrics.partiallyAccurate} partial, ${personalizedMetrics.inaccurate} inaccurate, ${personalizedMetrics.nullPredictions} null)`
+      : "",
+    baselineMetrics && personalizedMetrics
       ? `- Personalized score delta: ${(personalizedMetrics.averageJudgeScore - baselineMetrics.averageJudgeScore).toFixed(3)}`
       : "",
     "",
@@ -429,7 +521,8 @@ async function main(): Promise<void> {
     "- Each case hides one real user action and predicts it from only the prior trajectory prefix.",
     "- Baseline uses the same model/context with an empty user profile.",
     "- Personalized uses the same model/context plus the local USER_PROFILE.md.",
-    "- Judging is LLM-based and should be interpreted as directional.",
+    "- When baseline is enabled, judging is a direct pairwise LLM ranking between the empty-profile and user-profile predictions.",
+    "- When baseline is skipped, judging falls back to the legacy single-prediction LLM score.",
     "",
     "## Cases",
     "",
@@ -439,6 +532,9 @@ async function main(): Promise<void> {
       `- Ground truth: \`${row.actualActionType}\` - ${jsonForMarkdown(row.actualActionText)}`,
       `- Baseline: ${predictionSummary(row.baseline)}`,
       `- Personalized: ${predictionSummary(row.personalized)}`,
+      row.pairwiseJudge
+        ? `- Pairwise winner: \`${row.pairwiseJudge.winner}\` - ${jsonForMarkdown(row.pairwiseJudge.rationale)}`
+        : "",
       "",
     ]),
   ]

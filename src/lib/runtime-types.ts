@@ -352,6 +352,14 @@ export type UserPredictionJudgeResult = {
   rawResponse?: string;
 };
 
+export type UserPredictionPairwiseWinner = "personalized" | "baseline" | "tie";
+
+export type UserPredictionPairwiseJudgeResult = {
+  winner: UserPredictionPairwiseWinner;
+  rationale: string;
+  rawResponse?: string;
+};
+
 export type ServerEvent =
   | { type: "stream.message"; payload: { sessionId: string; message: StreamMessage } }
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }
