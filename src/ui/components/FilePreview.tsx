@@ -181,9 +181,15 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
   const isNotFound = result && "error" in result && isFileNotFoundError(result.error);
   const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
   const showZoom = result && "kind" in result && result.kind === "docx";
+  const isTextualPreview =
+    result && "kind" in result && (result.kind === "txt" || result.kind === "md");
 
   return (
-    <div className="flex-1 flex flex-col rounded-lg border border-ink-900/10 bg-surface-secondary overflow-hidden">
+    <div
+      className={`flex-1 flex flex-col overflow-hidden border bg-surface-secondary/60 ${
+        isTextualPreview ? "rounded-xl border-ink-900/8 shadow-card" : "rounded-lg border-ink-900/10"
+      }`}
+    >
       <div className="px-3 py-1.5 border-b border-ink-900/10 flex items-center gap-2 shrink-0">
         <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}

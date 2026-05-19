@@ -13,6 +13,8 @@ type EditableTextPanelProps = {
   monospace?: boolean;
   /** When content from server changes (e.g. after reload), sync local state. */
   contentKey?: string | number;
+  /** "document" = transparent field inside TextDocumentFrame; "default" = bordered box. */
+  variant?: "default" | "document";
 };
 
 export function EditableTextPanel({
@@ -24,7 +26,9 @@ export function EditableTextPanel({
   className = "",
   monospace = true,
   contentKey,
+  variant = "default",
 }: EditableTextPanelProps) {
+  const isDocument = variant === "document";
   const [local, setLocal] = useState(content);
   const [baseline, setBaseline] = useState(content);
   const [saving, setSaving] = useState(false);
@@ -81,7 +85,7 @@ export function EditableTextPanel({
 
   return (
     <div className={`flex flex-col flex-1 min-h-0 ${className}`}>
-      {isDirty && (
+      {isDirty && !isDocument && (
         <div className="flex items-center gap-2 pb-2 border-b border-ink-900/10 mb-2 shrink-0">
           <button
             type="button"
@@ -100,6 +104,9 @@ export function EditableTextPanel({
           <span className="text-xs text-muted-foreground ml-auto">⌘S to save</span>
         </div>
       )}
+      {isDirty && isDocument && error && (
+        <p className="text-sm text-error mb-2 shrink-0">{error}</p>
+      )}
       <textarea
         value={local}
         onChange={(e) => setLocal(e.target.value)}
@@ -111,9 +118,15 @@ export function EditableTextPanel({
           }
         }}
         placeholder={placeholder}
-        className={`flex-1 min-h-0 w-full resize-none rounded border border-ink-900/15 bg-white/80 px-3 py-2 text-sm text-ink-800 focus:outline-none focus:ring-2 focus:ring-ink-500/30 ${
-          monospace ? "font-mono whitespace-pre" : "whitespace-pre-wrap"
-        }`}
+        className={
+          isDocument
+            ? `flex-1 min-h-[12rem] w-full resize-none border-0 bg-transparent px-0 py-0 text-[0.9375rem] leading-[1.75] text-ink-800 focus:outline-none focus:ring-0 selection:bg-primary/15 ${
+                monospace ? "font-mono whitespace-pre" : "whitespace-pre-wrap"
+              }`
+            : `flex-1 min-h-0 w-full resize-none rounded-lg border border-ink-900/12 bg-white/90 px-3 py-2.5 text-[0.9375rem] leading-relaxed text-ink-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/25 ${
+                monospace ? "font-mono whitespace-pre" : "whitespace-pre-wrap"
+              }`
+        }
         spellCheck={!monospace}
       />
     </div>
