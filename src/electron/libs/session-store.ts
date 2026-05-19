@@ -149,6 +149,19 @@ export type PredictionStats = {
   p90LatencyMs: number | null;
 };
 
+export type PredictionLogEntry = {
+  predictionId: string;
+  sessionId: string;
+  actionType: string;
+  confidence: number | null;
+  draftText: string | null;
+  rationale: string | null;
+  shownAt: number | null;
+  updatedAt: number;
+  outcome: "accepted" | "dismissed" | "ignored" | "unresolved";
+  autoAccepted: boolean;
+};
+
 export class SessionStore {
   private sessions = new Map<string, Session>();
   private db: Database.Database;
@@ -691,6 +704,76 @@ export class SessionStore {
       medianLatencyMs,
       p90LatencyMs,
     };
+  }
+
+  getPredictionLog(limit = 8): PredictionLogEntry[] {
+    const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 50);
+    const rows = this.db
+      .prepare(
+        `select prediction_id, session_id, event, action_type, confidence, draft_text, rationale, metadata, created_at
+         from prediction_events
+         order by created_at desc
+         limit ?`
+      )
+      .all(Math.max(50, safeLimit * 8)) as Array<{
+        prediction_id: string;
+        session_id: string;
+        event: string;
+        action_type: string;
+        confidence: number | null;
+        draft_text: string | null;
+        rationale: string | null;
+        metadata: string | null;
+        created_at: number;
+      }>;
+
+    const byPred = new Map<string, PredictionLogEntry>();
+
+    for (const row of rows) {
+      let entry = byPred.get(row.prediction_id);
+      if (!entry) {
+        entry = {
+          predictionId: row.prediction_id,
+          sessionId: row.session_id,
+          actionType: row.action_type,
+          confidence: row.confidence,
+          draftText: row.draft_text,
+          rationale: row.rationale,
+          shownAt: null,
+          updatedAt: row.created_at,
+          outcome: "unresolved",
+          autoAccepted: false,
+        };
+        byPred.set(row.prediction_id, entry);
+      }
+
+      if (row.created_at > entry.updatedAt) entry.updatedAt = row.created_at;
+      if (!entry.draftText && row.draft_text) entry.draftText = row.draft_text;
+      if (!entry.rationale && row.rationale) entry.rationale = row.rationale;
+      if (entry.confidence == null && row.confidence != null) entry.confidence = row.confidence;
+
+      if (row.event === "shown") {
+        entry.shownAt = entry.shownAt == null ? row.created_at : Math.min(entry.shownAt, row.created_at);
+        entry.actionType = row.action_type;
+      } else if (
+        entry.outcome === "unresolved" &&
+        (row.event === "accepted" || row.event === "dismissed" || row.event === "ignored")
+      ) {
+        entry.outcome = row.event;
+        if (row.metadata) {
+          try {
+            const parsed = JSON.parse(row.metadata) as { auto?: boolean };
+            entry.autoAccepted = parsed?.auto === true;
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+
+    return [...byPred.values()]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, safeLimit);
   }
 
   recordPredictionEvent(input: PredictionEventInput): void {

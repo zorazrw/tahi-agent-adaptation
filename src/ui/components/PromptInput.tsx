@@ -1,19 +1,12 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { MultiFileDiff } from "@pierre/diffs/react";
 import type { ClientEvent, PredictedUserActionSuggestion, WorkflowNode } from "../types";
 import { useAppStore } from "../store/useAppStore";
 import {
+  applyWorkflowPatch,
   executeAction,
   type ExecutableAction,
 } from "../../lib/executable-actions";
-import {
-  BrainIcon,
-  CircleStopIcon,
-  FileTextIcon,
-  GitBranchIcon,
-  HelpCircleIcon,
-  ListChecksIcon,
-  MessageSquareTextIcon,
-} from "lucide-react";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 12;
@@ -36,21 +29,341 @@ function getExecutableAction(suggestion: PredictedUserActionSuggestion): Executa
   return suggestion.executable ?? null;
 }
 
-function countWorkflowNodes(nodes: WorkflowNode[]): number {
-  return nodes.reduce((count, node) => count + 1 + countWorkflowNodes(node.children), 0);
+function findWorkflowNode(nodes: WorkflowNode[] | undefined, nodeId: string): WorkflowNode | undefined {
+  for (const node of nodes ?? []) {
+    if (node.id === nodeId) return node;
+    const found = findWorkflowNode(node.children, nodeId);
+    if (found) return found;
+  }
+  return undefined;
 }
 
-function firstWorkflowDescriptions(nodes: WorkflowNode[], limit = 3): string[] {
-  const descriptions: string[] = [];
-  const visit = (items: WorkflowNode[]) => {
-    for (const item of items) {
-      if (descriptions.length >= limit) return;
-      descriptions.push(item.description || "Untitled step");
-      visit(item.children);
+function shortNodeId(nodeId: string): string {
+  return nodeId.length > 8 ? nodeId.slice(0, 8) : nodeId;
+}
+
+function findWorkflowParent(
+  nodes: WorkflowNode[] | undefined,
+  nodeId: string,
+  parent?: WorkflowNode
+): WorkflowNode | undefined {
+  for (const node of nodes ?? []) {
+    if (node.id === nodeId) return parent;
+    const found = findWorkflowParent(node.children, nodeId, node);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+type VerifierDiffRow = {
+  key: string;
+  text: string;
+  kind: "added" | "removed" | "unchanged";
+};
+
+type WorkflowNodePreview = Omit<WorkflowNode, "children" | "depth"> & {
+  children?: WorkflowNodePreview[];
+  depth?: number;
+};
+
+type WorkflowNodeChange = "added" | "deleted" | "edited" | "unchanged";
+
+type WorkflowPreviewNode = Omit<WorkflowNodePreview, "children"> & {
+  change: WorkflowNodeChange;
+  children: WorkflowPreviewNode[];
+  previousDescription?: string;
+  previousStatus?: WorkflowNode["status"];
+  movedFrom?: string;
+};
+
+function verifierDiffRows(before: string[], after: string[]): VerifierDiffRow[] {
+  const remainingAfter = new Map<string, number>();
+  for (const verifier of after) {
+    remainingAfter.set(verifier, (remainingAfter.get(verifier) ?? 0) + 1);
+  }
+
+  const rows: VerifierDiffRow[] = [];
+  for (const verifier of before) {
+    const count = remainingAfter.get(verifier) ?? 0;
+    if (count > 0) {
+      remainingAfter.set(verifier, count - 1);
+      rows.push({ key: `same-${rows.length}-${verifier}`, text: verifier, kind: "unchanged" });
+    } else {
+      rows.push({ key: `removed-${rows.length}-${verifier}`, text: verifier, kind: "removed" });
+    }
+  }
+
+  for (const verifier of after) {
+    const beforeCount = before.filter((item) => item === verifier).length;
+    const unchangedCount = rows.filter((row) => row.kind === "unchanged" && row.text === verifier).length;
+    const alreadyAdded = rows.filter((row) => row.kind === "added" && row.text === verifier).length;
+    if (unchangedCount + alreadyAdded < after.filter((item) => item === verifier).length && unchangedCount >= beforeCount) {
+      rows.push({ key: `added-${rows.length}-${verifier}`, text: verifier, kind: "added" });
+    } else if (beforeCount === 0) {
+      rows.push({ key: `added-${rows.length}-${verifier}`, text: verifier, kind: "added" });
+    }
+  }
+
+  return rows;
+}
+
+function DiffRows({ rows, emptyLabel }: { rows: VerifierDiffRow[]; emptyLabel: string }) {
+  return (
+    <div className="mt-2 grid gap-1.5">
+      {rows.length > 0 ? (
+        rows.map((row) => (
+          <div
+            key={row.key}
+            className={`flex min-w-0 items-start gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+              row.kind === "added"
+                ? "border-success/20 bg-success-light text-ink-900"
+                : row.kind === "removed"
+                  ? "border-error/20 bg-error-light text-ink-800"
+                  : "border-ink-900/8 bg-white text-muted-foreground"
+            }`}
+          >
+            <span className={`mt-0.5 shrink-0 font-mono text-[11px] font-semibold ${
+              row.kind === "added"
+                ? "text-success"
+                : row.kind === "removed"
+                  ? "text-error"
+                  : "text-muted-foreground"
+            }`}>
+              {row.kind === "added" ? "+" : row.kind === "removed" ? "-" : " "}
+            </span>
+            <span className={row.kind === "removed" ? "min-w-0 flex-1 whitespace-pre-wrap break-words line-through" : "min-w-0 flex-1 whitespace-pre-wrap break-words"}>
+              {row.text}
+            </span>
+          </div>
+        ))
+      ) : (
+        <span className="rounded-lg border border-ink-900/8 bg-white px-2.5 py-1.5 text-xs text-muted-foreground">
+          {emptyLabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function collectNodeIds(node: WorkflowNodePreview, ids = new Set<string>()): Set<string> {
+  ids.add(node.id);
+  for (const child of node.children ?? []) collectNodeIds(child, ids);
+  return ids;
+}
+
+function cloneWorkflowPreviewNode(
+  node: WorkflowNodePreview,
+  change: WorkflowNodeChange,
+  details?: Partial<WorkflowPreviewNode>
+): WorkflowPreviewNode {
+  return {
+    ...node,
+    outputFiles: [...(node.outputFiles ?? [])],
+    verifiers: [...(node.verifiers ?? [])],
+    verifierMarks: [...(node.verifierMarks ?? [])],
+    children: (node.children ?? []).map((child) => cloneWorkflowPreviewNode(child, change)),
+    change,
+    ...details,
+  };
+}
+
+function findPreviewNode(nodes: WorkflowPreviewNode[], nodeId: string): WorkflowPreviewNode | undefined {
+  for (const node of nodes) {
+    if (node.id === nodeId) return node;
+    const found = findPreviewNode(node.children, nodeId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function nodeIndex(nodes: WorkflowNode[] | undefined, nodeId: string): number {
+  return (nodes ?? []).findIndex((node) => node.id === nodeId);
+}
+
+function buildWorkflowPreview(
+  action: Extract<ExecutableAction, { type: "edit_workflow" }>,
+  currentWorkflowTree: WorkflowNode[] | undefined
+): { roots: WorkflowPreviewNode[]; fallbackMessage?: string } {
+  const beforeTree = currentWorkflowTree ?? [];
+  const addedIds = new Set<string>();
+  const editedIds = new Set<string>();
+  const deletedIds = new Set<string>();
+  const movedIds = new Set<string>();
+  const previousDescriptions = new Map<string, string>();
+  const previousStatuses = new Map<string, WorkflowNode["status"]>();
+  const movedFrom = new Map<string, string>();
+  const deletedRoots: Array<{ node: WorkflowPreviewNode; parentId: string | null; index: number }> = [];
+
+  for (const operation of action.patch) {
+    if (operation.op === "add_node") {
+      collectNodeIds(operation.node).forEach((id) => addedIds.add(id));
+      continue;
+    }
+
+    if (operation.op === "update_node") {
+      editedIds.add(operation.nodeId);
+      const target = findWorkflowNode(beforeTree, operation.nodeId);
+      if (target) {
+        if (operation.description !== undefined && operation.description !== target.description) {
+          previousDescriptions.set(operation.nodeId, target.description);
+        }
+        if (operation.status !== undefined && operation.status !== target.status) {
+          previousStatuses.set(operation.nodeId, target.status);
+        }
+      }
+      continue;
+    }
+
+    if (operation.op === "delete_node") {
+      const target = findWorkflowNode(beforeTree, operation.nodeId);
+      if (!target) continue;
+      collectNodeIds(target).forEach((id) => deletedIds.add(id));
+      const parent = findWorkflowParent(beforeTree, operation.nodeId);
+      deletedRoots.push({
+        node: cloneWorkflowPreviewNode(target, "deleted"),
+        parentId: parent?.id ?? null,
+        index: nodeIndex(parent ? parent.children : beforeTree, operation.nodeId),
+      });
+      continue;
+    }
+
+    if (operation.op === "move_node") {
+      movedIds.add(operation.nodeId);
+      const oldParent = findWorkflowParent(beforeTree, operation.nodeId);
+      movedFrom.set(operation.nodeId, oldParent?.description ?? "top level");
+    }
+  }
+
+  let afterTree: WorkflowNode[];
+  try {
+    afterTree = applyWorkflowPatch(beforeTree, action.patch);
+  } catch (error) {
+    const addRoots = action.patch.flatMap((operation) =>
+      operation.op === "add_node" ? [cloneWorkflowPreviewNode(operation.node, "added")] : []
+    );
+    return {
+      roots: [...addRoots, ...deletedRoots.map((item) => item.node)],
+      fallbackMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const roots = afterTree.map((node) => {
+    const change: WorkflowNodeChange = addedIds.has(node.id)
+      ? "added"
+      : editedIds.has(node.id) || movedIds.has(node.id)
+        ? "edited"
+        : "unchanged";
+    return cloneWorkflowPreviewNode(node, change, {
+      previousDescription: previousDescriptions.get(node.id),
+      previousStatus: previousStatuses.get(node.id),
+      movedFrom: movedFrom.get(node.id),
+    });
+  });
+
+  const decorate = (nodes: WorkflowPreviewNode[]) => {
+    for (const node of nodes) {
+      if (addedIds.has(node.id)) node.change = "added";
+      else if (editedIds.has(node.id) || movedIds.has(node.id)) node.change = "edited";
+      node.previousDescription = previousDescriptions.get(node.id);
+      node.previousStatus = previousStatuses.get(node.id);
+      node.movedFrom = movedFrom.get(node.id);
+      decorate(node.children);
     }
   };
-  visit(nodes);
-  return descriptions;
+  decorate(roots);
+
+  for (const deleted of deletedRoots) {
+    const parent = deleted.parentId ? findPreviewNode(roots, deleted.parentId) : undefined;
+    const siblings = parent ? parent.children : roots;
+    const insertAt = deleted.index >= 0 ? Math.min(deleted.index, siblings.length) : siblings.length;
+    if (!deleted.parentId || parent) siblings.splice(insertAt, 0, deleted.node);
+  }
+
+  if (!roots.length && deletedRoots.length) return { roots: deletedRoots.map((item) => item.node) };
+  return { roots };
+}
+
+function workflowPreviewNodeClasses(change: WorkflowNodeChange): string {
+  if (change === "added") return "border-success/30 bg-success-light text-ink-900 shadow-[inset_3px_0_0_rgba(22,163,74,0.85)]";
+  if (change === "deleted") return "border-error/30 bg-error-light text-ink-800 shadow-[inset_3px_0_0_rgba(220,38,38,0.85)]";
+  if (change === "edited") return "border-[#D99A20]/35 bg-[#FEF3C7] text-ink-900 shadow-[inset_3px_0_0_rgba(217,154,32,0.9)]";
+  return "border-ink-900/8 bg-white text-ink-800";
+}
+
+function workflowPreviewDotClasses(change: WorkflowNodeChange): string {
+  if (change === "added") return "border-success bg-success";
+  if (change === "deleted") return "border-error bg-error";
+  if (change === "edited") return "border-[#D99A20] bg-[#FBBF24]";
+  return "border-ink-900/25 bg-white";
+}
+
+function WorkflowPreviewNodeView({ node, depth = 0 }: { node: WorkflowPreviewNode; depth?: number }) {
+  const hasChildren = node.children.length > 0;
+  const showDetails = node.outputFiles.length > 0 || node.verifiers.length > 0 || node.previousDescription || node.previousStatus || node.movedFrom;
+  return (
+    <div className="relative" style={{ paddingLeft: depth > 0 ? 18 : 0 }}>
+      {depth > 0 && (
+        <div className="absolute left-[7px] top-0 h-full border-l border-ink-900/10" />
+      )}
+      <div className={`relative rounded-lg border px-3 py-2 ${workflowPreviewNodeClasses(node.change)}`}>
+        <div className="flex min-w-0 items-start gap-2">
+          <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full border ${workflowPreviewDotClasses(node.change)}`} />
+          <div className="min-w-0 flex-1">
+            {node.previousDescription && (
+              <div className="mb-0.5 break-words text-xs text-ink-600 line-through">
+                {node.previousDescription}
+              </div>
+            )}
+            <div className={`break-words text-sm font-medium leading-snug ${node.change === "deleted" ? "line-through" : ""}`}>
+              {node.description || "Untitled"}
+            </div>
+            {showDetails && (
+              <div className="mt-1.5 grid gap-1 text-xs">
+                {node.previousStatus && (
+                  <div className="text-ink-700">
+                    <span className="line-through">{node.previousStatus}</span>
+                    <span className="mx-1 text-ink-400">to</span>
+                    <span>{node.status}</span>
+                  </div>
+                )}
+                {node.movedFrom && (
+                  <div className="text-ink-700">
+                    moved from {node.movedFrom}
+                  </div>
+                )}
+                {node.outputFiles.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {node.outputFiles.map((outputFile) => (
+                      <span key={outputFile} className="rounded border border-ink-900/10 bg-white/65 px-1.5 py-0.5 font-mono text-[11px]">
+                        {outputFile}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {node.verifiers.length > 0 && (
+                  <div className="grid gap-1">
+                    {node.verifiers.map((verifier, index) => (
+                      <div key={`${verifier}-${index}`} className="flex items-start gap-1.5 text-ink-700">
+                        <span className="mt-[0.45rem] h-1 w-1 shrink-0 rounded-full bg-current opacity-50" />
+                        <span className={node.change === "deleted" ? "line-through" : ""}>{verifier}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      {hasChildren && (
+        <div className="mt-1.5 grid gap-1.5">
+          {node.children.map((child) => (
+            <WorkflowPreviewNodeView key={child.id} node={child} depth={depth + 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function lineCount(text: string): number {
@@ -64,79 +377,21 @@ function fileName(path: string): string {
 
 function PredictionActionPreview({
   suggestion,
+  currentWorkflowTree,
 }: {
   suggestion: PredictedUserActionSuggestion;
+  currentWorkflowTree?: WorkflowNode[];
 }) {
   const action = getExecutableAction(suggestion);
   const type = suggestion.actionType;
-
-  const tone = (() => {
-    switch (type) {
-      case "message":
-        return {
-          title: "Message",
-          accent: "text-primary",
-          chip: "bg-primary-subtle text-primary",
-          border: "border-primary/20",
-          icon: <MessageSquareTextIcon className="size-4" aria-hidden />,
-        };
-      case "edit_workflow":
-        return {
-          title: "Workflow edit",
-          accent: "text-info",
-          chip: "bg-info-light text-info",
-          border: "border-info/20",
-          icon: <GitBranchIcon className="size-4" aria-hidden />,
-        };
-      case "edit_verifier":
-        return {
-          title: "Verifier edit",
-          accent: "text-success",
-          chip: "bg-success-light text-success",
-          border: "border-success/20",
-          icon: <ListChecksIcon className="size-4" aria-hidden />,
-        };
-      case "file_edit":
-        return {
-          title: "File edit",
-          accent: "text-ink-700",
-          chip: "bg-ink-900/5 text-ink-700",
-          border: "border-ink-900/12",
-          icon: <FileTextIcon className="size-4" aria-hidden />,
-        };
-      case "brain_edit":
-        return {
-          title: "Brain edit",
-          accent: "text-[#8B5E2A]",
-          chip: "bg-[#F1E3D1] text-[#7A4E20]",
-          border: "border-[#D8B98F]",
-          icon: <BrainIcon className="size-4" aria-hidden />,
-        };
-      case "stop":
-        return {
-          title: "Stop",
-          accent: "text-error",
-          chip: "bg-error-light text-error",
-          border: "border-error/20",
-          icon: <CircleStopIcon className="size-4" aria-hidden />,
-        };
-      case "unknown":
-        return {
-          title: "Unknown",
-          accent: "text-muted-foreground",
-          chip: "bg-surface-tertiary text-muted-foreground",
-          border: "border-ink-900/10",
-          icon: <HelpCircleIcon className="size-4" aria-hidden />,
-        };
-    }
-  })();
+  const [showBrainDiff, setShowBrainDiff] = useState(false);
 
   const body = (() => {
     if (action?.type === "message") {
       return (
         <>
           <div className="text-[11px] font-medium text-muted-foreground">Draft prompt</div>
-          <div className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap rounded-lg border border-ink-900/8 bg-white px-3 py-2 text-sm text-ink-900">
+          <div className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-ink-900/8 bg-white px-3 py-2 text-sm text-ink-900">
             {action.text}
           </div>
         </>
@@ -144,21 +399,24 @@ function PredictionActionPreview({
     }
 
     if (action?.type === "edit_workflow") {
-      const descriptions = firstWorkflowDescriptions(action.workflowTree);
+      const preview = buildWorkflowPreview(action, currentWorkflowTree);
+
       return (
         <>
-          <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-            <span>{countWorkflowNodes(action.workflowTree)} steps</span>
-            <span>{action.workflowTree.length} root items</span>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+            <span>{action.patch.length} workflow change{action.patch.length === 1 ? "" : "s"}</span>
+            <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-success" /> added</span>
+            <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-[#FBBF24]" /> edited</span>
+            <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-error" /> deleted</span>
           </div>
-          {descriptions.length > 0 && (
-            <div className="mt-2 grid gap-1.5">
-              {descriptions.map((description, index) => (
-                <div key={`${description}-${index}`} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs text-ink-800">
-                  <span className={`h-1.5 w-1.5 rounded-full ${index === 0 ? "bg-info" : "bg-ink-900/20"}`} />
-                  <span className="truncate">{description}</span>
-                </div>
-              ))}
+          <div className="mt-2 grid max-h-72 min-w-0 gap-1.5 overflow-auto rounded-lg border border-ink-900/8 bg-white/60 p-2">
+            {preview.roots.map((node) => (
+              <WorkflowPreviewNodeView key={node.id} node={node} />
+            ))}
+          </div>
+          {preview.fallbackMessage && (
+            <div className="mt-2 rounded-lg border border-[#D99A20]/25 bg-[#FEF3C7] px-2.5 py-1.5 text-xs text-ink-800">
+              Preview uses partial patch because the full patch could not be applied.
             </div>
           )}
         </>
@@ -166,27 +424,20 @@ function PredictionActionPreview({
     }
 
     if (action?.type === "edit_verifier") {
+      const targetNode = findWorkflowNode(currentWorkflowTree, action.nodeId);
+      const beforeVerifiers = targetNode?.verifiers ?? [];
+      const rows = verifierDiffRows(beforeVerifiers, action.verifiers);
       return (
         <>
-          <div className="text-[11px] text-muted-foreground">
-            Node <span className="font-mono text-ink-700">{action.nodeId}</span>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-ink-900">
+              edit node: {targetNode?.description || `Step ${shortNodeId(action.nodeId)}`}
+            </div>
+            <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+              {targetNode ? `node ${shortNodeId(action.nodeId)}` : `node not found: ${action.nodeId}`}
+            </div>
           </div>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {action.verifiers.length > 0 ? (
-              action.verifiers.slice(0, 4).map((verifier, index) => (
-                <span key={`${verifier}-${index}`} className="rounded-md border border-success/20 bg-white px-2 py-1 text-xs text-ink-800">
-                  {verifier}
-                </span>
-              ))
-            ) : (
-              <span className="text-xs text-muted-foreground">Clears verifier list</span>
-            )}
-            {action.verifiers.length > 4 && (
-              <span className="rounded-md bg-white px-2 py-1 text-xs text-muted-foreground">
-                +{action.verifiers.length - 4} more
-              </span>
-            )}
-          </div>
+          <DiffRows rows={rows} emptyLabel="Clears verifier list" />
         </>
       );
     }
@@ -204,7 +455,7 @@ function PredictionActionPreview({
             </span>
           </div>
           {action.contents && (
-            <pre className="mt-2 max-h-20 overflow-hidden rounded-lg border border-ink-900/8 bg-white px-3 py-2 text-xs text-ink-700">
+            <pre className="mt-2 max-h-20 overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-ink-900/8 bg-white px-3 py-2 text-xs text-ink-700">
               {action.contents.split("\n").slice(0, 3).join("\n")}
             </pre>
           )}
@@ -215,14 +466,25 @@ function PredictionActionPreview({
     if (action?.type === "brain_edit") {
       return (
         <>
-          <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-            <span>{action.kind === "memory" ? "Memory" : "Skill"} update</span>
-            <span>{action.sections.length} sections</span>
-            {action.deletedFileNames?.length ? <span>{action.deletedFileNames.length} deletes</span> : null}
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap gap-2 text-[11px] text-muted-foreground">
+              <span>{action.kind === "memory" ? "Memory" : "Skill"} update</span>
+              <span>{action.sections.length} sections</span>
+              {action.deletedFileNames?.length ? <span>{action.deletedFileNames.length} deletes</span> : null}
+            </div>
+            {action.sections.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowBrainDiff((open) => !open)}
+                className="shrink-0 rounded-md border border-[#D8B98F] bg-white px-2 py-1 text-[11px] font-medium text-[#7A4E20] transition-colors hover:bg-[#F1E3D1]"
+              >
+                {showBrainDiff ? "Hide diff" : "Show diff"}
+              </button>
+            )}
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {action.sections.slice(0, 4).map((section) => (
-              <span key={section.fileName} className="rounded-md border border-[#D8B98F] bg-white px-2 py-1 text-xs text-ink-800">
+              <span key={section.fileName} className="max-w-full break-words rounded-md border border-[#D8B98F] bg-white px-2 py-1 text-xs text-ink-800">
                 {section.fileName}
               </span>
             ))}
@@ -232,6 +494,31 @@ function PredictionActionPreview({
               </span>
             )}
           </div>
+          {showBrainDiff && (
+            <div className="mt-3 grid max-h-72 gap-3 overflow-auto rounded-lg border border-ink-900/10 bg-white p-2">
+              {action.sections.map((section) => (
+                <div key={section.fileName} className="min-w-0 overflow-hidden rounded-md border border-ink-900/8 bg-surface">
+                  <div className="truncate border-b border-ink-900/8 bg-white px-2.5 py-1.5 font-mono text-[11px] text-ink-700">
+                    {section.fileName}
+                  </div>
+                  <div className="max-h-56 overflow-auto text-xs">
+                    <MultiFileDiff
+                      oldFile={{ name: section.fileName, contents: "" }}
+                      newFile={{ name: section.fileName, contents: section.content }}
+                      options={{
+                        theme: "pierre-light",
+                        diffStyle: "unified",
+                        disableFileHeader: true,
+                        diffIndicators: "bars",
+                        overflow: "scroll",
+                        disableLineNumbers: false,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       );
     }
@@ -259,19 +546,7 @@ function PredictionActionPreview({
     );
   })();
 
-  return (
-    <div className={`rounded-xl border ${tone.border} bg-surface-secondary/80 px-3 py-2.5`}>
-      <div className="mb-2 flex items-center gap-2">
-        <div className={`${tone.accent} flex h-7 w-7 items-center justify-center rounded-lg bg-white shadow-soft`}>
-          {tone.icon}
-        </div>
-        <span className={`rounded-md px-2 py-1 text-[11px] font-semibold uppercase ${tone.chip}`}>
-          {tone.title}
-        </span>
-      </div>
-      {body}
-    </div>
-  );
+  return <div className="min-w-0">{body}</div>;
 }
 
 /** Fake `edit_workflow` accept: append a root “Visualization” step so Progress updates (UI test hook). */
@@ -604,9 +879,9 @@ export function PromptInput({
 
   return (
     <section className={`fixed bottom-0 left-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 lg:pb-8 pt-8 lg:ml-[var(--sidebar-width)] ${rightOffset ? "px-4" : "px-2"}`} style={{ right: rightOffset ?? 0 }}>
-      <div className={`mx-auto flex w-full max-w-full flex-col gap-2 ${rightOffset ? "" : "lg:max-w-3xl"}`}>
+      <div className={`mx-auto flex w-full max-w-full min-w-0 flex-col gap-2 ${rightOffset ? "" : "lg:max-w-3xl"}`}>
         {(predictedSuggestion || isPredictingSuggestion) && (
-          <div className="rounded-2xl border border-ink-900/10 bg-white/95 px-4 py-3 shadow-card">
+          <div className="max-h-[min(48vh,28rem)] overflow-y-auto overflow-x-hidden rounded-2xl border border-ink-900/10 bg-white/95 px-4 py-3 shadow-card">
             {isPredictingSuggestion && !predictedSuggestion ? (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2">
@@ -616,17 +891,12 @@ export function PromptInput({
                 <span>Generating next action suggestion…</span>
               </div>
             ) : predictedSuggestion ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-full bg-primary/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-primary">
-                      {predictedSuggestion.actionType}
-                    </span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {(predictedSuggestion.confidence * 100).toFixed(0)}% self-reported confidence
-                    </span>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
+              <div className="flex min-w-0 flex-col gap-2">
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <span className="min-w-0 truncate rounded-full bg-primary/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-primary">
+                    {predictedSuggestion.actionType}
+                  </span>
+                  <div className="ml-auto flex shrink-0 items-center gap-2">
                     {canAcceptPrediction && (
                       <button
                         type="button"
@@ -645,12 +915,10 @@ export function PromptInput({
                     </button>
                   </div>
                 </div>
-                <PredictionActionPreview suggestion={predictedSuggestion} />
-                {predictedSuggestion.rationale && (
-                  <div className="text-xs text-muted-foreground line-clamp-3">
-                    Rationale: {predictedSuggestion.rationale}
-                  </div>
-                )}
+                <PredictionActionPreview
+                  suggestion={predictedSuggestion}
+                  currentWorkflowTree={activeSession?.workflowTree}
+                />
               </div>
             ) : null}
           </div>

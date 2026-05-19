@@ -166,6 +166,19 @@ type PredictionStats = {
     p90LatencyMs: number | null;
 }
 
+type PredictionLogEntry = {
+    predictionId: string;
+    sessionId: string;
+    actionType: string;
+    confidence: number | null;
+    draftText: string | null;
+    rationale: string | null;
+    shownAt: number | null;
+    updatedAt: number;
+    outcome: "accepted" | "dismissed" | "ignored" | "unresolved";
+    autoAccepted: boolean;
+}
+
 type UserProfileLoadResult = {
     markdown: string;
     profilePath: string;
@@ -207,6 +220,7 @@ type EventPayloadMapping = {
     "predict-next-user-action": PredictedUserActionSuggestion | null;
     "record-prediction-event": { success: boolean };
     "get-prediction-stats": PredictionStats;
+    "get-prediction-log": PredictionLogEntry[];
     "get-user-profile": UserProfileLoadResult;
     "save-user-profile": UserProfileSaveResult;
     "generate-user-profile": UserProfileGenerationResult;
@@ -255,6 +269,7 @@ interface Window {
         predictNextUserAction: (sessionId: string) => Promise<PredictedUserActionSuggestion | null>;
         recordPredictionEvent: (event: PredictionEventInput) => Promise<{ success: boolean }>;
         getPredictionStats: (sinceMs?: number | null) => Promise<PredictionStats>;
+        getPredictionLog: (limit?: number | null) => Promise<PredictionLogEntry[]>;
         getUserProfile: (cwd?: string | null) => Promise<UserProfileLoadResult>;
         saveUserProfile: (payload: UserProfileSaveInput) => Promise<UserProfileSaveResult>;
         generateUserProfile: (payload: UserProfileGenerationInput) => Promise<UserProfileGenerationResult>;

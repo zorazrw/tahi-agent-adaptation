@@ -6,7 +6,8 @@ import type { ClientEvent, WorkflowNode } from "./runtime-types.js";
  *
  * Distinct from `PredictedUserActionType`, which is just a label the LLM
  * emits. An ExecutableAction carries the payload needed to actually dispatch
- * the action — e.g. `edit_workflow` includes the new workflow tree.
+ * the action — e.g. `edit_workflow` includes a patch to apply to the current
+ * workflow tree.
  *
  * `unknown` is intentionally absent: by definition it has no executable payload.
  */
@@ -40,6 +41,57 @@ const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
 
 export const workflowTreeSchema = z.array(workflowNodeSchema);
 
+const nodeStatusSchema = z.enum(["pending", "running", "completed", "error"]);
+
+const workflowPatchNodeSchema = z.object({
+  id: z.string(),
+  description: z.string(),
+  outputFiles: z.array(z.string()).default([]),
+  verifiers: z.array(z.string()).default([]),
+  verifierMarks: z.array(verifierMark).default([]),
+  children: z.array(workflowNodeSchema).default([]),
+  status: nodeStatusSchema.default("pending"),
+  depth: z.number().optional(),
+});
+
+const addWorkflowNodeOperation = z.object({
+  op: z.literal("add_node"),
+  parentId: z.string().nullable().optional(),
+  afterNodeId: z.string().nullable().optional(),
+  node: workflowPatchNodeSchema,
+});
+
+const updateWorkflowNodeOperation = z.object({
+  op: z.literal("update_node"),
+  nodeId: z.string(),
+  description: z.string().optional(),
+  outputFiles: z.array(z.string()).optional(),
+  verifiers: z.array(z.string()).optional(),
+  verifierMarks: z.array(verifierMark).optional(),
+  status: nodeStatusSchema.optional(),
+});
+
+const deleteWorkflowNodeOperation = z.object({
+  op: z.literal("delete_node"),
+  nodeId: z.string(),
+});
+
+const moveWorkflowNodeOperation = z.object({
+  op: z.literal("move_node"),
+  nodeId: z.string(),
+  parentId: z.string().nullable().optional(),
+  afterNodeId: z.string().nullable().optional(),
+});
+
+export const workflowPatchOperationSchema = z.discriminatedUnion("op", [
+  addWorkflowNodeOperation,
+  updateWorkflowNodeOperation,
+  deleteWorkflowNodeOperation,
+  moveWorkflowNodeOperation,
+]);
+
+export const workflowPatchSchema = z.array(workflowPatchOperationSchema);
+
 const messageAction = z.object({
   type: z.literal("message"),
   text: z.string().min(1),
@@ -48,7 +100,7 @@ const messageAction = z.object({
 
 const editWorkflowAction = z.object({
   type: z.literal("edit_workflow"),
-  workflowTree: workflowTreeSchema,
+  patch: workflowPatchSchema,
 });
 
 const editVerifierAction = z.object({
@@ -92,6 +144,7 @@ export const executableActionSchema = z.discriminatedUnion("type", [
 
 export type ExecutableAction = z.infer<typeof executableActionSchema>;
 export type ExecutableActionType = ExecutableAction["type"];
+export type WorkflowPatchOperation = z.infer<typeof workflowPatchOperationSchema>;
 
 export type Dispatcher = (event: ClientEvent) => void;
 
@@ -114,11 +167,141 @@ function setVerifiersOnTree(
     nodes.map((n) => {
       if (n.id === nodeId) {
         changed = true;
-        return { ...n, verifiers };
+        return { ...n, verifiers, verifierMarks: verifiers.map(() => undefined) };
       }
       return { ...n, children: visit(n.children) };
     });
   return { tree: visit(tree), changed };
+}
+
+function cloneWorkflowTree(tree: WorkflowNode[]): WorkflowNode[] {
+  return JSON.parse(JSON.stringify(tree)) as WorkflowNode[];
+}
+
+function normalizeVerifierMarks(
+  verifiers: string[],
+  marks?: Array<WorkflowNode["verifierMarks"][number]>
+): WorkflowNode["verifierMarks"] {
+  if (!marks) return verifiers.map(() => undefined);
+  return verifiers.map((_, index) => marks[index] ?? undefined);
+}
+
+function refreshDepths(node: WorkflowNode, depth: number): WorkflowNode {
+  return {
+    ...node,
+    depth,
+    verifierMarks: normalizeVerifierMarks(node.verifiers, node.verifierMarks),
+    children: (node.children ?? []).map((child) => refreshDepths(child, depth + 1)),
+  };
+}
+
+function findNode(tree: WorkflowNode[], nodeId: string): WorkflowNode | undefined {
+  for (const node of tree) {
+    if (node.id === nodeId) return node;
+    const found = findNode(node.children, nodeId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function getChildrenForParent(
+  tree: WorkflowNode[],
+  parentId?: string | null
+): { children: WorkflowNode[]; depth: number } {
+  if (!parentId) return { children: tree, depth: 0 };
+  const parent = findNode(tree, parentId);
+  if (!parent) throw new Error(`edit_workflow patch: parent node ${parentId} not found.`);
+  return { children: parent.children, depth: parent.depth + 1 };
+}
+
+function insertNode(
+  siblings: WorkflowNode[],
+  node: WorkflowNode,
+  afterNodeId?: string | null
+): void {
+  if (!afterNodeId) {
+    siblings.push(node);
+    return;
+  }
+  const index = siblings.findIndex((item) => item.id === afterNodeId);
+  if (index === -1) {
+    siblings.push(node);
+    return;
+  }
+  siblings.splice(index + 1, 0, node);
+}
+
+function removeNode(tree: WorkflowNode[], nodeId: string): WorkflowNode | undefined {
+  for (let i = 0; i < tree.length; i += 1) {
+    const node = tree[i];
+    if (node.id === nodeId) {
+      tree.splice(i, 1);
+      return node;
+    }
+    const removed = removeNode(node.children, nodeId);
+    if (removed) return removed;
+  }
+  return undefined;
+}
+
+function updateNode(tree: WorkflowNode[], operation: Extract<WorkflowPatchOperation, { op: "update_node" }>): boolean {
+  const node = findNode(tree, operation.nodeId);
+  if (!node) return false;
+  if (operation.description !== undefined) node.description = operation.description;
+  if (operation.outputFiles !== undefined) node.outputFiles = [...operation.outputFiles];
+  if (operation.status !== undefined) node.status = operation.status;
+  if (operation.verifiers !== undefined) {
+    node.verifiers = [...operation.verifiers];
+    node.verifierMarks = normalizeVerifierMarks(node.verifiers, operation.verifierMarks);
+  } else if (operation.verifierMarks !== undefined) {
+    node.verifierMarks = normalizeVerifierMarks(node.verifiers, operation.verifierMarks);
+  }
+  return true;
+}
+
+export function applyWorkflowPatch(
+  currentWorkflowTree: WorkflowNode[],
+  patch: WorkflowPatchOperation[]
+): WorkflowNode[] {
+  const tree = cloneWorkflowTree(currentWorkflowTree);
+  for (const operation of patch) {
+    switch (operation.op) {
+      case "add_node": {
+        const { children, depth } = getChildrenForParent(tree, operation.parentId);
+        const node = refreshDepths(
+          {
+            ...operation.node,
+            depth: operation.node.depth ?? depth,
+            outputFiles: [...operation.node.outputFiles],
+            verifiers: [...operation.node.verifiers],
+            verifierMarks: normalizeVerifierMarks(operation.node.verifiers, operation.node.verifierMarks),
+            children: cloneWorkflowTree(operation.node.children),
+          },
+          depth
+        );
+        insertNode(children, node, operation.afterNodeId);
+        break;
+      }
+      case "update_node":
+        if (!updateNode(tree, operation)) {
+          throw new Error(`edit_workflow patch: node ${operation.nodeId} not found.`);
+        }
+        break;
+      case "delete_node":
+        if (!removeNode(tree, operation.nodeId)) {
+          throw new Error(`edit_workflow patch: node ${operation.nodeId} not found.`);
+        }
+        break;
+      case "move_node": {
+        const node = removeNode(tree, operation.nodeId);
+        if (!node) throw new Error(`edit_workflow patch: node ${operation.nodeId} not found.`);
+        const { children, depth } = getChildrenForParent(tree, operation.parentId);
+        insertNode(children, refreshDepths(node, depth), operation.afterNodeId);
+        break;
+      }
+    }
+  }
+  return tree;
 }
 
 /**
@@ -146,9 +329,17 @@ export async function executeAction(
       return;
 
     case "edit_workflow":
+      if (!ctx.currentWorkflowTree) {
+        throw new Error(
+          "edit_workflow requires ExecuteContext.currentWorkflowTree to apply the patch."
+        );
+      }
       ctx.sendEvent({
         type: "session.updateWorkflowTree",
-        payload: { sessionId: ctx.sessionId, workflowTree: action.workflowTree },
+        payload: {
+          sessionId: ctx.sessionId,
+          workflowTree: applyWorkflowPatch(ctx.currentWorkflowTree, action.patch),
+        },
       });
       return;
 

@@ -9,6 +9,7 @@ import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
 import { MemoryModal } from "./components/MemoryModal";
 import { PromptInput } from "./components/PromptInput";
+import { PredictionDebugPanel } from "./components/PredictionDebugPanel";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
@@ -75,8 +76,10 @@ function App() {
   const scrollHeightBeforeLoadRef = useRef(0);
   const shouldRestoreScrollRef = useRef(false);
   const [showPromptInspector, setShowPromptInspector] = useState(false);
+  const [showPredictionDebugPanel, setShowPredictionDebugPanel] = useState(false);
   const [showMemoryModal, setShowMemoryModal] = useState(false);
   const [predictedSuggestion, setPredictedSuggestion] = useState<PredictedUserActionSuggestion | null>(null);
+  const [isDebugPredictionSuggestion, setIsDebugPredictionSuggestion] = useState(false);
   const [isPredictingSuggestion, setIsPredictingSuggestion] = useState(false);
   const [lastAutofillKey, setLastAutofillKey] = useState<string | null>(null);
   const explicitlyStoppedSessionIdsRef = useRef(new Set<string>());
@@ -331,12 +334,32 @@ function App() {
     flushIgnoredIfUnresolved();
     currentPredictionRef.current = null;
     setPredictedSuggestion(null);
+    setIsDebugPredictionSuggestion(false);
     setIsPredictingSuggestion(false);
     setLastAutofillKey(null);
+    setShowPredictionDebugPanel(false);
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, 100);
   }, [activeSessionId, flushIgnoredIfUnresolved]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "d") {
+        return;
+      }
+      event.preventDefault();
+      if (!activeSessionId) {
+        setGlobalError("Open a session before using the prediction debug panel.");
+        return;
+      }
+      setPreviewPanelOpen(true);
+      setShowPredictionDebugPanel((show) => !show);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeSessionId, setGlobalError, setPreviewPanelOpen]);
 
   useEffect(() => {
     if (predictionAssistMode === "off") {
@@ -344,6 +367,7 @@ function App() {
       currentPredictionRef.current = null;
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
+      setIsDebugPredictionSuggestion(false);
       return;
     }
     const sessionNotRunning =
@@ -373,6 +397,7 @@ function App() {
       currentPredictionRef.current = null;
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
+      setIsDebugPredictionSuggestion(false);
       return;
     }
     const sessionId = activeSessionId;
@@ -392,6 +417,7 @@ function App() {
       currentPredictionRef.current = null;
       setIsPredictingSuggestion(false);
       setPredictedSuggestion(null);
+      setIsDebugPredictionSuggestion(false);
       return;
     }
 
@@ -411,9 +437,11 @@ function App() {
           };
           currentPredictionRef.current = entry;
           sendPredictionEvent(entry, "shown");
+          setIsDebugPredictionSuggestion(false);
         } else {
           flushIgnoredIfUnresolved();
           currentPredictionRef.current = null;
+          setIsDebugPredictionSuggestion(false);
         }
         setPredictedSuggestion(suggestion);
       })
@@ -423,6 +451,7 @@ function App() {
         flushIgnoredIfUnresolved();
         currentPredictionRef.current = null;
         setPredictedSuggestion(null);
+        setIsDebugPredictionSuggestion(false);
       })
       .finally(() => {
         if (!cancelled) {
@@ -520,6 +549,7 @@ function App() {
     setShouldAutoScroll(true);
     setHasNewMessages(false);
     setPredictedSuggestion(null);
+    setIsDebugPredictionSuggestion(false);
     resetToLatest();
   }, [resetToLatest]);
 
@@ -677,14 +707,27 @@ function App() {
             <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
               <div className="flex items-center justify-between px-4 pt-3 pb-1 border-b border-ink-900/10">
                 <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Conversation</span>
-                <button
-                  type="button"
-                  onClick={() => setShowPromptInspector((v) => !v)}
-                  className="text-[11px] px-2 py-1 rounded-md border border-ink-900/10 bg-white/70 text-ink-500 hover:text-ink-800 hover:border-ink-900/30 hover:bg-white transition-colors"
-                >
-                  {showPromptInspector ? "Hide LM input" : "Show LM input"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPromptInspector((v) => !v)}
+                    className="text-[11px] px-2 py-1 rounded-md border border-ink-900/10 bg-white/70 text-ink-500 hover:text-ink-800 hover:border-ink-900/30 hover:bg-white transition-colors"
+                  >
+                    {showPromptInspector ? "Hide LM input" : "Show LM input"}
+                  </button>
+                </div>
               </div>
+              {showPredictionDebugPanel && (
+                <PredictionDebugPanel
+                  onStageSuggestion={(suggestion) => {
+                    flushIgnoredIfUnresolved();
+                    currentPredictionRef.current = null;
+                    setPredictedSuggestion(suggestion);
+                    setIsDebugPredictionSuggestion(true);
+                  }}
+                  onClose={() => setShowPredictionDebugPanel(false)}
+                />
+              )}
               {showPromptInspector && (
                 <div className="px-4 pt-2 pb-1 border-b border-ink-900/10 bg-surface">
                   <div className="text-[11px] font-medium text-ink-600 mb-1">Last LM input</div>
@@ -794,13 +837,17 @@ function App() {
           onSendMessage={handleSendMessage}
           disabled={visibleMessages.length === 0}
           rightOffset={undefined}
-          predictedSuggestion={predictionAssistMode === "off" ? null : predictedSuggestion}
+          predictedSuggestion={predictionAssistMode === "off" && !isDebugPredictionSuggestion ? null : predictedSuggestion}
           isPredictingSuggestion={isPredictingSuggestion}
-          onAcceptPredictedSuggestion={() => resolveCurrentPrediction("accepted")}
+          onAcceptPredictedSuggestion={() => {
+            resolveCurrentPrediction("accepted");
+            setIsDebugPredictionSuggestion(false);
+          }}
           onClearPredictedSuggestion={() => {
             resolveCurrentPrediction("dismissed");
             currentPredictionRef.current = null;
             setPredictedSuggestion(null);
+            setIsDebugPredictionSuggestion(false);
           }}
         />
         </>

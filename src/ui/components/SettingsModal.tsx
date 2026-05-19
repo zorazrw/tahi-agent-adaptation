@@ -20,7 +20,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "api" | "workflow" | "skills" | "profile" | "predictions" | "data";
+type Tab = "api" | "workflow" | "skills" | "profile" | "data";
 const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
 
 function readStoredAutoInduction(): boolean {
@@ -218,16 +218,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                  tab === "predictions"
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
-                }`}
-                onClick={() => setTab("predictions")}
-              >
-                Predictions
-              </button>
-              <button
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                   tab === "data"
                     ? "bg-primary/10 text-primary"
                     : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
@@ -246,8 +236,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <WorkflowPanel />
               ) : tab === "profile" ? (
                 <ProfilePanel />
-              ) : tab === "predictions" ? (
-                <PredictionsPanel />
               ) : tab === "skills" ? (
                 <SkillsPanel />
               ) : (
@@ -1371,12 +1359,6 @@ function clampLastN(value: number): number {
 }
 
 function ProfilePanel() {
-  const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const sessionCwd = useAppStore((s) =>
-    s.activeSessionId ? s.sessions[s.activeSessionId]?.cwd : undefined
-  );
-  const targetCwd = sessionCwd ?? null;
-
   const [profilePath, setProfilePath] = useState<string>("");
   const [markdown, setMarkdown] = useState<string>("");
   const [originalMarkdown, setOriginalMarkdown] = useState<string>("");
@@ -1399,7 +1381,7 @@ function ProfilePanel() {
     setLoading(true);
     setLoadError(null);
     try {
-      const result = await window.electron.getUserProfile(targetCwd);
+      const result = await window.electron.getUserProfile();
       setProfilePath(result?.profilePath ?? "");
       setMarkdown(result?.markdown ?? "");
       setOriginalMarkdown(result?.markdown ?? "");
@@ -1409,7 +1391,7 @@ function ProfilePanel() {
     } finally {
       setLoading(false);
     }
-  }, [targetCwd]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -1423,7 +1405,6 @@ function ProfilePanel() {
     try {
       const result = await window.electron.generateUserProfile({
         lastN,
-        cwd: targetCwd,
         writeToDisk: true,
       });
       if (!result?.success) {
@@ -1449,7 +1430,7 @@ function ProfilePanel() {
     setSaveError(null);
     setSaveOk(false);
     try {
-      const result = await window.electron.saveUserProfile({ markdown, cwd: targetCwd });
+      const result = await window.electron.saveUserProfile({ markdown });
       if (!result.success) {
         setSaveError(result.error ?? "Save failed");
         return;
@@ -1468,6 +1449,8 @@ function ProfilePanel() {
 
   return (
     <div className="flex flex-col gap-4 min-h-0">
+      <PredictionLogPanel />
+
       <div>
         <p className="text-sm text-muted-foreground leading-relaxed">
           USER_PROFILE.md is read by the next-action predictor. Live preview below; auto-generate from your recent chats or hand-edit.
@@ -1516,11 +1499,6 @@ function ProfilePanel() {
               "Auto-generate"
             )}
           </button>
-          {!activeSessionId ? (
-            <span className="text-[11px] text-muted-foreground">
-              No active session — writing to repo USER_PROFILE.md.
-            </span>
-          ) : null}
         </div>
         {generationStatus ? (
           <p className="text-xs text-primary">{generationStatus}</p>
@@ -1598,49 +1576,60 @@ function ProfilePanel() {
   );
 }
 
-/* ---------- Predictions Panel ---------- */
+/* ---------- Prediction Log ---------- */
 
-type PredictionWindow = "all" | "7d" | "30d";
-
-const PREDICTION_WINDOWS: { value: PredictionWindow; label: string; days: number | null }[] = [
-  { value: "all", label: "All time", days: null },
-  { value: "30d", label: "Last 30 days", days: 30 },
-  { value: "7d", label: "Last 7 days", days: 7 },
-];
-
-function pctText(numerator: number, denominator: number): string {
-  if (denominator <= 0) return "—";
-  return `${((100 * numerator) / denominator).toFixed(1)}%`;
-}
-
-function formatLatency(ms: number | null): string {
+function formatLogTime(ms: number | null): string {
   if (ms == null) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
-function formatDate(ms: number | null): string {
-  if (ms == null) return "—";
-  return new Date(ms).toLocaleString();
+function formatConfidence(confidence: number | null): string {
+  if (confidence == null) return "—";
+  return confidence <= 1 ? `${Math.round(confidence * 100)}%` : confidence.toFixed(1);
 }
 
-function PredictionsPanel() {
-  const [windowKey, setWindowKey] = useState<PredictionWindow>("all");
+function compactActionType(actionType: string): string {
+  return actionType.replace(/_/g, " ");
+}
+
+function outcomeClass(outcome: PredictionLogEntry["outcome"]): string {
+  switch (outcome) {
+    case "accepted":
+      return "border-primary/20 bg-primary/10 text-primary";
+    case "dismissed":
+      return "border-ink-900/10 bg-ink-900/5 text-ink-600";
+    case "ignored":
+      return "border-amber-500/20 bg-amber-50 text-amber-700";
+    default:
+      return "border-ink-900/10 bg-surface-cream text-muted-foreground";
+  }
+}
+
+function PredictionLogPanel() {
   const [stats, setStats] = useState<PredictionStats | null>(null);
+  const [entries, setEntries] = useState<PredictionLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadStats = useCallback(async (key: PredictionWindow) => {
-    const choice = PREDICTION_WINDOWS.find((w) => w.value === key) ?? PREDICTION_WINDOWS[0];
-    const sinceMs = choice.days != null ? Date.now() - choice.days * 86_400_000 : null;
+  const loadLog = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await window.electron.getPredictionStats(sinceMs);
-      setStats(result);
+      const [nextEntries, nextStats] = await Promise.all([
+        window.electron.getPredictionLog(8),
+        window.electron.getPredictionStats(null),
+      ]);
+      setEntries(nextEntries);
+      setStats(nextStats);
     } catch (err) {
-      console.error("Failed to load prediction stats:", err);
+      console.error("Failed to load prediction log:", err);
       setError(err instanceof Error ? err.message : String(err));
+      setEntries([]);
       setStats(null);
     } finally {
       setLoading(false);
@@ -1648,154 +1637,72 @@ function PredictionsPanel() {
   }, []);
 
   useEffect(() => {
-    loadStats(windowKey);
-  }, [loadStats, windowKey]);
+    loadLog();
+  }, [loadLog]);
 
   const totals = stats?.totals;
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          Historical accept / dismiss / ignore counts for the prediction suggestion shown above the prompt input.
-          A prediction is counted as <em>ignored</em> when it is cleared without an explicit user action
-          (e.g. the session changes or a new run starts).
-        </p>
-      </div>
-
-      <div className="flex items-center gap-2 flex-wrap">
-        <div className="flex items-center gap-1 rounded-xl border border-ink-900/10 bg-surface p-1">
-          {PREDICTION_WINDOWS.map((w) => (
-            <button
-              key={w.value}
-              type="button"
-              onClick={() => setWindowKey(w.value)}
-              className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
-                windowKey === w.value
-                  ? "bg-primary text-white"
-                  : "text-muted-foreground hover:text-ink-700"
-              }`}
-            >
-              {w.label}
-            </button>
-          ))}
+    <div className="rounded-xl border border-ink-900/10 bg-surface p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-600 shrink-0">
+            Prediction log
+          </h3>
+          {totals ? (
+            <div className="flex items-center gap-1 text-[11px] text-muted-foreground min-w-0">
+              <span className="rounded-md bg-ink-900/5 px-1.5 py-0.5 tabular-nums">{totals.shown} shown</span>
+              <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-primary tabular-nums">
+                {totals.accepted} accept
+              </span>
+              <span className="rounded-md bg-ink-900/5 px-1.5 py-0.5 tabular-nums">{totals.dismissed} dismiss</span>
+              <span className="rounded-md bg-ink-900/5 px-1.5 py-0.5 tabular-nums">{totals.ignored} ignore</span>
+            </div>
+          ) : null}
         </div>
         <button
           type="button"
-          onClick={() => loadStats(windowKey)}
+          onClick={loadLog}
           disabled={loading}
-          className="rounded-lg border border-ink-900/10 bg-surface px-3 py-1.5 text-xs font-medium text-ink-700 hover:bg-ink-900/5 transition-colors disabled:opacity-50"
+          className="rounded-lg border border-ink-900/10 bg-surface px-2 py-1 text-[11px] font-medium text-ink-700 hover:bg-ink-900/5 transition-colors disabled:opacity-50"
         >
-          {loading ? "Refreshing…" : "Refresh"}
+          {loading ? "..." : "Refresh"}
         </button>
       </div>
 
       {error ? (
-        <div className="rounded-xl border border-error/20 bg-error/5 px-4 py-3 text-sm text-error">
+        <div className="mt-2 rounded-lg border border-error/20 bg-error/5 px-3 py-2 text-xs text-error">
           {error}
         </div>
       ) : null}
 
-      {!stats && loading ? (
-        <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-6 text-sm text-muted-foreground">
-          Loading…
-        </div>
-      ) : !stats || (totals && totals.shown === 0) ? (
-        <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-6 text-sm text-muted-foreground">
-          No predictions have been shown yet in this window.
+      {entries.length === 0 ? (
+        <div className="mt-2 rounded-lg bg-surface-cream px-3 py-2 text-xs text-muted-foreground">
+          {loading ? "Loading..." : "No predictions yet."}
         </div>
       ) : (
-        <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <PredictionStatTile label="Shown" value={totals!.shown} />
-            <PredictionStatTile
-              label="Accepted"
-              value={totals!.accepted}
-              hint={`${pctText(totals!.accepted, totals!.shown)} • auto ${totals!.autoAccepted}`}
-            />
-            <PredictionStatTile
-              label="Dismissed"
-              value={totals!.dismissed}
-              hint={pctText(totals!.dismissed, totals!.shown)}
-            />
-            <PredictionStatTile
-              label="Ignored"
-              value={totals!.ignored}
-              hint={pctText(totals!.ignored, totals!.shown)}
-            />
+        <div className="mt-2 max-h-44 overflow-y-auto rounded-lg border border-ink-900/8">
+          <div className="divide-y divide-ink-900/8">
+            {entries.map((entry) => (
+              <div key={entry.predictionId} className="grid grid-cols-[88px_minmax(96px,0.7fr)_72px_48px_minmax(0,1.4fr)] items-center gap-2 px-2.5 py-1.5 text-xs">
+                <span className="text-muted-foreground tabular-nums">{formatLogTime(entry.updatedAt)}</span>
+                <span className="truncate font-medium text-ink-700" title={entry.actionType}>
+                  {compactActionType(entry.actionType)}
+                </span>
+                <span className={`rounded-md border px-1.5 py-0.5 text-center text-[10px] font-medium ${outcomeClass(entry.outcome)}`}>
+                  {entry.autoAccepted ? "auto" : entry.outcome}
+                </span>
+                <span className="text-right text-muted-foreground tabular-nums">
+                  {formatConfidence(entry.confidence)}
+                </span>
+                <span className="truncate text-ink-600" title={entry.draftText ?? ""}>
+                  {entry.draftText || "—"}
+                </span>
+              </div>
+            ))}
           </div>
-
-          <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-3 text-xs text-muted-foreground space-y-1">
-            <div>
-              Decision latency:{" "}
-              <span className="text-ink-700">median {formatLatency(stats.medianLatencyMs)}</span>
-              {" • "}
-              <span className="text-ink-700">p90 {formatLatency(stats.p90LatencyMs)}</span>
-            </div>
-            <div>
-              Window: {formatDate(stats.firstEventAt)} → {formatDate(stats.lastEventAt)}
-            </div>
-            <div>
-              {stats.predictionCount} predictions • {stats.rawEventCount} events recorded
-              {totals!.unresolved > 0 ? ` • ${totals!.unresolved} unresolved` : null}
-            </div>
-          </div>
-
-          <div className="overflow-x-auto rounded-xl border border-ink-900/10">
-            <table className="w-full text-xs">
-              <thead className="bg-ink-900/5 text-muted-foreground">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">Action type</th>
-                  <th className="px-3 py-2 text-right font-medium">Shown</th>
-                  <th className="px-3 py-2 text-right font-medium">Accept</th>
-                  <th className="px-3 py-2 text-right font-medium">Dismiss</th>
-                  <th className="px-3 py-2 text-right font-medium">Ignore</th>
-                  <th className="px-3 py-2 text-right font-medium">Unresolved</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.byActionType.map((row) => (
-                  <tr key={row.actionType} className="border-t border-ink-900/8">
-                    <td className="px-3 py-2 text-ink-800 font-medium">{row.actionType}</td>
-                    <td className="px-3 py-2 text-right text-ink-700">{row.shown}</td>
-                    <td className="px-3 py-2 text-right text-ink-700">
-                      {row.accepted}{" "}
-                      <span className="text-muted-foreground">({pctText(row.accepted, row.shown)})</span>
-                    </td>
-                    <td className="px-3 py-2 text-right text-ink-700">
-                      {row.dismissed}{" "}
-                      <span className="text-muted-foreground">({pctText(row.dismissed, row.shown)})</span>
-                    </td>
-                    <td className="px-3 py-2 text-right text-ink-700">
-                      {row.ignored}{" "}
-                      <span className="text-muted-foreground">({pctText(row.ignored, row.shown)})</span>
-                    </td>
-                    <td className="px-3 py-2 text-right text-ink-700">{row.unresolved}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
+        </div>
       )}
-    </div>
-  );
-}
-
-function PredictionStatTile({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: number;
-  hint?: string;
-}) {
-  return (
-    <div className="rounded-xl border border-ink-900/10 bg-surface px-4 py-3">
-      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-ink-800 tabular-nums">{value}</div>
-      {hint ? <div className="mt-0.5 text-[11px] text-muted-foreground">{hint}</div> : null}
     </div>
   );
 }

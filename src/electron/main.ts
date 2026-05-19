@@ -274,7 +274,7 @@ app.on("ready", () => {
                 return null;
             }
             const cwd = history.session.cwd ?? process.cwd();
-            const { profileMarkdown, profilePath } = resolveAppUserProfileMarkdown(cwd);
+            const { profileMarkdown, profilePath } = resolveAppUserProfileMarkdown();
             if (!profileMarkdown.trim() && !isFakeUserPredictEnabled()) {
                 return null;
             }
@@ -282,10 +282,14 @@ app.on("ready", () => {
             const suggestion = await predictNextUserAction({
                 cwd,
                 userProfileMarkdown: profileMarkdown,
-                transcript: buildTranscriptFromStreamMessages(history.messages, 14),
+                transcript: buildTranscriptFromStreamMessages(history.messages),
+                workflowTree: history.session.workflowTree,
                 workflowSummary: buildWorkflowSummaryFromTree(history.session.workflowTree),
                 sessionTitle: history.session.title,
             });
+            if (!suggestion) {
+                return null;
+            }
 
             return {
                 ...suggestion,
@@ -300,6 +304,10 @@ app.on("ready", () => {
     ipcMainHandle("get-prediction-stats", (_: any, sinceMs?: number | null) => {
         const since = typeof sinceMs === "number" && Number.isFinite(sinceMs) ? sinceMs : undefined;
         return sessions.getPredictionStats(since);
+    });
+
+    ipcMainHandle("get-prediction-log", (_: any, limit?: number | null) => {
+        return sessions.getPredictionLog(typeof limit === "number" && Number.isFinite(limit) ? limit : undefined);
     });
 
     ipcMainHandle("record-prediction-event", (_: any, payload: unknown) => {
@@ -344,9 +352,9 @@ app.on("ready", () => {
         }
     });
 
-    ipcMainHandle("get-user-profile", (_: any, cwd?: string | null) => {
+    ipcMainHandle("get-user-profile", () => {
         try {
-            return readUserProfile(typeof cwd === "string" && cwd.trim() ? cwd : undefined);
+            return readUserProfile();
         } catch (error) {
             return {
                 markdown: "",
@@ -362,9 +370,7 @@ app.on("ready", () => {
             try {
                 const markdown =
                     typeof payload?.markdown === "string" ? payload.markdown : "";
-                const cwdRaw = typeof payload?.cwd === "string" ? payload.cwd.trim() : "";
                 const { profilePath } = await writeUserProfile({
-                    cwd: cwdRaw || undefined,
                     markdown,
                 });
                 return { success: true, profilePath };
@@ -384,10 +390,8 @@ app.on("ready", () => {
                 const lastNRaw = payload?.lastN;
                 const lastN =
                     typeof lastNRaw === "number" ? lastNRaw : Number(lastNRaw ?? 10);
-                const cwdRaw = typeof payload?.cwd === "string" ? payload.cwd.trim() : "";
                 const writeToDisk = payload?.writeToDisk !== false;
                 return await generateUserProfileMarkdown({
-                    cwd: cwdRaw || undefined,
                     lastN: Number.isFinite(lastN) ? lastN : 10,
                     sessionStore: sessions,
                     writeToDisk,

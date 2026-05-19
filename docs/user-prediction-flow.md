@@ -23,9 +23,9 @@ The current flow is:
    - the session title
 6. The model returns JSON describing:
    - predicted next action
-   - optional next message draft
    - confidence
    - rationale
+   - a validated executable payload for the predicted action
 7. The UI shows the suggestion above the prompt bar.
 8. If the suggestion is a `message`, pressing `Tab` sends it immediately.
 
@@ -133,12 +133,11 @@ The prediction input is assembled in [src/electron/libs/user-predict.ts](/Users/
 
 ### 1. User profile markdown
 
-The system loads a local `USER_PROFILE.md`.
+The app loads a local `USER_PROFILE.md` from the Electron launch directory:
 
-Resolution order:
+1. `<app launch cwd>/USER_PROFILE.md`
 
-1. `<session cwd>/USER_PROFILE.md`
-2. `<repo root>/USER_PROFILE.md`
+This is intentionally independent of the active session cwd, because session cwds can point at per-run workspace directories.
 
 The content is passed to the model as raw markdown, not parsed into a rigid schema.
 
@@ -200,21 +199,24 @@ The predictor asks the LLM to return JSON with this shape:
 
 ```json
 {
-  "actionType": "message|edit_workflow|edit_verifier|file_edit|brain_edit|unknown",
-  "draftText": "string",
+  "actionType": "message|edit_workflow|edit_verifier|file_edit|brain_edit|stop",
   "confidence": 0.0,
-  "rationale": "string"
+  "rationale": "string",
+  "executable": "<ExecutableAction>"
 }
 ```
 
 Notes:
 
-- `draftText` is mainly useful when `actionType === "message"`
-- for non-message actions, `draftText` may be empty or a representative short utterance
-- if the JSON cannot be parsed, the system falls back to:
-  - `actionType: "unknown"`
-  - low confidence
-  - raw response as rationale
+- `executable` is required and must validate against the shared executable action schema
+- `actionType` is derived from `executable.type` after validation
+- `message` sends a predicted prompt
+- `edit_workflow` applies a patch to the current workflow tree
+- `edit_verifier` replaces a node's verifier list
+- `file_edit` writes full replacement contents to a path
+- `brain_edit` records memory or skill edits
+- `stop` means the user is likely done for now
+- if the JSON cannot be parsed or the executable payload is invalid, no suggestion is surfaced
 
 ## UI Suggestion Flow
 

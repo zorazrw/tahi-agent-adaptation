@@ -4,7 +4,7 @@ import { resolve } from "path";
 import type { SessionStore } from "./session-store.js";
 import type { StreamMessage } from "../types.js";
 import { runPiTextPrompt } from "./pi-prompt.js";
-import { getUserProfileRepoPath } from "./user-predict.js";
+import { getUserProfileAppPath } from "./user-predict.js";
 
 const DEFAULT_LAST_N = 10;
 const MAX_LAST_N = 200;
@@ -128,7 +128,7 @@ function resolveProfileTargetPath(cwd?: string): string {
   if (cwd && cwd.trim()) {
     return resolve(cwd, "USER_PROFILE.md");
   }
-  return getUserProfileRepoPath();
+  return getUserProfileAppPath();
 }
 
 export async function generateUserProfileMarkdown(args: {

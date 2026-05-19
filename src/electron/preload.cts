@@ -31,6 +31,8 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("record-prediction-event", event),
     getPredictionStats: (sinceMs?: number | null) =>
         ipcInvoke("get-prediction-stats", sinceMs ?? null),
+    getPredictionLog: (limit?: number | null) =>
+        ipcInvoke("get-prediction-log", limit ?? null),
     getUserProfile: (cwd?: string | null) =>
         ipcInvoke("get-user-profile", cwd ?? null),
     saveUserProfile: (payload: { markdown: string; cwd?: string | null }) =>

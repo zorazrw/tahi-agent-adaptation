@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import type { SessionStore, SessionHistory, StoredSession } from "../src/electron/libs/session-store";
 import { generateUserProfileMarkdown, readUserProfile } from "../src/electron/libs/user-profile-generator";
+import { resolveAppUserProfileMarkdown } from "../src/electron/libs/user-predict";
 import type { StreamMessage } from "../src/lib/runtime-types";
 
 const tempDirs: string[] = [];
@@ -169,5 +170,25 @@ describe("generateUserProfileMarkdown", () => {
     const { markdown, profilePath } = readUserProfile(cwd);
     expect(markdown).toBe("");
     expect(profilePath).toBe(join(cwd, "USER_PROFILE.md"));
+  });
+});
+
+describe("resolveAppUserProfileMarkdown", () => {
+  test("reads USER_PROFILE.md from the app launch cwd instead of a session cwd", () => {
+    const previousCwd = process.cwd();
+    const appCwd = mkCwd();
+    const sessionCwd = mkCwd();
+    writeFileSync(join(appCwd, "USER_PROFILE.md"), "app launch profile\n", "utf8");
+    writeFileSync(join(sessionCwd, "USER_PROFILE.md"), "session profile\n", "utf8");
+
+    try {
+      process.chdir(appCwd);
+      const launchCwd = process.cwd();
+      const result = resolveAppUserProfileMarkdown();
+      expect(result.profileMarkdown).toBe("app launch profile\n");
+      expect(result.profilePath).toBe(join(launchCwd, "USER_PROFILE.md"));
+    } finally {
+      process.chdir(previousCwd);
+    }
   });
 });

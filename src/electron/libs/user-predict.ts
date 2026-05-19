@@ -230,8 +230,10 @@ function assistantBlocksToText(message: StreamMessage): string {
     : "";
 }
 
-export function buildTranscriptFromStreamMessages(messages: StreamMessage[], limit = 14): string {
-  const recent = messages.slice(-limit);
+export function buildTranscriptFromStreamMessages(messages: StreamMessage[], limit?: number): string {
+  const recent = typeof limit === "number" && Number.isFinite(limit)
+    ? messages.slice(-limit)
+    : messages;
   const lines: string[] = [];
   for (const message of recent) {
     switch (message.type) {
@@ -267,8 +269,10 @@ export function buildTranscriptFromStreamMessages(messages: StreamMessage[], lim
   return lines.join("\n");
 }
 
-export function buildTranscriptFromExportedSteps(steps: ExportedTrajectoryStep[], limit = 14): string {
-  const recent = steps.slice(-limit);
+export function buildTranscriptFromExportedSteps(steps: ExportedTrajectoryStep[], limit?: number): string {
+  const recent = typeof limit === "number" && Number.isFinite(limit)
+    ? steps.slice(-limit)
+    : steps;
   return recent
     .map((step) => {
       const actor = step.actor === "agent" ? "Agent" : "User";
@@ -290,31 +294,33 @@ export function buildWorkflowSummaryFromExportedSteps(steps: ExportedTrajectoryS
 function buildPredictionPrompt(args: {
   userProfileMarkdown: string;
   transcript: string;
+  workflowJson?: string;
   workflowSummary?: string;
   sessionTitle?: string;
 }): string {
   return [
     "You are predicting Zora's most likely immediate next action in Agent Cowork.",
     "Return ONLY JSON, matching this top-level shape:",
-    '{"actionType":"file_edit|edit_verifier|edit_workflow|brain_edit|message|stop|unknown","confidence":0.0,"rationale":"string","executable":<ExecutableAction or null>}',
-    "`executable` is REQUIRED for every actionType except `unknown` (use null there). It must match this JSON Schema for ExecutableAction:",
+    '{"actionType":"message|edit_workflow|edit_verifier|file_edit|brain_edit|stop","confidence":0.0,"rationale":"string","executable":<ExecutableAction>}',
+    "`executable` is REQUIRED. It must match this JSON Schema for ExecutableAction:",
     "```json",
     EXECUTABLE_ACTION_JSON_SCHEMA,
     "```",
-    "`actionType` must equal `executable.type` when executable is non-null. For unknown, set executable to null.",
-    "For edit_workflow, emit the FULL new workflow tree (not a diff). Copy unchanged nodes verbatim from the workflow summary.",
+    "`actionType` must equal `executable.type`.",
+    "For message, emit the exact next user prompt text.",
+    "For edit_workflow, emit a PATCH against CURRENT WORKFLOW JSON. Do not emit a full replacement tree.",
+    "edit_workflow.patch operations are applied to the current tree by node id. Omitted fields are preserved.",
+    "Use update_node for description/outputFiles/status changes, add_node for new steps, delete_node for deleted steps, and move_node for reordering or reparenting.",
+    "Do not include verifier changes in edit_workflow unless the likely user action is truly changing both workflow structure and verifier text. Prefer edit_verifier for verifier-only changes.",
     "For edit_verifier, emit the target nodeId plus the new verifier criterion list.",
     "For file_edit, emit the path AND the full new contents of the file.",
     "For brain_edit, set kind=\"memory\" for user memory edits or \"skill\" for skill files; sections is a list of {fileName, content}. Use deletedFileNames for removals.",
-    "Use actionType \"stop\" liberally when appropriate: if the agent's latest output plausibly satisfies the user's original request, if remaining issues are minor/optional, or if another prompt would mostly be scope creep — prefer \"stop\" over speculative follow-ups.",
+    "Use actionType \"stop\" when the user is most likely done for now: satisfied, switching tasks, or not sending another prompt/structural edit.",
     "When uncertain between \"stop\" and a vague or low-value \"message\", choose \"stop\". Reserve \"message\" for clear, necessary next steps that stay on-task.",
-    "Use actionType \"stop\" when the user is most likely done for now (satisfied, switching tasks, or not sending another prompt/structural edit). This is intentional completion — not a model error.",
-    "Use actionType \"unknown\" only when the next move is unclear or does not fit message, workflow/verifier edits, file_edit, brain_edit, or stop.",
     "Anchor on the user's initial request (usually the first substantive \"User:\" turn in the transcript). Do not predict draftText or any next action that pivots to a new goal, new deliverable, unrelated benchmark, or \"improvement\" beyond what that initial request asked for.",
     "Never predict a message whose purpose is to drag the task toward unrelated exploration, extra features, or reframing the assignment. If the work already matches the initial ask, use \"stop\" instead of inventing follow-on work.",
     "Predicted edit_workflow, edit_verifier, file_edit, or brain_edit must likewise serve the same initial request — not introduce a new assignment or tangent.",
-    "Do not default to actionType \"message\". Pick the single best type. Use \"message\" only when the next step is most likely a normal chat prompt.",
-    "Use edit_workflow when the user would likely adjust the task tree or steps; edit_verifier when they would tweak criteria or checks; file_edit when they would open and edit a specific file path next; brain_edit when they would change saved memory/skills.",
+    "Pick the single best type. Use message when the next step is a normal chat prompt; edit_workflow when the user would likely adjust the task tree or steps; edit_verifier when they would tweak criteria or checks; file_edit when they would open and edit a specific file path next; brain_edit when they would change saved memory/skills.",
     "If the workflow summary shows failing or stale verifiers the user would plausibly fix before chatting, prefer edit_verifier or edit_workflow over message.",
     "The transcript uses \"User:\" for chat prompts and \"UserAction: edit_workflow\" / \"UserAction: edit_verifier\" / \"UserAction: file_edit(path)\" / \"UserAction: brain_edit\" for non-chat actions. Prefer the action type that matches how the user has been acting.",
     "Optimize for the immediate next move, not the long-term intent.",
@@ -329,7 +335,10 @@ function buildPredictionPrompt(args: {
     args.workflowSummary
       ? ["WORKFLOW / VERIFIER SUMMARY:", args.workflowSummary, ""].join("\n")
       : "",
-    "Choose the actionType that best matches the next single user move among message, edit_workflow, edit_verifier, file_edit, brain_edit, stop, and unknown.",
+    args.workflowJson
+      ? ["CURRENT WORKFLOW JSON:", "```json", args.workflowJson, "```", ""].join("\n")
+      : "",
+    "Choose the actionType that best matches the next single user move among message, edit_workflow, edit_verifier, file_edit, brain_edit, and stop.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -339,35 +348,34 @@ export async function predictNextUserAction(args: {
   cwd: string;
   userProfileMarkdown: string;
   transcript: string;
+  workflowTree?: WorkflowNode[];
   workflowSummary?: string;
   sessionTitle?: string;
-}): Promise<PredictedUserActionSuggestion> {
+}): Promise<PredictedUserActionSuggestion | null> {
   const fake = maybeFakeUserPredictAction();
   if (fake) return fake;
 
   const rawResponse = await runPiTextPrompt({
     cwd: args.cwd,
-    prompt: buildPredictionPrompt(args),
+    prompt: buildPredictionPrompt({
+      ...args,
+      workflowJson: args.workflowTree
+        ? JSON.stringify(args.workflowTree, null, 2)
+        : undefined,
+    }),
   });
 
   const parsed = extractJsonObject(rawResponse);
   if (!parsed) {
-    return {
-      actionType: "unknown",
-      draftText: "",
-      confidence: 0.2,
-      rationale: rawResponse.trim() || "Model returned an unparsable prediction.",
-      rawResponse,
-      executable: null,
-    };
+    return null;
   }
 
   const validated = parseExecutable(parsed.executable);
-  // Prefer the validated executable's discriminator over the loose actionType
-  // string — it's the canonical source of truth when present.
-  const actionType = validated
-    ? validated.type
-    : normalizeActionType(parsed.actionType);
+  if (!validated) {
+    return null;
+  }
+  // The executable discriminator is the canonical source of truth.
+  const actionType = validated.type;
   const draftText = deriveDraftText(validated, parsed.draftText);
 
   return {
@@ -480,12 +488,14 @@ export function findUserProfilePath(cwd?: string): string | undefined {
   return profilePath;
 }
 
-export function resolveAppUserProfileMarkdown(cwd?: string): { profileMarkdown: string; profilePath?: string } {
-  const fromCwd = cwd ? loadUserProfileMarkdown(cwd) : { profileMarkdown: "" };
-  if (fromCwd.profileMarkdown.trim()) return fromCwd;
-  return loadUserProfileMarkdown(process.cwd());
+export function resolveAppUserProfileMarkdown(): { profileMarkdown: string; profilePath?: string } {
+  return loadUserProfileMarkdown();
+}
+
+export function getUserProfileAppPath(): string {
+  return join(process.cwd(), "USER_PROFILE.md");
 }
 
 export function getUserProfileRepoPath(): string {
-  return join(process.cwd(), "USER_PROFILE.md");
+  return getUserProfileAppPath();
 }
