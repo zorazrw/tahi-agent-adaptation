@@ -13,6 +13,8 @@ type EditableTextPanelProps = {
   monospace?: boolean;
   /** When content from server changes (e.g. after reload), sync local state. */
   contentKey?: string | number;
+  /** Called on every edit so preview/source can share the same draft. */
+  onContentChange?: (content: string) => void;
   /** "document" = transparent field inside TextDocumentFrame; "default" = bordered box. */
   variant?: "default" | "document";
 };
@@ -26,6 +28,7 @@ export function EditableTextPanel({
   className = "",
   monospace = true,
   contentKey,
+  onContentChange,
   variant = "default",
 }: EditableTextPanelProps) {
   const isDocument = variant === "document";
@@ -109,7 +112,11 @@ export function EditableTextPanel({
       )}
       <textarea
         value={local}
-        onChange={(e) => setLocal(e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value;
+          setLocal(next);
+          onContentChange?.(next);
+        }}
         onBlur={() => void handleSave()}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
@@ -120,7 +127,7 @@ export function EditableTextPanel({
         placeholder={placeholder}
         className={
           isDocument
-            ? `flex-1 min-h-[12rem] w-full resize-none border-0 bg-transparent px-0 py-0 text-[0.9375rem] leading-[1.75] text-ink-800 focus:outline-none focus:ring-0 selection:bg-primary/15 ${
+            ? `text-doc-content min-h-0 flex-1 w-full resize-none overflow-y-auto border-0 bg-transparent px-0 py-0 font-sans focus:outline-none focus:ring-0 selection:bg-primary/15 ${
                 monospace ? "font-mono whitespace-pre" : "whitespace-pre-wrap"
               }`
             : `flex-1 min-h-0 w-full resize-none rounded-lg border border-ink-900/12 bg-white/90 px-3 py-2.5 text-[0.9375rem] leading-relaxed text-ink-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/25 ${

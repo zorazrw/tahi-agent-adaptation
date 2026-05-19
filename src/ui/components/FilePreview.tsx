@@ -186,7 +186,7 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
 
   return (
     <div
-      className={`flex-1 flex flex-col overflow-hidden border bg-surface-secondary/60 ${
+      className={`flex h-full min-h-0 flex-1 flex-col overflow-hidden border bg-surface-secondary/60 ${
         isTextualPreview ? "rounded-xl border-ink-900/8 shadow-card" : "rounded-lg border-ink-900/10"
       }`}
     >
@@ -252,7 +252,7 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
           />
         )}
       </div>
-      <div className="flex-1 flex flex-col min-h-0 overflow-auto px-3 py-2">
+      <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden px-3 py-2">
         {loading && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -275,16 +275,18 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
           <p className="text-sm text-error">{result.error}</p>
         )}
         {Renderer && !loading && (
-          <Renderer
-            data={result}
-            zoom={showZoom ? zoom : undefined}
-            filePath={filePath}
-            cwd={cwd ?? undefined}
-            sessionId={sessionId ?? undefined}
-            onReload={() => setRefreshKey((k) => k + 1)}
-            onHtmlVisualSaveChromeChange={onPreviewSaveChromeChange}
-            onTextSaveChromeChange={onPreviewSaveChromeChange}
-          />
+          <div className="flex-1 flex flex-col min-h-0 min-w-0 h-full">
+            <Renderer
+              data={result}
+              zoom={showZoom ? zoom : undefined}
+              filePath={filePath}
+              cwd={cwd ?? undefined}
+              sessionId={sessionId ?? undefined}
+              onReload={() => setRefreshKey((k) => k + 1)}
+              onHtmlVisualSaveChromeChange={onPreviewSaveChromeChange}
+              onTextSaveChromeChange={onPreviewSaveChromeChange}
+            />
+          </div>
         )}
       </div>
     </div>

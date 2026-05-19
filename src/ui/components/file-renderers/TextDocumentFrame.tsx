@@ -18,7 +18,7 @@ export function TextDocumentFrame({
   padded = true,
 }: TextDocumentFrameProps) {
   return (
-    <div className={`flex flex-col flex-1 min-h-0 ${className}`}>
+    <div className={`flex h-full min-h-0 flex-1 flex-col ${className}`}>
       {(toolbar || label) && (
         <div className="flex items-center gap-2 pb-2.5 mb-2.5 shrink-0 border-b border-ink-900/8">
           {toolbar}
@@ -29,9 +29,9 @@ export function TextDocumentFrame({
           ) : null}
         </div>
       )}
-      <div className="text-doc-surface flex-1 min-h-0 overflow-auto rounded-xl border border-ink-900/10 bg-white shadow-[0_1px_2px_rgba(26,25,21,0.05),0_6px_20px_rgba(26,25,21,0.06)]">
+      <div className="text-doc-surface flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-ink-900/10 bg-white shadow-[0_1px_2px_rgba(26,25,21,0.05),0_6px_20px_rgba(26,25,21,0.06)]">
         {padded ? (
-          <div className="text-doc-body w-full min-h-full p-7 sm:p-10">
+          <div className="text-doc-body text-doc-content flex min-h-0 flex-1 flex-col p-7 sm:p-10">
             {children}
           </div>
         ) : (

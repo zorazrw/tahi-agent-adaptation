@@ -34,7 +34,9 @@ export function TextRenderer({
 
   return (
     <TextDocumentFrame label="Plain text">
-      <PlainTextReadingView content={data.content} />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <PlainTextReadingView content={data.content} />
+      </div>
     </TextDocumentFrame>
   );
 }

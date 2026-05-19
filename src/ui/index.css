@@ -310,17 +310,32 @@ code, pre, textarea.mono, input.mono {
 /* Images */
 .md-prose img { max-width: 100%; border-radius: 6px; margin: 1rem 0; }
 
-/* ── File preview: plain text & document surfaces ── */
-.text-doc-plain {
+/* ── File preview: shared body typography (preview + source) ── */
+.text-doc-content {
   font-size: 0.9375rem;
   line-height: 1.75;
   color: var(--color-ink-800);
   letter-spacing: 0.01em;
 }
 
+.text-doc-plain {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+
 .text-doc-surface .md-prose {
-  font-size: 1rem;
+  font-size: 0.9375rem;
   line-height: 1.75;
+  color: var(--color-ink-800);
+  letter-spacing: 0.01em;
+}
+
+.text-doc-surface .md-prose pre,
+.text-doc-surface .md-prose pre code {
+  font-size: 0.8125rem;
+  line-height: 1.6;
 }
 
 .text-doc-surface .md-prose pre {
