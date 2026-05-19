@@ -41,3 +41,6 @@ tinker-bridge/.venv/
 
 # Local user profile for prediction experiments
 USER_PROFILE.md
+
+# Local/generated user-prediction backtest reports
+docs/backtests/

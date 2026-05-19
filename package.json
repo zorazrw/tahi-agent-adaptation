@@ -11,6 +11,7 @@
 		"dev": "pkill -f vite 2>/dev/null || true; pkill -f electron 2>/dev/null || true; sleep 1; concurrently -k --names react,electron --prefix-colors blue,green \"bun run dev:react\" \"bun run dev:electron\"",
 		"dev:react": "vite",
 		"dev:electron": "bun run transpile:electron && cross-env NODE_ENV=development electron .",
+		"backtest:viewer": "cross-env PORT=5174 vite --host 127.0.0.1 --open \"/backtest-report.html?report=/docs/backtests/user-simulator-backtest-last-40-interactive-sessions.json\"",
 		"build": "npm run transpile:electron && tsc -b && vite build",
 		"lint": "eslint .",
 		"preview": "vite preview",
