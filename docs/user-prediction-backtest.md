@@ -33,6 +33,8 @@ You need:
 
 `USER_PROFILE.md`, exported datasets, and generated reports are local artifacts. `docs/backtests/` is ignored by git.
 
+To create `USER_PROFILE.md`, open Agent Cowork settings, go to the **Profile** tab, choose how many recent chats to use, and click **Auto-generate**. The generated profile is saved to `USER_PROFILE.md` in the app/repo working directory. You can also edit and save the profile in that tab, or create `USER_PROFILE.md` manually in the repo root.
+
 ## 1. Export session data
 
 The backtest expects the default export format from `scripts/export_task_sessions.py`.
@@ -53,6 +55,8 @@ python3 scripts/export_task_sessions.py \
   --session-id SESSION_UUID \
   --output docs/backtests/session-SESSION_UUID.json
 ```
+
+The backtest accepts both the multi-session array produced by `--limit` and the single-session object produced by `--session-id`.
 
 Use a non-default database path:
 
@@ -75,8 +79,11 @@ python3 scripts/export_task_sessions.py \
 Default database locations:
 
 - macOS: `~/Library/Application Support/Agent Cowork/sessions.db`
+- macOS alternate app id: `~/Library/Application Support/agent-cowork/sessions.db`
 - Windows: `%APPDATA%\Agent Cowork\sessions.db`
+- Windows alternate app id: `%APPDATA%\agent-cowork\sessions.db`
 - Linux: `~/.config/Agent Cowork/sessions.db`
+- Linux alternate app id: `~/.config/agent-cowork/sessions.db`
 
 ## 2. Run the backtest
 
@@ -91,8 +98,8 @@ bun scripts/backtest_user_profile.ts \
 
 This writes:
 
-- `docs/backtests/user-simulator-backtest-MM-DD.md`
-- `docs/backtests/user-simulator-backtest-MM-DD.json`
+- `docs/backtests/user-simulator-backtest-YY-MM-DD.md`
+- `docs/backtests/user-simulator-backtest-YY-MM-DD.json`
 
 Run every eligible user turn:
 
@@ -143,10 +150,10 @@ Defaults:
 - `--case-selection all`
 - `--cases-per-session 2`
 - `--include-baseline`
-- `--report-name user-simulator-backtest-MM-DD`
+- `--report-name user-simulator-backtest-YY-MM-DD`
 - `--out-dir docs/backtests`
 
-When omitted, the report name uses the current local month and day, for example `user-simulator-backtest-05-20`. Passing `--report-name` uses the exact basename you provide.
+When omitted, the report name uses the current local year, month, and day, for example `user-simulator-backtest-26-05-20`. If that default report already exists, the script appends the first available numeric suffix, for example `user-simulator-backtest-26-05-20-1`, then `user-simulator-backtest-26-05-20-2`. Passing `--report-name` uses the exact basename you provide.
 
 ## Interpreting outputs
 
@@ -202,9 +209,9 @@ The viewer shows:
 
 If the export fails with `sessions.db not found`, pass `--db PATH` or set `AGENT_COWORK_DB`.
 
-If the backtest fails with `USER_PROFILE.md was not found`, create or restore the local profile file in the repo root.
+If the backtest fails with `USER_PROFILE.md was not found`, use Settings > Profile > **Auto-generate** in Agent Cowork, or manually create/restore the local profile file in the repo root.
 
-If the backtest fails before any cases run, check that the exported JSON is an array of sessions and that each session has a `trajectory`.
+If the backtest fails before any cases run, check that the exported JSON is either an array of sessions or one session object, and that every session has a `trajectory`.
 
 If the run is too slow, use `--case-selection representative`, reduce `--cases-per-session`, or add `--no-baseline`.
 

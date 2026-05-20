@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import type {
   PredictedUserActionSuggestion,
@@ -35,6 +35,7 @@ type CliOptions = {
   casesPerSession: number;
   includeBaseline: boolean;
   reportName: string;
+  reportNameProvided: boolean;
   outDir: string;
 };
 
@@ -95,9 +96,25 @@ type PairwiseMetricsBucket = {
 const DEFAULT_REPORT_NAME_PREFIX = "user-simulator-backtest";
 
 function defaultReportName(date = new Date()): string {
+  const year = String(date.getFullYear()).slice(-2);
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
-  return `${DEFAULT_REPORT_NAME_PREFIX}-${month}-${day}`;
+  return `${DEFAULT_REPORT_NAME_PREFIX}-${year}-${month}-${day}`;
+}
+
+function resolveUniqueReportName(cwd: string, outDir: string, baseName: string): string {
+  const outputBase = resolve(cwd, outDir);
+  const exists = (name: string) =>
+    existsSync(resolve(outputBase, `${name}.md`)) || existsSync(resolve(outputBase, `${name}.json`));
+
+  if (!exists(baseName)) return baseName;
+
+  for (let i = 1; i < 1000; i++) {
+    const candidate = `${baseName}-${i}`;
+    if (!exists(candidate)) return candidate;
+  }
+
+  throw new Error(`Could not find an unused report name for ${baseName}`);
 }
 
 function actionType(action: string): string {
@@ -111,6 +128,7 @@ function parseArgs(argv: string[]): CliOptions {
     casesPerSession: 2,
     includeBaseline: true,
     reportName: defaultReportName(),
+    reportNameProvided: false,
     outDir: "docs/backtests",
   };
 
@@ -145,6 +163,7 @@ function parseArgs(argv: string[]): CliOptions {
         break;
       case "--report-name":
         options.reportName = next();
+        options.reportNameProvided = true;
         break;
       case "--out-dir":
         options.outDir = next();
@@ -175,15 +194,22 @@ Options:
   --cases-per-session N                Sampling count for representative mode (default: 2)
   --include-baseline                   Include empty-profile baseline (default)
   --no-baseline                        Skip baseline calls
-  --report-name NAME                   Output basename (default: user-simulator-backtest-MM-DD)
+  --report-name NAME                   Output basename (default: user-simulator-backtest-YY-MM-DD)
   --out-dir DIR                        Output directory (default: docs/backtests)
 `);
 }
 
 function loadSessions(path: string): SessionBlob[] {
   const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-  if (!Array.isArray(raw)) throw new Error("Expected an array of sessions.");
-  return raw as SessionBlob[];
+  if (Array.isArray(raw)) return raw as SessionBlob[];
+  if (
+    raw &&
+    typeof raw === "object" &&
+    Array.isArray((raw as Partial<SessionBlob>).trajectory)
+  ) {
+    return [raw as SessionBlob];
+  }
+  throw new Error("Expected an array of sessions or a single exported session object.");
 }
 
 function ensureDirFor(filePath: string): void {
@@ -374,6 +400,10 @@ async function main(): Promise<void> {
   const datasetPath = options.datasetPath ?? process.env.USER_PREDICTION_DATASET;
   if (!datasetPath) {
     throw new Error("Pass a trajectory export path as argv[2] or set USER_PREDICTION_DATASET.");
+  }
+
+  if (!options.reportNameProvided) {
+    options.reportName = resolveUniqueReportName(cwd, options.outDir, options.reportName);
   }
 
   const sessionsPath = resolve(cwd, datasetPath);
