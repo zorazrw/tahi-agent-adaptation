@@ -145,6 +145,7 @@ class Config:
     # Data construction
     pair_mode: str = "first_last"   # "first_last" | "adjacent" (file-centric)
     use_gt: bool = False            # append last-version artifact to teacher prompt
+    use_student: bool = False       # append student artifact to teacher prompt
 
     # Top-K distillation (Tinker only; ignored when use_skyrl=True).
     # topk > 0 → forward KL distillation with K teacher vocabulary candidates
@@ -946,6 +947,13 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--use-student", action="store_true",
+        help=(
+            "Inject student artifact content into the teacher prompt as "
+            "before-state context. Can be combined with --use-gt."
+        ),
+    )
+    parser.add_argument(
         "--topk", type=int, default=20,
         help=(
             "Top-K vocabulary candidates for distillation (Tinker only). "
@@ -983,6 +991,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         pair_mode=args.pair_mode,
         use_gt=args.use_gt,
+        use_student=args.use_student,
     )
 
     cfg = Config(
@@ -1002,6 +1011,7 @@ if __name__ == "__main__":
         use_skyrl=args.use_skyrl,
         pair_mode=args.pair_mode,
         use_gt=args.use_gt,
+        use_student=args.use_student,
         topk=args.topk,
         teacher_temperature=args.teacher_temperature,
     )

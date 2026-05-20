@@ -318,14 +318,19 @@ class OfflineOPDDataset:
         batch_size: int,
         pair_mode: str = "first_last",
         use_gt: bool = False,
+        use_student: bool = False,
     ) -> "OfflineOPDDataset":
         sessions = _load_sessions(path)
         examples = extract_opd_examples(
-            sessions, renderer=renderer, pair_mode=pair_mode, use_gt=use_gt,
+            sessions,
+            renderer=renderer,
+            pair_mode=pair_mode,
+            use_gt=use_gt,
+            use_student=use_student,
         )
         logger.info(
-            "Loaded %d OPD examples from %s (pair_mode=%s, use_gt=%s)",
-            len(examples), path, pair_mode, use_gt,
+            "Loaded %d OPD examples from %s (pair_mode=%s, use_gt=%s, use_student=%s)",
+            len(examples), path, pair_mode, use_gt, use_student,
         )
 
         student_datums: list[tinker.Datum] = []

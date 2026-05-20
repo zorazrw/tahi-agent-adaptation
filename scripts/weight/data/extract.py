@@ -209,19 +209,21 @@ def _augment_with_feedback(
     prompt: list[dict],
     human_actions: list[dict],
     gt_content: str | None = None,
+    student_artifact: dict[str, str] | None = None,
 ) -> list[dict]:
-    """Append privileged human feedback (and optionally the ground-truth artifact)
-    to the last user message for the teacher prompt.
+    """Append privileged context to the last user message for the teacher prompt.
 
-    Captured action types:
+    Captured action types in ``human_actions``:
     - ``follow_up``     → '- Human feedback: "..."'
-    - ``file_edit``     → "- Human edited file '...'"
+    - ``file_edit``     → unified diff block
     - ``edit_workflow`` / ``edit_verifier`` — intentionally not injected (commented out).
 
-    When ``gt_content`` is provided (``use_gt=True``), the final accepted version
-    of the file is appended as a reference block after the feedback text.
-    This implements the SDFT "golden answer in teacher prompt" technique, which
-    empirically sharpens the teacher's distribution on the correct tokens.
+    Optional privileged blocks:
+    - ``student_artifact``: the student artifact at this round (``use_student=True``).
+      This gives the teacher explicit before-state context so it can infer *why*
+      follow-up instructions were issued.
+    - ``gt_content``: final accepted artifact (``use_gt=True``), i.e. SDFT-style
+      golden answer reference.
     """
     parts: list[str] = []
     for action in human_actions:
@@ -251,10 +253,20 @@ def _augment_with_feedback(
         # elif atype == "edit_verifier":
         #     parts.append("(verifier edit omitted)")
 
-    if not parts and gt_content is None:
+    if not parts and gt_content is None and student_artifact is None:
         return prompt
 
     suffix = ""
+    if student_artifact is not None:
+        student_content = student_artifact.get("content", "")
+        if student_content:
+            suffix += (
+                "\n\nThe following block is from a prior interaction with the same user. "
+                "Treat it as evidence of recurring user preferences (not a one-off fix).\n"
+                "Student artifact from the prior attempt:\n```\n"
+                + student_content
+                + "\n```"
+            )
     if parts:
         suffix += (
             "\n\nThe following is feedback from a human collaborator on a "
@@ -266,7 +278,13 @@ def _augment_with_feedback(
             "\n\nFor reference, here is the final accepted version of the file:\n"
             "```\n" + gt_content + "\n```"
         )
-    suffix += "\n\nNow generate an improved response incorporating the above guidance."
+    suffix += (
+        "\n\nInfer the user's latent preferences from this prior interaction: "
+        "identify what the student artifact did poorly, what the feedback tried "
+        "to improve, and what quality bar the final result implies. Apply those "
+        "preferences (style, layout, constraints, and quality criteria) in your response."
+        "\n\nNow generate an improved response incorporating the above guidance."
+    )
     augmented = list(prompt)
     last = augmented[-1]
     augmented[-1] = {"role": last["role"], "content": last["content"] + suffix}
@@ -543,6 +561,7 @@ def extract_opd_examples(
     renderer: Any | None = None,
     pair_mode: str = "first_last",
     use_gt: bool = False,
+    use_student: bool = False,
 ) -> list[dict[str, Any]]:
     """Extract offline OPD examples using the file-centric cross-unit strategy.
 
@@ -560,10 +579,14 @@ def extract_opd_examples(
       Student = version k (v_k); teacher has feedback arriving strictly after
       v_k's source round. More examples, smaller per-example teacher signal.
 
+    When ``use_student=True``, the student artifact for the current example is
+    also injected into the teacher prompt as explicit "before-state" context.
+    This is stronger than feedback-only prompting and helps the teacher infer
+    why follow-ups were issued.
+
     When ``use_gt=True`` the **last** version's content is appended to every
-    teacher prompt as a "final accepted version" reference block. This
-    implements the SDFT golden-answer conditioning trick, which was shown to
-    significantly sharpen teacher distributions on the correct tokens.
+    teacher prompt as a "final accepted version" reference block (SDFT
+    golden-answer conditioning).
 
     Teacher prompt construction: ALL human action types are included:
     - ``follow_up`` → "Human feedback: \"...\""
@@ -643,8 +666,15 @@ def extract_opd_examples(
                     continue
 
                 student_prompt = list(v["prompt"])
+                student_artifact = (
+                    {"path": v["path"], "content": v["content"]}
+                    if use_student else None
+                )
                 teacher_prompt = _augment_with_feedback(
-                    student_prompt, future_actions, gt_content,
+                    student_prompt,
+                    future_actions,
+                    gt_content,
+                    student_artifact=student_artifact,
                 )
 
                 examples.append({
@@ -878,6 +908,15 @@ def main() -> None:
             "Ignored for DPO and reinforce."
         ),
     )
+    parser.add_argument(
+        "--use-student",
+        action="store_true",
+        help=(
+            "OPD only: inject the student artifact itself into the teacher "
+            "prompt as explicit before-state context. Can be combined with "
+            "--use-gt. Ignored for DPO and reinforce."
+        ),
+    )
     args = parser.parse_args()
 
     with open(args.input, encoding="utf-8") as f:
@@ -898,9 +937,15 @@ def main() -> None:
 
     elif args.mode == "opd":
         units = extract_opd_examples(
-            sessions, pair_mode=args.pair_mode, use_gt=args.use_gt,
+            sessions,
+            pair_mode=args.pair_mode,
+            use_gt=args.use_gt,
+            use_student=args.use_student,
         )
-        print(f"Extracted {len(units)} OPD examples (pair_mode={args.pair_mode}, use_gt={args.use_gt})")
+        print(
+            f"Extracted {len(units)} OPD examples (pair_mode={args.pair_mode}, "
+            f"use_gt={args.use_gt}, use_student={args.use_student})"
+        )
         for i, u in enumerate(units):
             print(f"\n── Example {i} ──")
             print(f"  student_prompt: {len(u['student_prompt'])} msgs")
