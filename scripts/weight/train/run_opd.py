@@ -739,16 +739,24 @@ _BASH_TEE_WRITE_HEREDOC_RE = re.compile(
     re.DOTALL,
 )
 
+_BASH_PYTHON_INLINE_HEREDOC_RE = re.compile(
+    r"""python3?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\1(?:\n|$)""",
+    re.DOTALL,
+)
+
 
 def _bash_heredoc_write_args(command: Any) -> dict[str, str] | None:
     """Parse a narrow bash heredoc write into write(path, content) args.
 
     This intentionally does not execute shell.  It only accepts obvious
-    full-file writes:
+    artifact-producing heredocs:
       cat > artifact <<EOF
       tee artifact <<EOF
+      python3 <<EOF
 
-    Append forms, arbitrary redirections, and inline python are left filtered.
+    Append forms and arbitrary redirections are left filtered.  Inline Python
+    scripts are treated as synthetic source artifacts, regardless of the image
+    path they may save at runtime.
     """
     if not isinstance(command, str):
         return None
@@ -759,6 +767,10 @@ def _bash_heredoc_write_args(command: Any) -> dict[str, str] | None:
             content = m.group(3)
             if path and content.strip():
                 matches.append((path, content))
+    for m in _BASH_PYTHON_INLINE_HEREDOC_RE.finditer(command):
+        content = m.group(2)
+        if content.strip():
+            matches.append(("<inline_script>.py", content))
     if len(matches) != 1:
         return None
     path, content = matches[0]
