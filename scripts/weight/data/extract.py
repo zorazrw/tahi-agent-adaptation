@@ -319,6 +319,73 @@ def _session_tools_prefix(
     return tools_prefix
 
 
+def _session_initial_context(
+    session: dict,
+    system_prompt: str,
+    tool_schemas: list[dict] | None,
+    renderer: Any | None,
+) -> list[dict]:
+    """System/tools + initial task + completed planning transcript.
+
+    At inference time execution nodes are not launched from only their local
+    "Proceed with: ..." prompt. They also see the user's original task
+    instruction and the completed planning interaction (including the concrete
+    workflow_plan tool call). Training prompts must preserve that same prefix.
+    """
+    context = list(_session_tools_prefix(system_prompt, tool_schemas, renderer))
+
+    initial = session.get("initial_task_instruction")
+    if isinstance(initial, str) and initial.strip():
+        context.append({"role": "user", "content": initial})
+
+    for unit in session.get("task_units", []) or []:
+        if unit.get("intent") != "planning":
+            continue
+        for rnd in unit.get("agent_trajectories", []) or []:
+            messages = rnd.get("messages", [])
+            if messages:
+                context.extend(dict(m) for m in messages)
+
+    return context
+
+
+def _prompt_has_session_initial_context(prompt: Any, session: dict) -> bool:
+    """Return True if a cached prompt already includes the current session head."""
+    if not _reinforce_prompt_cache_valid(prompt):
+        return False
+
+    initial = session.get("initial_task_instruction")
+    if isinstance(initial, str) and initial.strip():
+        if not any(m.get("role") == "user" and m.get("content") == initial for m in prompt):
+            return False
+
+    planning_units = [
+        u for u in session.get("task_units", []) or []
+        if u.get("intent") == "planning"
+    ]
+    if not planning_units:
+        return True
+
+    for unit in planning_units:
+        for rnd in unit.get("agent_trajectories", []) or []:
+            for msg in rnd.get("messages", []) or []:
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    planned_tools = [
+                        tc.get("function", {}).get("name")
+                        for tc in msg.get("tool_calls", [])
+                    ]
+                    if "workflow_plan" in planned_tools:
+                        return any(
+                            m.get("role") == "assistant"
+                            and any(
+                                tc.get("function", {}).get("name") == "workflow_plan"
+                                for tc in (m.get("tool_calls") or [])
+                            )
+                            for m in prompt
+                        )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # DPO extraction
 # ---------------------------------------------------------------------------
@@ -363,8 +430,8 @@ def _build_file_version_index(
 
     Only filenames with ≥2 versions are useful for DPO; the caller filters.
     """
-    accumulated: list[dict] = list(
-        _session_tools_prefix(system_prompt, tool_schemas, renderer),
+    accumulated: list[dict] = _session_initial_context(
+        session, system_prompt, tool_schemas, renderer,
     )
     file_index: dict[str, list[dict]] = {}
 
@@ -750,11 +817,12 @@ def extract_reinforce_examples(
     """Extract REINFORCE examples from weight-format sessions.
 
     For each round *k*, the **prompt** is built like DPO file-indexing: a single
-    session-level ``accumulated`` transcript (system/tools prefix, then all prior
-    rounds' ``messages[1:]`` and follow-ups across **all** task_units in session order),
-    plus this round's opening ``messages[0]``. That matches
-    :func:`_build_file_version_index` so later units see full prior agent traffic,
-    not only the current unit's slice.
+    session-level ``accumulated`` transcript (system/tools prefix, top-level
+    ``initial_task_instruction``, full planning transcript, then all prior
+    execution rounds' ``messages[1:]`` and follow-ups across **all** task_units
+    in session order), plus this round's opening ``messages[0]``. That matches
+    :func:`_build_file_version_index` so later units see full prior agent
+    traffic, not only the current unit's slice.
 
     The **completion** is still artifact-only from ``rounds[k].output_files``.
 
@@ -771,10 +839,11 @@ def extract_reinforce_examples(
     Each extracted training row still carries scalar ``reward`` = mean of the unit's
     rubric 0/1 scores (same for every trajectory index in that unit under LLM grading).
 
-    Only **three** execution task_units per session emit training data (first, middle,
-    and last in execution order), **plus** every task_unit whose ``intent`` is
-    ``"planning"``. Other execution units still advance ``accumulated`` but do not call
-    the rubric LLM, write ``reward`` / ``reinforce_prompt``, or append examples.
+    Only **three** execution task_units per session emit training data (first,
+    middle, and last in execution order). Planning units are pre-seeded into
+    the prompt context and are not emitted as REINFORCE training examples.
+    Other execution units still advance ``accumulated`` but do not call the
+    rubric LLM, write ``reward`` / ``reinforce_prompt``, or append examples.
 
     Rounds without ``output_files`` (no artifact produced) are skipped.
 
@@ -796,8 +865,8 @@ def extract_reinforce_examples(
         rubrics = session.get("task_units", [])[-1].get("verifiers", [])
         rubrics = [v["criterion"] for v in rubrics]  # list[str]
 
-        accumulated: list[dict] = list(
-            _session_tools_prefix(system_prompt, tool_schemas, renderer),
+        accumulated: list[dict] = _session_initial_context(
+            session, system_prompt, tool_schemas, renderer,
         )
 
         task_units_list = session.get("task_units", [])
@@ -807,7 +876,8 @@ def extract_reinforce_examples(
 
         for unit in task_units_list:
             if unit.get("intent") == "planning":
-                include_unit = True
+                # Planning has already been included in the session head.
+                continue
             else:
                 exec_unit_idx += 1
                 include_unit = exec_unit_idx in exec_unit_keep
@@ -839,7 +909,7 @@ def extract_reinforce_examples(
                     continue
                 if include_unit:
                     cached = rnd.get("reinforce_prompt")
-                    if _reinforce_prompt_cache_valid(cached):
+                    if _prompt_has_session_initial_context(cached, session):
                         prompt = json.loads(json.dumps(cached))
                     else:
                         prompt = accumulated + [dict(messages[0])]
