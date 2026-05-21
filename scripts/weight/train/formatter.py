@@ -31,11 +31,18 @@ from tinker_cookbook.supervised.data import (
 )
 from tinker_cookbook.supervised.types import ChatDatasetBuilder, SupervisedDataset
 
-from weight.data.extract import (  # noqa: E402
-    extract_dpo_pairs,
-    extract_opd_examples,
-    extract_reinforce_examples,
-)
+try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts.weight...`.
+    from weight.data.extract import (  # type: ignore[import-not-found]  # noqa: E402
+        extract_dpo_pairs,
+        extract_opd_examples,
+        extract_reinforce_examples,
+    )
+except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
+    from ..data.extract import (  # noqa: E402
+        extract_dpo_pairs,
+        extract_opd_examples,
+        extract_reinforce_examples,
+    )
 
 logger = logging.getLogger(__name__)
 

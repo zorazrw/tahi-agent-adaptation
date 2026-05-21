@@ -45,7 +45,12 @@ from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.format_colorized import format_colorized
 from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_multiplier
 
-from .formatter import OfflineOPDDataset
+try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts.weight...`.
+    from weight.data.extract import extract_opd_examples  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
+    from ..data.extract import extract_opd_examples
+
+from .formatter import OfflineOPDDataset, _hydrate_tool_calls, _load_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +163,15 @@ class Config:
     # flattens teacher probs, raises effective teacher entropy, makes KD less
     # like hard-label SFT.  τ=1.5–2.0 recommended when teacher entropy < 0.5 nat.
     teacher_temperature: float = 1.0
+
+    # Online artifact-only rollout.  When enabled, the historical artifact
+    # completion is used only to identify the expected output path; student
+    # completions are sampled on-policy from the current model and filtered to
+    # exactly one write(path, content) tool call.
+    online_rollout: bool = False
+    rollout_max_tokens: int = 4096
+    rollout_temperature: float = 1.0
+    rollout_attempts: int = 1
 
 def _extract_completion_info(
     datum: tinker.Datum,
@@ -631,6 +645,275 @@ def do_update_topk(
     return metrics
 
 
+# ---------------------------------------------------------------------------
+# Online artifact-only rollout
+# ---------------------------------------------------------------------------
+
+def _tool_call_name_and_args(tool_call: Any) -> tuple[str | None, str | None]:
+    """Extract (function_name, arguments_json) from dict or ToolCall-like objects."""
+    if isinstance(tool_call, dict):
+        fn = tool_call.get("function", {})
+        if isinstance(fn, dict):
+            return fn.get("name"), fn.get("arguments")
+        name = getattr(fn, "name", None)
+        args = getattr(fn, "arguments", None)
+        return name, args
+    fn = getattr(tool_call, "function", None)
+    name = getattr(fn, "name", None)
+    args = getattr(fn, "arguments", None)
+    return name, args
+
+
+def _completion_expected_path(completion: list[dict]) -> str | None:
+    """Read the expected artifact path from an offline artifact-only completion."""
+    if not completion:
+        return None
+    tool_calls = completion[0].get("tool_calls") or []
+    if len(tool_calls) != 1:
+        return None
+    name, args_text = _tool_call_name_and_args(tool_calls[0])
+    if name != "write" or not isinstance(args_text, str):
+        return None
+    try:
+        args = json.loads(args_text)
+    except json.JSONDecodeError:
+        return None
+    path = args.get("path")
+    return path if isinstance(path, str) and path else None
+
+
+def _sample_is_valid_artifact_write(
+    renderer: renderers.Renderer,
+    tokens: list[int],
+    expected_path: str,
+) -> tuple[bool, str]:
+    """Accept only one parsed write(path=expected_path, non-empty content) call."""
+    try:
+        message, parse_success = renderer.parse_response(tokens)
+    except Exception as e:  # noqa: BLE001
+        return False, f"parse_exception:{type(e).__name__}"
+    if not parse_success:
+        return False, "parse_failed"
+    tool_calls = message.get("tool_calls") or []
+    if len(tool_calls) != 1:
+        return False, f"tool_call_count:{len(tool_calls)}"
+    name, args_text = _tool_call_name_and_args(tool_calls[0])
+    if name != "write":
+        return False, f"tool_name:{name}"
+    if not isinstance(args_text, str):
+        return False, "arguments_not_string"
+    try:
+        args = json.loads(args_text)
+    except json.JSONDecodeError:
+        return False, "arguments_json_error"
+    if args.get("path") != expected_path:
+        return False, "path_mismatch"
+    content = args.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return False, "empty_content"
+    return True, "valid"
+
+
+def _datum_from_prompt_and_sample_tokens(
+    prompt_input: tinker.ModelInput,
+    sampled_tokens: list[int],
+    max_length: int | None,
+) -> tinker.Datum | None:
+    """Build an exact SFT-style datum from prompt tokens + sampled completion tokens."""
+    if not sampled_tokens:
+        return None
+    prompt_tokens = list(prompt_input.to_ints())
+    full_tokens = prompt_tokens + list(sampled_tokens)
+    if len(full_tokens) < 2:
+        return None
+    if max_length is not None and len(full_tokens) > max_length:
+        return None
+
+    model_input_tokens = full_tokens[:-1]
+    target_tokens = full_tokens[1:]
+
+    # Target index j predicts full_tokens[j + 1].  Completion tokens start at
+    # full_tokens[prompt_len], so the first supervised target index is
+    # prompt_len - 1.
+    first_completion_target_idx = max(len(prompt_tokens) - 1, 0)
+    weights = [
+        1.0 if i >= first_completion_target_idx else 0.0
+        for i in range(len(target_tokens))
+    ]
+    return tinker.Datum(
+        model_input=tinker.ModelInput.from_ints(model_input_tokens),
+        loss_fn_inputs={
+            "weights": tinker.TensorData(
+                data=weights,
+                dtype="float32",
+                shape=[len(weights)],
+            ),
+            "target_tokens": tinker.TensorData(
+                data=target_tokens,
+                dtype="int64",
+                shape=[len(target_tokens)],
+            ),
+        },
+    )
+
+
+class OnlineOPDRolloutDataset:
+    """Weight-format OPD examples prepared for on-policy artifact rollout."""
+
+    def __init__(
+        self,
+        examples: list[dict[str, Any]],
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+    ):
+        rows: list[dict[str, Any]] = []
+        for ex in examples:
+            expected_path = _completion_expected_path(ex.get("completion", []))
+            if expected_path is None:
+                continue
+            student_prompt_input = renderer.build_generation_prompt(
+                _hydrate_tool_calls(ex["student_prompt"])
+            )
+            teacher_prompt_input = renderer.build_generation_prompt(
+                _hydrate_tool_calls(ex["teacher_prompt"])
+            )
+            rows.append({
+                "student_prompt_input": student_prompt_input,
+                "teacher_prompt_input": teacher_prompt_input,
+                "expected_path": expected_path,
+            })
+        self._rows = rows
+        self._renderer = renderer
+        self._max_length = max_length
+        self._batch_size = batch_size
+        self._indices = list(range(len(rows)))
+
+    @classmethod
+    def from_weight_json(
+        cls,
+        path: str,
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+        pair_mode: str = "first_last",
+        use_gt: bool = False,
+        use_student: bool = False,
+    ) -> "OnlineOPDRolloutDataset":
+        examples = extract_opd_examples(
+            _load_sessions(path),
+            renderer=renderer,
+            pair_mode=pair_mode,
+            use_gt=use_gt,
+            use_student=use_student,
+        )
+        dataset = cls(examples, renderer, max_length, batch_size)
+        logger.info(
+            "Loaded %d online OPD rollout examples from %s "
+            "(raw=%d, pair_mode=%s, use_gt=%s, use_student=%s)",
+            len(dataset._rows), path, len(examples), pair_mode, use_gt, use_student,
+        )
+        return dataset
+
+    def __len__(self) -> int:
+        if not self._rows:
+            return 0
+        return (len(self._rows) + self._batch_size - 1) // self._batch_size
+
+    def set_epoch(self, seed: int) -> None:
+        import random
+
+        rng = random.Random(seed)
+        self._indices = list(range(len(self._rows)))
+        rng.shuffle(self._indices)
+
+    def get_batch(self, index: int) -> list[dict[str, Any]]:
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        return [self._rows[self._indices[i]] for i in range(start, end)]
+
+
+async def _sample_online_artifact_datums_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    max_tokens: int,
+    temperature: float,
+    attempts: int,
+    max_length: int | None,
+) -> tuple[list[tinker.Datum], list[tinker.ModelInput], dict[str, float]]:
+    """Sample student completions and keep only valid artifact write calls."""
+    valid_datums: list[tinker.Datum] = []
+    valid_teacher_prompts: list[tinker.ModelInput] = []
+    reason_counts: dict[str, int] = {}
+    total_attempts = 0
+
+    for row in rows:
+        accepted = False
+        expected_path = row["expected_path"]
+        for _attempt in range(max(1, attempts)):
+            total_attempts += 1
+            result = await sampling_client.sample_async(
+                prompt=row["student_prompt_input"],
+                num_samples=1,
+                sampling_params=tinker.SamplingParams(
+                    stop=renderer.get_stop_sequences(),
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                ),
+            )
+            seq = result.sequences[0]
+            tokens = list(seq.tokens)
+            ok, reason = _sample_is_valid_artifact_write(renderer, tokens, expected_path)
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            if not ok:
+                continue
+            datum = _datum_from_prompt_and_sample_tokens(
+                row["student_prompt_input"], tokens, max_length,
+            )
+            if datum is None:
+                reason_counts["too_long_or_empty"] = reason_counts.get("too_long_or_empty", 0) + 1
+                continue
+            valid_datums.append(datum)
+            valid_teacher_prompts.append(row["teacher_prompt_input"])
+            accepted = True
+            break
+        if not accepted:
+            reason_counts["example_filtered"] = reason_counts.get("example_filtered", 0) + 1
+
+    n_rows = float(len(rows))
+    n_valid = float(len(valid_datums))
+    metrics: dict[str, float] = {
+        "opd_online/batch_examples": n_rows,
+        "opd_online/valid_examples": n_valid,
+        "opd_online/filtered_examples": n_rows - n_valid,
+        "opd_online/filter_rate": (n_rows - n_valid) / max(n_rows, 1.0),
+        "opd_online/attempts": float(total_attempts),
+    }
+    for reason, count in reason_counts.items():
+        safe_reason = reason.replace("/", "_").replace(":", "_")
+        metrics[f"opd_online/filter_reason/{safe_reason}"] = float(count)
+    return valid_datums, valid_teacher_prompts, metrics
+
+
+def sample_online_artifact_datums(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    config: Config,
+    max_length: int | None,
+) -> tuple[list[tinker.Datum], list[tinker.ModelInput], dict[str, float]]:
+    return asyncio.run(_sample_online_artifact_datums_async(
+        rows,
+        renderer,
+        sampling_client,
+        max_tokens=config.rollout_max_tokens,
+        temperature=config.rollout_temperature,
+        attempts=config.rollout_attempts,
+        max_length=max_length,
+    ))
+
+
 def do_update(
     step: int,
     total_steps: int,
@@ -899,6 +1182,152 @@ def main(config: Config, dataset: OfflineOPDDataset) -> None:
     logger.info("Offline OPD training completed successfully")
 
 
+def main_online(
+    config: Config,
+    dataset: OnlineOPDRolloutDataset,
+    renderer: renderers.Renderer,
+    tokenizer: Tokenizer,
+) -> None:
+    """Run online artifact-only OPD with sampled-and-filtered write completions."""
+    if config.use_skyrl:
+        raise ValueError("--online-rollout currently requires Tinker sampling; do not use --use-skyrl")
+    if config.topk <= 0:
+        raise ValueError("--online-rollout currently supports top-K mode only; set --topk > 0")
+
+    resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
+    start_batch = resume_info.batch if resume_info else 0
+
+    ml_logger = ml_log.setup_logging(
+        log_dir=config.log_path,
+        wandb_project=config.wandb_project,
+        wandb_name=config.wandb_name,
+        config=config,
+        do_configure_logging_module=True,
+    )
+
+    user_metadata: dict[str, str] = {}
+    if wandb_link := ml_logger.get_logger_url():
+        user_metadata["wandb_link"] = wandb_link
+    checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
+    model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
+
+    service_client = tinker.ServiceClient(base_url=config.base_url)
+
+    if resume_info:
+        assert resume_info.state_path is not None
+        training_client = service_client.create_training_client_from_state_with_optimizer(
+            resume_info.state_path, user_metadata=user_metadata,
+        )
+    elif config.load_checkpoint_path:
+        training_client = service_client.create_training_client_from_state(
+            config.load_checkpoint_path, user_metadata=user_metadata,
+        )
+    else:
+        training_client = service_client.create_lora_training_client(
+            base_model=config.model_name, rank=config.lora_rank,
+            user_metadata=user_metadata,
+        )
+
+    teacher_client = service_client.create_sampling_client(base_model=config.model_name)
+    sampling_client = training_client.save_weights_and_get_sampling_client()
+
+    n_batches = len(dataset)
+    total_steps = n_batches * config.num_epochs
+    if config.max_steps is not None:
+        total_steps = min(total_steps, config.max_steps)
+
+    logger.info(
+        "Online artifact-only OPD: %d batches x %d epochs = %d planned steps "
+        "(rollout_max_tokens=%d, rollout_temperature=%.2f, attempts=%d)",
+        n_batches,
+        config.num_epochs,
+        min(n_batches * config.num_epochs, total_steps),
+        config.rollout_max_tokens,
+        config.rollout_temperature,
+        config.rollout_attempts,
+    )
+
+    for epoch_idx in range(config.num_epochs):
+        dataset.set_epoch(seed=epoch_idx)
+        logger.info("Starting online epoch %d", epoch_idx)
+
+        for batch_idx in range(start_batch if epoch_idx == 0 else 0, n_batches):
+            step = epoch_idx * n_batches + batch_idx
+            if config.max_steps is not None and step >= config.max_steps:
+                break
+
+            rows = dataset.get_batch(batch_idx)
+            student_datums, teacher_prompt_inputs, rollout_metrics = sample_online_artifact_datums(
+                rows,
+                renderer,
+                sampling_client,
+                config,
+                max_length=dataset._max_length,
+            )
+
+            if step == 0 and student_datums:
+                int_tokens = list(student_datums[0].model_input.to_ints())
+                weights = student_datums[0].loss_fn_inputs["weights"].data
+                logger.info("\nOnline rollout example 0:")
+                logger.info(format_colorized(
+                    int_tokens, cast(list[float], weights), tokenizer,
+                ))
+
+            if not student_datums:
+                metrics = {
+                    "opd_online/no_valid_batch": 1.0,
+                    "learning_rate": config.learning_rate * compute_schedule_lr_multiplier(
+                        lr_schedule=config.lr_schedule, step=step, total_steps=total_steps,
+                    ),
+                    "progress": step / max(total_steps, 1),
+                    **rollout_metrics,
+                }
+                ml_logger.log_metrics(metrics=metrics, step=step)
+                logger.warning("Skipping step %d: no valid artifact write samples", step)
+                continue
+
+            topk_datums, topk_metrics = build_offline_topk_datums(
+                student_datums,
+                teacher_prompt_inputs,
+                teacher_client,
+                topk=config.topk,
+                vocab_size=len(tokenizer),
+                teacher_temperature=config.teacher_temperature,
+            )
+            metrics = do_update_topk(
+                step=step,
+                total_steps=total_steps,
+                config=config,
+                training_client=training_client,
+                topk_datums=topk_datums,
+                ml_logger=ml_logger,
+                log_path=config.log_path,
+                static_teacher_metrics={**rollout_metrics, **topk_metrics},
+            )
+            logger.info(
+                "Online step %d: valid=%d/%d filter_rate=%.3f loss=%.4f",
+                step,
+                int(rollout_metrics.get("opd_online/valid_examples", 0.0)),
+                int(rollout_metrics.get("opd_online/batch_examples", 0.0)),
+                rollout_metrics.get("opd_online/filter_rate", 0.0),
+                float(metrics.get("opd_loss", 0.0)),
+            )
+
+            # Refresh the student sampler so the next rollout is on-policy.
+            sampling_client = training_client.save_weights_and_get_sampling_client()
+
+    checkpoint_utils.save_checkpoint(
+        training_client=training_client,
+        name="final",
+        log_path=config.log_path,
+        kind="both",
+        loop_state={"batch": n_batches},
+        ttl_seconds=None,
+    )
+    ml_logger.close()
+    logger.info("Online artifact-only OPD training completed successfully")
+
+
 if __name__ == "__main__":
     import argparse
     import sys
@@ -979,20 +1408,31 @@ if __name__ == "__main__":
             "Recommended: τ=1.5–2.0 when opd/mean_teacher_entropy < 0.5 nat."
         ),
     )
+    parser.add_argument(
+        "--online-rollout", action="store_true",
+        help=(
+            "Enable online artifact-only OPD: sample completions from the current "
+            "student prompt, keep only exactly-one write(path, content) tool-call "
+            "responses for the expected artifact path, then distill from the "
+            "teacher prompt. Does not modify the upstream prompt."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-max-tokens", type=int, default=4096,
+        help="Maximum tokens for each online student artifact rollout.",
+    )
+    parser.add_argument(
+        "--rollout-temperature", type=float, default=1.0,
+        help="Sampling temperature for online student artifact rollout.",
+    )
+    parser.add_argument(
+        "--rollout-attempts", type=int, default=1,
+        help="Number of sample/filter attempts per OPD example before filtering it.",
+    )
     args = parser.parse_args()
 
     tokenizer = get_tokenizer(args.model_name)
     renderer = renderers.get_renderer(args.renderer_name, tokenizer=tokenizer)
-
-    dataset = OfflineOPDDataset.from_weight_json(
-        path=args.train_path,
-        renderer=renderer,
-        max_length=args.max_length,
-        batch_size=args.batch_size,
-        pair_mode=args.pair_mode,
-        use_gt=args.use_gt,
-        use_student=args.use_student,
-    )
 
     cfg = Config(
         log_path=args.log_path,
@@ -1014,6 +1454,31 @@ if __name__ == "__main__":
         use_student=args.use_student,
         topk=args.topk,
         teacher_temperature=args.teacher_temperature,
+        online_rollout=args.online_rollout,
+        rollout_max_tokens=args.rollout_max_tokens,
+        rollout_temperature=args.rollout_temperature,
+        rollout_attempts=args.rollout_attempts,
     )
 
-    main(cfg, dataset)
+    if args.online_rollout:
+        online_dataset = OnlineOPDRolloutDataset.from_weight_json(
+            path=args.train_path,
+            renderer=renderer,
+            max_length=args.max_length,
+            batch_size=args.batch_size,
+            pair_mode=args.pair_mode,
+            use_gt=args.use_gt,
+            use_student=args.use_student,
+        )
+        main_online(cfg, online_dataset, renderer, tokenizer)
+    else:
+        dataset = OfflineOPDDataset.from_weight_json(
+            path=args.train_path,
+            renderer=renderer,
+            max_length=args.max_length,
+            batch_size=args.batch_size,
+            pair_mode=args.pair_mode,
+            use_gt=args.use_gt,
+            use_student=args.use_student,
+        )
+        main(cfg, dataset)
