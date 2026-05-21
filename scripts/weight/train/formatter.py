@@ -324,8 +324,8 @@ class OfflineOPDDataset:
         max_length: int | None,
         batch_size: int,
         pair_mode: str = "first_last",
-        use_gt: bool = False,
-        use_student: bool = False,
+        use_gt: bool = True,
+        use_student: bool = True,
     ) -> "OfflineOPDDataset":
         sessions = _load_sessions(path)
         examples = extract_opd_examples(

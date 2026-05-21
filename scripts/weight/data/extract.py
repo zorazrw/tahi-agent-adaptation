@@ -261,29 +261,30 @@ def _augment_with_feedback(
         student_content = student_artifact.get("content", "")
         if student_content:
             suffix += (
-                "\n\nThe following block is from a prior interaction with the same user. "
-                "Treat it as evidence of recurring user preferences (not a one-off fix).\n"
-                "Student artifact from the prior attempt:\n```\n"
+                "\n\nThe following context comes from a prior interaction with the "
+                "same user on a related artifact. Use it as evidence of the "
+                "user's stable preferences, domain expectations, and quality bar. "
+                "Do not copy one-off coordinates or incidental implementation "
+                "details unless they clearly generalize.\n"
+                "Student artifact from that prior attempt:\n```\n"
                 + student_content
                 + "\n```"
             )
     if parts:
         suffix += (
-            "\n\nThe following is feedback from a human collaborator on a "
-            "previous attempt. Use this to guide your response:\n"
+            "\n\nHuman feedback from that prior interaction:\n"
             + "\n".join(parts)
         )
     if gt_content is not None:
         suffix += (
-            "\n\nFor reference, here is the final accepted version of the file:\n"
+            "\n\nOptional final accepted artifact from that prior interaction:\n"
             "```\n" + gt_content + "\n```"
         )
     suffix += (
-        "\n\nInfer the user's latent preferences from this prior interaction: "
-        "identify what the student artifact did poorly, what the feedback tried "
-        "to improve, and what quality bar the final result implies. Apply those "
-        "preferences (style, layout, constraints, and quality criteria) in your response."
-        "\n\nNow generate an improved response incorporating the above guidance."
+        "\n\nInfer the reusable preferences behind the feedback: visual style, "
+        "layout constraints, annotation quality, data-faithfulness, writing tone, "
+        "and any domain-specific standards. Apply those reusable preferences "
+        "when judging or improving the current response."
     )
     augmented = list(prompt)
     last = augmented[-1]

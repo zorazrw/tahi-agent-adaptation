@@ -223,7 +223,8 @@ python -m weight.train.run_dpo \
 # --topk 20     → forward KL over top-20 teacher vocab candidates (default)
 # --pair-mode   → "first_last" (one example per file, cleanest signal)
 #                 or "adjacent" (one example per version step, more data)
-# --use-gt      → append final accepted version to teacher prompt (SDFT trick)
+# --use-gt / --use-student are enabled by default; use --no-use-gt or
+# --no-use-student for ablations.
 # --use-skyrl   → fallback IS path; disables top-K (SkyRL lacks prompt_logprobs)
 python -m weight.train.run_opd \
   --train-path $TRAIN_DATA \
@@ -237,6 +238,37 @@ python -m weight.train.run_opd \
   --lr-schedule cosine \
   --lora-rank 32 \
   --topk 20
+
+# Online artifact-only OPD (experimental)
+# Samples the current student on the same student prompt, keeps only valid
+# single write(path, content) artifact completions, then asks the teacher prompt
+# for top-K targets on those sampled artifact tokens.
+python -m weight.train.run_opd \
+  --train-path $TRAIN_DATA \
+  --model-name Qwen/Qwen3.5-35B-A3B \
+  --renderer-name qwen3_5 \
+  --log-path ./logs/opd_online_run \
+  --pair-mode first_last \
+  --batch-size 4 \
+  --num-epochs 1 \
+  --learning-rate 5e-5 \
+  --lr-schedule cosine \
+  --lora-rank 32 \
+  --topk 20 \
+  --online-rollout \
+  --rollout-max-tokens 4096 \
+  --rollout-temperature 1.0 \
+  --rollout-attempts 1
+
+Online OPD notes:
+
+- `--online-rollout`: enables student sampling from current weights before each update.
+- `--rollout-attempts N`: resample failed examples up to N times; attempts are concurrent within the batch.
+- `--rollout-temperature`: defaults to `1.0`; lower only if filter rate is too high for useful training.
+- `--use-gt` and `--use-student`: enabled by default; pass `--no-use-gt` / `--no-use-student` for ablations.
+- `--artifact-only-rollout-instruction`: optional rollout-control prompt requiring exactly one `write` call. Default is off to keep train/inference prompt matched.
+- `online_rollout_samples.jsonl` is written under `--log-path` by default and includes every rollout attempt, both valid and filtered; pass `--no-log-rollout-samples` to disable it.
+- Online batch size is the number sampled before filtering; if some samples are filtered, the update uses the remaining valid examples. If none are valid, the step is skipped.
 
 # REINFORCE on Tinker (no flag — algorithm has no ref/teacher dependency)
 python -m weight.train.run_reinforce \

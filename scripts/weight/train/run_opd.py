@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -149,8 +150,8 @@ class Config:
 
     # Data construction
     pair_mode: str = "first_last"   # "first_last" | "adjacent" (file-centric)
-    use_gt: bool = False            # append last-version artifact to teacher prompt
-    use_student: bool = False       # append student artifact to teacher prompt
+    use_gt: bool = True             # append last-version artifact to teacher prompt
+    use_student: bool = True        # append student artifact to teacher prompt
 
     # Top-K distillation (Tinker only; ignored when use_skyrl=True).
     # topk > 0 → forward KL distillation with K teacher vocabulary candidates
@@ -172,6 +173,9 @@ class Config:
     rollout_max_tokens: int = 4096
     rollout_temperature: float = 1.0
     rollout_attempts: int = 1
+    log_rollout_samples: bool = True
+    rollout_sample_log_chars: int = 4000
+    artifact_only_rollout_instruction: bool = False
 
 def _extract_completion_info(
     datum: tinker.Datum,
@@ -682,36 +686,215 @@ def _completion_expected_path(completion: list[dict]) -> str | None:
     return path if isinstance(path, str) and path else None
 
 
+def _with_artifact_only_instruction(
+    prompt: list[dict[str, Any]],
+    expected_path: str,
+) -> list[dict[str, Any]]:
+    """Append an optional rollout-only artifact instruction to the last user turn.
+
+    This is disabled by default because it intentionally changes the online
+    rollout prompt relative to inference.  It is useful for A/B smoke runs that
+    measure the upper bound when the student is explicitly constrained to write.
+    """
+    if not prompt:
+        return prompt
+    out = [dict(m) for m in prompt]
+    path_hint = (
+        "<a suitable artifact filename>"
+        if _is_unknown_artifact_placeholder(expected_path)
+        else expected_path
+    )
+    suffix = (
+        "\n\nFor this rollout, respond with exactly one assistant tool call:\n"
+        f'write({{"path": "{path_hint}", "content": "<complete final file content>"}})\n'
+        "Do not call read, bash, edit, grep, find, ls, workflow_plan, or ask_user_question. "
+        "Do not include prose."
+    )
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user":
+            out[i]["content"] = (out[i].get("content") or "") + suffix
+            return out
+    out.append({"role": "user", "content": suffix.strip()})
+    return out
+
+
+def _is_unknown_artifact_placeholder(path: str) -> bool:
+    return path in {"<inline_script>.py", "<inline_script>"}
+
+
+def _artifact_path_matches(expected_path: str, actual_path: Any) -> bool:
+    if not isinstance(actual_path, str) or not actual_path:
+        return False
+    if actual_path == expected_path:
+        return True
+    # Some exported examples only know that the final artifact came from an
+    # inline script or synthetic fallback. In online rollout, a concrete file
+    # name is preferable to forcing the placeholder string into the response.
+    return _is_unknown_artifact_placeholder(expected_path)
+
+
+_BASH_CAT_WRITE_HEREDOC_RE = re.compile(
+    r"""cat\s+>\s+['"]?([^'"\s<>\n]+)['"]?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\2(?:\n|$)""",
+    re.DOTALL,
+)
+
+_BASH_TEE_WRITE_HEREDOC_RE = re.compile(
+    r"""tee\s+['"]?([^'"\s<>\n]+)['"]?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\2(?:\n|$)""",
+    re.DOTALL,
+)
+
+
+def _bash_heredoc_write_args(command: Any) -> dict[str, str] | None:
+    """Parse a narrow bash heredoc write into write(path, content) args.
+
+    This intentionally does not execute shell.  It only accepts obvious
+    full-file writes:
+      cat > artifact <<EOF
+      tee artifact <<EOF
+
+    Append forms, arbitrary redirections, and inline python are left filtered.
+    """
+    if not isinstance(command, str):
+        return None
+    matches: list[tuple[str, str]] = []
+    for rx in (_BASH_CAT_WRITE_HEREDOC_RE, _BASH_TEE_WRITE_HEREDOC_RE):
+        for m in rx.finditer(command):
+            path = m.group(1).strip()
+            content = m.group(3)
+            if path and content.strip():
+                matches.append((path, content))
+    if len(matches) != 1:
+        return None
+    path, content = matches[0]
+    return {"path": path, "content": content}
+
+
+def _parse_valid_artifact_write_message(
+    renderer: renderers.Renderer,
+    tokens: list[int],
+    expected_path: str,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Parse and normalize a valid one-write artifact response.
+
+    The sampled raw text may include thinking or explanatory prose before the
+    tool call.  We only use the parsed write call for training so online OPD
+    remains artifact-only even when the sampler is chatty.
+    """
+    try:
+        message, parse_success = renderer.parse_response(tokens)
+    except Exception as e:  # noqa: BLE001
+        return False, f"parse_exception:{type(e).__name__}", None
+    if not parse_success:
+        return False, "parse_failed", None
+    tool_calls = message.get("tool_calls") or []
+    if len(tool_calls) != 1:
+        return False, f"tool_call_count:{len(tool_calls)}", None
+    name, args_text = _tool_call_name_and_args(tool_calls[0])
+    if not isinstance(args_text, str):
+        return False, "arguments_not_string", None
+    try:
+        parsed_args = json.loads(args_text)
+    except json.JSONDecodeError:
+        return False, "arguments_json_error", None
+    if not isinstance(parsed_args, dict):
+        return False, "arguments_not_object", None
+
+    if name == "write":
+        args = parsed_args
+        reason = "valid"
+    elif name == "bash":
+        args = _bash_heredoc_write_args(parsed_args.get("command"))
+        if args is None:
+            return False, "tool_name:bash", None
+        reason = "valid_bash_heredoc"
+    else:
+        return False, f"tool_name:{name}", None
+
+    if not _artifact_path_matches(expected_path, args.get("path")):
+        return False, "path_mismatch", None
+    content = args.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return False, "empty_content", None
+
+    canonical_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "type": "function",
+            "id": getattr(tool_calls[0], "id", None),
+            "function": {
+                "name": "write",
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        }],
+    }
+    return True, reason, canonical_message
+
+
 def _sample_is_valid_artifact_write(
     renderer: renderers.Renderer,
     tokens: list[int],
     expected_path: str,
 ) -> tuple[bool, str]:
-    """Accept only one parsed write(path=expected_path, non-empty content) call."""
+    """Accept only one parsed write(path, non-empty content) call."""
+    ok, reason, _message = _parse_valid_artifact_write_message(
+        renderer, tokens, expected_path,
+    )
+    return ok, reason
+
+
+def _summarize_sample(
+    renderer: renderers.Renderer,
+    tokens: list[int],
+    expected_path: str,
+    ok: bool,
+    reason: str,
+    row_index: int,
+    attempt_index: int,
+    step: int,
+    max_chars: int,
+) -> dict[str, Any]:
+    """Build a JSONL-safe diagnostic record for one online rollout sample."""
+    raw_text = str(renderer.tokenizer.decode(tokens))
+    parsed_tool_names: list[str] = []
+    parsed_path: str | None = None
+    parsed_content_preview: str | None = None
+    parse_success = False
     try:
         message, parse_success = renderer.parse_response(tokens)
+        for tc in message.get("tool_calls") or []:
+            name, args_text = _tool_call_name_and_args(tc)
+            parsed_tool_names.append(str(name))
+            if isinstance(args_text, str):
+                try:
+                    args = json.loads(args_text)
+                    if name == "bash" and isinstance(args, dict):
+                        args = _bash_heredoc_write_args(args.get("command")) or args
+                    path = args.get("path") if isinstance(args, dict) else None
+                    content = args.get("content") if isinstance(args, dict) else None
+                    if isinstance(path, str):
+                        parsed_path = path
+                    if isinstance(content, str):
+                        parsed_content_preview = content[:max_chars]
+                except json.JSONDecodeError:
+                    pass
     except Exception as e:  # noqa: BLE001
-        return False, f"parse_exception:{type(e).__name__}"
-    if not parse_success:
-        return False, "parse_failed"
-    tool_calls = message.get("tool_calls") or []
-    if len(tool_calls) != 1:
-        return False, f"tool_call_count:{len(tool_calls)}"
-    name, args_text = _tool_call_name_and_args(tool_calls[0])
-    if name != "write":
-        return False, f"tool_name:{name}"
-    if not isinstance(args_text, str):
-        return False, "arguments_not_string"
-    try:
-        args = json.loads(args_text)
-    except json.JSONDecodeError:
-        return False, "arguments_json_error"
-    if args.get("path") != expected_path:
-        return False, "path_mismatch"
-    content = args.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return False, "empty_content"
-    return True, "valid"
+        parsed_tool_names.append(f"parse_exception:{type(e).__name__}")
+
+    return {
+        "step": step,
+        "row_index": row_index,
+        "attempt_index": attempt_index,
+        "expected_path": expected_path,
+        "valid": ok,
+        "reason": reason,
+        "parse_success": parse_success,
+        "parsed_tool_names": parsed_tool_names,
+        "parsed_path": parsed_path,
+        "parsed_content_preview": parsed_content_preview,
+        "raw_text_preview": raw_text[:max_chars],
+        "raw_token_count": len(tokens),
+    }
 
 
 def _datum_from_prompt_and_sample_tokens(
@@ -757,6 +940,41 @@ def _datum_from_prompt_and_sample_tokens(
     )
 
 
+def _datum_from_prompt_and_assistant_message(
+    renderer: renderers.Renderer,
+    prompt_messages: list[dict[str, Any]],
+    assistant_message: dict[str, Any],
+    max_length: int | None,
+) -> tinker.Datum | None:
+    """Build a supervised datum from prompt plus normalized assistant write."""
+    model_input, weights = renderer.build_supervised_example(
+        prompt_messages + _hydrate_tool_calls([assistant_message]),
+        train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+    )
+    if max_length is not None and model_input.length > max_length:
+        return None
+    full_tokens = list(model_input.to_ints())
+    if len(full_tokens) < 2:
+        return None
+    target_tokens = full_tokens[1:]
+    shifted_weights = weights[1 : len(target_tokens) + 1]
+    return tinker.Datum(
+        model_input=tinker.ModelInput.from_ints(full_tokens[:-1]),
+        loss_fn_inputs={
+            "weights": tinker.TensorData(
+                data=[float(w) for w in shifted_weights.tolist()],
+                dtype="float32",
+                shape=[len(target_tokens)],
+            ),
+            "target_tokens": tinker.TensorData(
+                data=target_tokens,
+                dtype="int64",
+                shape=[len(target_tokens)],
+            ),
+        },
+    )
+
+
 class OnlineOPDRolloutDataset:
     """Weight-format OPD examples prepared for on-policy artifact rollout."""
 
@@ -766,19 +984,27 @@ class OnlineOPDRolloutDataset:
         renderer: renderers.Renderer,
         max_length: int | None,
         batch_size: int,
+        artifact_only_instruction: bool = False,
     ):
         rows: list[dict[str, Any]] = []
         for ex in examples:
             expected_path = _completion_expected_path(ex.get("completion", []))
             if expected_path is None:
                 continue
+            student_prompt = ex["student_prompt"]
+            if artifact_only_instruction:
+                student_prompt = _with_artifact_only_instruction(
+                    student_prompt, expected_path,
+                )
+            student_prompt_messages = _hydrate_tool_calls(student_prompt)
             student_prompt_input = renderer.build_generation_prompt(
-                _hydrate_tool_calls(ex["student_prompt"])
+                student_prompt_messages
             )
             teacher_prompt_input = renderer.build_generation_prompt(
                 _hydrate_tool_calls(ex["teacher_prompt"])
             )
             rows.append({
+                "student_prompt_messages": student_prompt_messages,
                 "student_prompt_input": student_prompt_input,
                 "teacher_prompt_input": teacher_prompt_input,
                 "expected_path": expected_path,
@@ -797,8 +1023,9 @@ class OnlineOPDRolloutDataset:
         max_length: int | None,
         batch_size: int,
         pair_mode: str = "first_last",
-        use_gt: bool = False,
-        use_student: bool = False,
+        use_gt: bool = True,
+        use_student: bool = True,
+        artifact_only_instruction: bool = False,
     ) -> "OnlineOPDRolloutDataset":
         examples = extract_opd_examples(
             _load_sessions(path),
@@ -807,7 +1034,13 @@ class OnlineOPDRolloutDataset:
             use_gt=use_gt,
             use_student=use_student,
         )
-        dataset = cls(examples, renderer, max_length, batch_size)
+        dataset = cls(
+            examples,
+            renderer,
+            max_length,
+            batch_size,
+            artifact_only_instruction=artifact_only_instruction,
+        )
         logger.info(
             "Loaded %d online OPD rollout examples from %s "
             "(raw=%d, pair_mode=%s, use_gt=%s, use_student=%s)",
@@ -841,6 +1074,9 @@ async def _sample_online_artifact_datums_async(
     temperature: float,
     attempts: int,
     max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+    sample_log_chars: int = 4000,
 ) -> tuple[list[tinker.Datum], list[tinker.ModelInput], dict[str, float]]:
     """Sample student completions and keep only valid artifact write calls."""
     valid_datums: list[tinker.Datum] = []
@@ -848,38 +1084,74 @@ async def _sample_online_artifact_datums_async(
     reason_counts: dict[str, int] = {}
     total_attempts = 0
 
-    for row in rows:
-        accepted = False
-        expected_path = row["expected_path"]
-        for _attempt in range(max(1, attempts)):
-            total_attempts += 1
-            result = await sampling_client.sample_async(
-                prompt=row["student_prompt_input"],
-                num_samples=1,
-                sampling_params=tinker.SamplingParams(
-                    stop=renderer.get_stop_sequences(),
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                ),
-            )
-            seq = result.sequences[0]
-            tokens = list(seq.tokens)
-            ok, reason = _sample_is_valid_artifact_write(renderer, tokens, expected_path)
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-            if not ok:
-                continue
-            datum = _datum_from_prompt_and_sample_tokens(
-                row["student_prompt_input"], tokens, max_length,
-            )
-            if datum is None:
-                reason_counts["too_long_or_empty"] = reason_counts.get("too_long_or_empty", 0) + 1
-                continue
-            valid_datums.append(datum)
-            valid_teacher_prompts.append(row["teacher_prompt_input"])
-            accepted = True
-            break
-        if not accepted:
-            reason_counts["example_filtered"] = reason_counts.get("example_filtered", 0) + 1
+    sample_log_f = None
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_log_f = sample_log_path.open("a", encoding="utf-8")
+
+    try:
+        pending = list(enumerate(rows))
+        for attempt_idx in range(max(1, attempts)):
+            if not pending:
+                break
+            total_attempts += len(pending)
+            results = await asyncio.gather(*[
+                sampling_client.sample_async(
+                    prompt=row["student_prompt_input"],
+                    num_samples=1,
+                    sampling_params=tinker.SamplingParams(
+                        stop=renderer.get_stop_sequences(),
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    ),
+                )
+                for _row_idx, row in pending
+            ])
+
+            next_pending: list[tuple[int, dict[str, Any]]] = []
+            for (row_idx, row), result in zip(pending, results, strict=True):
+                expected_path = row["expected_path"]
+                tokens = list(result.sequences[0].tokens)
+                ok, reason, canonical_message = _parse_valid_artifact_write_message(
+                    renderer, tokens, expected_path,
+                )
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                if sample_log_f is not None:
+                    rec = _summarize_sample(
+                        renderer,
+                        tokens,
+                        expected_path,
+                        ok,
+                        reason,
+                        row_idx,
+                        attempt_idx,
+                        step,
+                        sample_log_chars,
+                    )
+                    sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    sample_log_f.flush()
+                if not ok:
+                    next_pending.append((row_idx, row))
+                    continue
+                assert canonical_message is not None
+                datum = _datum_from_prompt_and_assistant_message(
+                    renderer,
+                    row["student_prompt_messages"],
+                    canonical_message,
+                    max_length,
+                )
+                if datum is None:
+                    reason_counts["too_long_or_empty"] = reason_counts.get("too_long_or_empty", 0) + 1
+                    next_pending.append((row_idx, row))
+                    continue
+                valid_datums.append(datum)
+                valid_teacher_prompts.append(row["teacher_prompt_input"])
+            pending = next_pending
+        if pending:
+            reason_counts["example_filtered"] = reason_counts.get("example_filtered", 0) + len(pending)
+    finally:
+        if sample_log_f is not None:
+            sample_log_f.close()
 
     n_rows = float(len(rows))
     n_valid = float(len(valid_datums))
@@ -902,6 +1174,7 @@ def sample_online_artifact_datums(
     sampling_client: tinker.SamplingClient,
     config: Config,
     max_length: int | None,
+    step: int,
 ) -> tuple[list[tinker.Datum], list[tinker.ModelInput], dict[str, float]]:
     return asyncio.run(_sample_online_artifact_datums_async(
         rows,
@@ -911,6 +1184,12 @@ def sample_online_artifact_datums(
         temperature=config.rollout_temperature,
         attempts=config.rollout_attempts,
         max_length=max_length,
+        step=step,
+        sample_log_path=(
+            Path(config.log_path) / "online_rollout_samples.jsonl"
+            if config.log_rollout_samples else None
+        ),
+        sample_log_chars=config.rollout_sample_log_chars,
     ))
 
 
@@ -1263,6 +1542,7 @@ def main_online(
                 sampling_client,
                 config,
                 max_length=dataset._max_length,
+                step=step,
             )
 
             if step == 0 and student_datums:
@@ -1368,18 +1648,23 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--use-gt", action="store_true",
+        "--use-gt",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Append the last (ground-truth) version of each file to the teacher "
             "prompt as a reference block. Implements the SDFT golden-answer trick "
-            "which sharpens teacher distributions on correct tokens."
+            "which sharpens teacher distributions on correct tokens. Default: true; "
+            "pass --no-use-gt for ablations."
         ),
     )
     parser.add_argument(
-        "--use-student", action="store_true",
+        "--use-student",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Inject student artifact content into the teacher prompt as "
-            "before-state context. Can be combined with --use-gt."
+            "before-state context. Default: true; pass --no-use-student for ablations."
         ),
     )
     parser.add_argument(
@@ -1429,6 +1714,22 @@ if __name__ == "__main__":
         "--rollout-attempts", type=int, default=1,
         help="Number of sample/filter attempts per OPD example before filtering it.",
     )
+    parser.add_argument(
+        "--no-log-rollout-samples", action="store_true",
+        help="Disable JSONL logging of online rollout samples and filter reasons.",
+    )
+    parser.add_argument(
+        "--rollout-sample-log-chars", type=int, default=4000,
+        help="Max characters of raw/parsed online rollout text to store per sample.",
+    )
+    parser.add_argument(
+        "--artifact-only-rollout-instruction", action="store_true",
+        help=(
+            "Append a rollout-only instruction to the last user turn requiring "
+            "exactly one write(path, content) tool call. Default is off to keep "
+            "the rollout prompt matched to inference."
+        ),
+    )
     args = parser.parse_args()
 
     tokenizer = get_tokenizer(args.model_name)
@@ -1458,6 +1759,9 @@ if __name__ == "__main__":
         rollout_max_tokens=args.rollout_max_tokens,
         rollout_temperature=args.rollout_temperature,
         rollout_attempts=args.rollout_attempts,
+        log_rollout_samples=not args.no_log_rollout_samples,
+        rollout_sample_log_chars=args.rollout_sample_log_chars,
+        artifact_only_rollout_instruction=args.artifact_only_rollout_instruction,
     )
 
     if args.online_rollout:
@@ -1469,6 +1773,7 @@ if __name__ == "__main__":
             pair_mode=args.pair_mode,
             use_gt=args.use_gt,
             use_student=args.use_student,
+            artifact_only_instruction=args.artifact_only_rollout_instruction,
         )
         main_online(cfg, online_dataset, renderer, tokenizer)
     else:
