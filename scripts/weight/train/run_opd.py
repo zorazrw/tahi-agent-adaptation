@@ -723,14 +723,10 @@ def _is_unknown_artifact_placeholder(path: str) -> bool:
 
 
 def _artifact_path_matches(expected_path: str, actual_path: Any) -> bool:
-    if not isinstance(actual_path, str) or not actual_path:
-        return False
-    if actual_path == expected_path:
-        return True
-    # Some exported examples only know that the final artifact came from an
-    # inline script or synthetic fallback. In online rollout, a concrete file
-    # name is preferable to forcing the placeholder string into the response.
-    return _is_unknown_artifact_placeholder(expected_path)
+    # Online OPD trains artifact content, not the output filename.  Keep the
+    # expected/sampled paths for logging, but do not filter otherwise valid
+    # artifact samples on path mismatches or missing paths.
+    return True
 
 
 _BASH_CAT_WRITE_HEREDOC_RE = re.compile(
@@ -810,8 +806,6 @@ def _parse_valid_artifact_write_message(
     else:
         return False, f"tool_name:{name}", None
 
-    if not _artifact_path_matches(expected_path, args.get("path")):
-        return False, "path_mismatch", None
     content = args.get("content")
     if not isinstance(content, str) or not content.strip():
         return False, "empty_content", None
