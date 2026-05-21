@@ -2,313 +2,141 @@
     {
         "id": 1,
         "type": "Data Visualization",
-        "instruction": "Turn the following result into an HTML visualization:\nOn the webarena benchmark, we evaluate the success rate (%) of different systems. \n- Baseline methods: GPT-4o (14.9), AutoEval (20.2), BrowserGym (23.5), and BrowserGym axtree (15.0)\n- Our method: AWM (35.5)\n- Human baseline: Step (33.0)",
-        "human_output": "human_outputs/task_1.png"
+        "instruction": "Visualize data in HTML based on the following instruction:\nPlot row (a) as a 1×3 grid of bar charts titled 'Similar-Quality Subset for Absolute Rating'. The three panels are titled LM Perplexities, Reward Model Scores, and LM Judge Scores. The y-axis label is Spearman's Correlation Coeff. (ρ), ranging from 0.0 to 0.4 with ticks at 0.0, 0.1, 0.2, 0.3, 0.4 and dashed horizontal gridlines. The x-axis has 7 bars with two-line tick labels (threshold value on top, sample size below): All/750, 3.0/745, 2.5/739, 2.0/731, 1.5/718, 1.0/695, 0.5/598. The first bar is tan (#C8B89A) and the remaining six are steel blue (#7B9EC8). Label each bar with its exact value centered just above the bar. Place a dashed arrow label reading 'More similar subset →' beneath all three panels. The bar values are: LM Perplexities: 0.361, 0.350, 0.341, 0.336, 0.331, 0.322, 0.262. Reward Model Scores: 0.330, 0.321, 0.308, 0.293, 0.275, 0.244, 0.213. LM Judge Scores: 0.322, 0.309, 0.299, 0.279, 0.256, 0.227, 0.176.",
+        "title": "Artificial Hivemind: The Open-Ended Homogeneity of Language Models (and Beyond)",
+        "figure": "Figure 10 (a)"
     },
     {
         "id": 2,
         "type": "Data Visualization",
-        "instruction": "Visualize results in HTML on three methods on 3 splits of the Mind2Web dataset:\n- cross-task split: MindAct (36.2), AWM-offline (45.1), AWM-online (43.6)\n- cross-website split: MindAct (30.1), AWM-offline (33.7), AWM-online (33.9)\n- cross-domain split: MindAct (26.4), AWM-offline (32.6), AWM-online (35.5)\nI want to show:\n1. both AWM methods (offline and online) outperforms the baseline MindAct\n2. as we transfer from cross-task to website to domain settings, AWM-online gradually outperforms AWM-offline",
-        "human_output": "human_outputs/task_2.png"
+        "instruction": "Visualize in HTML the performance of 7 methods across 4 benchmark metrics: Hellaswag, MMLU, GSM8k, and C-eval. Methods (1)–(4) form one group and (5)–(7) form a second group. Method (1) is the baseline. The best value per metric is: Hellaswag=74.81 (method 4), MMLU=60.82, GSM8k=55.27, C-eval=62.20 (all method 2). The data values are: (1) Baseline: 73.07, 58.79, 52.92, 60.26. (2) SDPA Elementwise Gate: 74.64, 60.82, 55.27, 62.20. (3) v Elementwise Gate: 74.38, 59.17, 53.97, 61.00. (4) SDPA Additive Gate: 74.81, 60.06, 53.30, 60.98. (5) SDPA GroupNorm: 74.10, 60.15, 53.75, 61.14. (6) SDPA SiLU: 73.34, 59.55, 53.19, 60.90. (7) SDPA Additive Gate: 74.17, 59.20, 52.77, 59.86.",
+        "title": "Gated Attention for Large Language Models: Non-linearity, Sparsity, and Attention-Sink-Free",
+        "figure": "Table 3"
     },
     {
         "id": 3,
         "type": "Data Visualization",
-        "instruction": "Here's the list of agent performance on the WebArena benchmark over time. Plot the scores in HTML to show the general increasing trend on WebArena. Do not data each individual date tho, as texts will be overlapping. Select only 3-6 of them to display on the figure.\n12/2025\t71.2\n10/2025\t68\n09/2025\t66.9\n10/2025\t64.2\n02/2025\t61.7\n01/2025\t58.1\n08/2024\t57.1\n12/2025\t54.6\n12/2024\t53\n01/2025\t52.1\n01/2025\t48\n10/2024\t45.7\n08/2024\t37.2\n10/2024\t35.8\n09/2024\t35.5\n04/2024\t33.5\n06/2025\t26.1\n04/2024\t23.5\n01/2025\t22.4\n04/2024\t20.2\n06/2024\t19.2\n04/2024\t18.2\n01/2025\t16.3\n06/2023\t14.9\n05/2024\t13.1\n06/2023\t11.7\n05/2024\t9.36\n03/2023\t8.87\n09/2023\t7.14\n12/2023\t7.12\n04/2024\t7.02\n10/2024\t6.28\n10/2023\t5.3\n03/2024\t4.68\n08/2023\t4.06\n10/2023\t3.81\n04/2024\t3.32\n02/2024\t2.3\n10/2023\t1.6\n01/2024\t1.39\n10/2023\t0.74\n10/2023\t0.25\n08/2023\t0",
-        "human_output": "human_outputs/task_3.png"
+        "instruction": "Plot in HTML three heatmaps side by side titled Humanoid, Ant Big Maze, and Arm Push Easy. Each heatmap has Actor Depth on the x-axis and Critic Depth on the y-axis, both with values 4, 8, 16, 32, 64. Use a blue colormap where higher values are darker. The cell values are:\nHumanoid (rows = Critic Depth 64→4, cols = Actor Depth 4→64): 32 462 675 583 680 / 28 622 665 636 583 / 14 48 454 612 432 / 15 80 303 263 311 / 13 18 22 21 21.\nAnt Big Maze: 45 239 462 480 441 / 145 325 385 439 437 / 58 316 424 504 427 / 18 320 350 436 170 / 61 147 202 349 276.\nArm Push Easy: 286 809 666 815 762 / 807 909 875 848 921 / 839 818 805 740 887 / 583 669 675 682 469 / 308 256 407 345 338.",
+        "title": "1000 Layer Networks for Self-Supervised RL: Scaling Depth Can Enable New Goal-Reaching Capabilities",
+        "figure": "Figure 6"
     },
     {
         "id": 4,
         "type": "Data Visualization",
-        "instruction": "Visualize in HTML the accuracy (%) of different models on the MMLU benchmark across four subject categories:\n- STEM: GPT-4 (82.3), Claude-3 (80.1), Gemini-Pro (78.4), LLaMA-3 (71.2)\n- Humanities: GPT-4 (88.5), Claude-3 (87.2), Gemini-Pro (84.3), LLaMA-3 (79.6)\n- Social Sciences: GPT-4 (85.1), Claude-3 (83.7), Gemini-Pro (82.0), LLaMA-3 (76.4)\n- Other: GPT-4 (83.6), Claude-3 (82.0), Gemini-Pro (80.5), LLaMA-3 (74.9)\n\nShow that GPT-4 and Claude-3 consistently lead across all categories, while LLaMA-3 has the largest gap in STEM.",
-        "human_output": null
+        "instruction": "N/A",
+        "title": "On the Generalization Properties of Diffusion Models",
+        "figure": "N/A"
     },
     {
         "id": 5,
         "type": "Data Visualization",
-        "instruction": "Plot the training loss curves over 100k steps for three model sizes, in HTML:\n- 1B parameters: steps 0 (4.2), 10k (3.1), 25k (2.4), 50k (1.9), 75k (1.6), 100k (1.4)\n- 7B parameters: steps 0 (4.2), 10k (2.8), 25k (2.0), 50k (1.5), 75k (1.2), 100k (1.0)\n- 70B parameters: steps 0 (4.2), 10k (2.5), 25k (1.6), 50k (1.1), 75k (0.85), 100k (0.72)\n\nHighlight that larger models converge to lower loss values and converge faster in early training.",
-        "human_output": null
+        "instruction": "Plot in HTML a grouped bar chart showing harmfulness rate (%) for two models (Llama-2-7B and Gemma-7B), each with two variants (Aligned and Base), across 6 refusal prefix conditions: No Prefix, 'I cannot', 'I cannot fulfill', 'I apologize', 'I apologize, but I cannot', 'I am unable'. The y-axis is Harmfulness Rate (%). Add error bars using the ± values. The data are:\nLlama-2-7B Aligned: 0, 0±0, 0±0, 0±0, 0±0, 0±0. Llama-2-7B Base: 68.6±0.8, 16.4±1.4, 5.4±1.3, 14.4±0.6, 2.1±0.2, 8.1±0.4. Gemma-7B Aligned: 2.1±0.2, 0±0, 0±0, 0±0, 0±0, 0±0. Gemma-7B Base: 85.4±0.6, 8.7±1.2, 2.7±0.5, 14.1±0.4, 1.0±0.8, 3.9±0.4.\nThe best (lowest) harmfulness rate among prefixed conditions for each Base model is bold: Llama-2-7B Base best = 2.1±0.2 ('I apologize, but I cannot'), Gemma-7B Base best = 1.0±0.8 ('I apologize, but I cannot').",
+        "title": "Safety Alignment Should Be Made More Than Just a Few Tokens Deep",
+        "figure": "Table 1"
     },
     {
         "id": 6,
         "type": "Data Visualization",
-        "instruction": "Create an HTML visualization comparing human evaluation scores (1\u20135 scale) for text summarization systems across three dimensions:\n- Fluency: Extractive (3.8), Abstractive (4.3), LLM-based (4.7)\n- Coherence: Extractive (3.5), Abstractive (4.0), LLM-based (4.6)\n- Faithfulness: Extractive (4.5), Abstractive (3.6), LLM-based (4.2)\n\nDraw attention to the fact that extractive methods excel at faithfulness while LLM-based methods dominate fluency and coherence.",
-        "human_output": null
+        "instruction": "Plot in HTML a line chart showing win-rate against baseline for two judges (ChatGPT and Claude) across 4 DPO epochs (0, 2, 4, 6) on the x-axis. The y-axis is win-rate, ranging from 0 to 1. Add a horizontal dashed reference line at y=0.5 to indicate the baseline. The data are: ChatGPT: 0.4729, 0.6518, 0.6928, 0.6667. Claude: 0.4679, 0.5151, 0.6045, 0.5432.",
+        "title": "Learning Dynamics of LLM Finetuning",
+        "figure": "Table 1"
     },
     {
         "id": 7,
         "type": "Data Visualization",
-        "instruction": "Here is the ImageNet top-1 accuracy (%) of major vision models since 2012. Plot the trend in HTML to show the dramatic jump from traditional CNNs to modern transformers. Only label 4\u20136 representative milestones.\n\n2012: AlexNet 63.3\n2014: VGG-16 74.4\n2015: ResNet-50 76.1\n2016: DenseNet 77.4\n2017: SENet 82.7\n2018: NASNet 83.0\n2019: EfficientNet-B7 84.4\n2020: ViT-L 85.2\n2021: CoAtNet 86.0\n2022: CoCa 91.0\n2023: EVA-02 90.0\n2024: InternViT 91.6",
-        "human_output": null
+        "instruction": "Plot in HTML a radial/polar bar chart with 10 metrics arranged around a circle: Generalization, Efficacy, SST, CoLA, RTE, Specificity*, Generalization*, Efficacy*, Consistency, Fluency, Specificity. For each metric, plot 5 grouped bars representing 5 methods: AlphaEdit (dark blue), RECT (green), PRUNE (light pink), MEMIT (light blue), ROME (brown). Bars radiate outward from the center. The data values (AlphaEdit, RECT, PRUNE, MEMIT, ROME) for each metric are:\n\nGeneralization: 94.2, 63.6, 64.8, 64.7, 61.4. Efficacy: 98.9, 66.0, 68.3, 65.7, 64.4. SST: 0.90, 0.55, 0, 0, 0. CoLA: 0.76, 0.56, 0, 0, 0. RTE: 0.32, 0.21, 0, 0, 0. Specificity*: 32.6, 3.17, 1.80, 1.80, 18.5. Generalization*: 91.1, 80.5, 31.3, 34.6, 2.01. Efficacy*: 94.5, 86.1, 3.31, 6.58, 5.90. Consistency: 32.4, 20.5, 3.31, 6.58, 5.90. Fluency: 622.5, 526.6, 499.1, 437.4, 418.0. Specificity: 67.9, 61.4, 49.4, 51.6, 49.8.",
+        "title": "AlphaEdit: Null-Space Constrained Knowledge Editing for Language Models",
+        "figure": "Figure 2"
     },
     {
         "id": 8,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML the retrieval performance (Recall@10, %) of dense retrieval systems on three QA datasets:\n- NaturalQuestions: BM25 (59.1), DPR (79.4), Contriever (84.2), BGE (88.5)\n- TriviaQA: BM25 (66.8), DPR (79.8), Contriever (83.9), BGE (87.4)\n- WebQ: BM25 (55.2), DPR (73.6), Contriever (79.3), BGE (84.1)\n\nEmphasize that BM25 consistently lags behind neural methods, and BGE achieves the best results across all datasets.",
-        "human_output": null
+        "instruction": "Plot in HTML three grouped bar charts side by side for metrics BLEU, #Token (k), and ITR. Each chart has 6 bars representing 6 methods: Helpfulness (blue), Extrinsic (green), Extrinsic+Intrinsic (light green), MR w=1 (yellow), MR w=2 (orange), MR w=3 (pink). Label each bar with its value. The data are:\n\nBLEU (y-axis range 0.360–0.375): 0.367, 0.365, 0.370, 0.373, 0.373, —. #Token k (y-axis range 1.8–2.2): 2.19, 2.11, 2.0, 2.0, 1.85, 1.84. ITR (y-axis range 0.5–0.7): 0.60, 0.54, 0.64, 0.70, 0.68, —.\n\nNote: MR w=3 has no BLEU or ITR value plotted.",
+        "title": "CollabLLM: From Passive Responders to Active Collaborators",
+        "figure": "Figure 4"
     },
     {
         "id": 9,
         "type": "Data Visualization",
-        "instruction": "Visualize in HTML the success rate (%) of robotic manipulation policies under three levels of environment noise:\n- Low noise: BC (72.3), GAIL (75.1), IRL (78.4), Ours (88.2)\n- Medium noise: BC (58.4), GAIL (61.7), IRL (65.3), Ours (80.6)\n- High noise: BC (41.2), GAIL (44.5), IRL (49.8), Ours (71.3)\n\nShow that our method maintains high performance even as noise increases, while baselines degrade sharply.",
-        "human_output": null
+        "instruction": "Plot in HTML a horizontal bar chart comparing accuracy of 5 methods for solving Sudoku puzzles. The x-axis is accuracy (%), ranging from 0 to 100. The 5 methods are grouped into two model families: ARM (42M params): ARM w/o ordering = 9.73%, ARM with ordering = 87.18%; MDM (6M params): MDM vanilla = 6.88%, MDM Top probability = 18.51%, MDM Top prob. margin = 89.49%. Use a visual separator between the two groups. Annotate each bar with its exact accuracy value.",
+        "title": "Train for the Worst, Plan for the Best: Understanding Token Ordering in Masked Diffusions",
+        "figure": "Table 2"
     },
     {
         "id": 10,
         "type": "Data Visualization",
-        "instruction": "Create an HTML bar chart showing the inference speed (tokens/second) and memory usage (GB) of four LLMs at the same batch size. Display both metrics side-by-side per model.\n- GPT-3 (175B): speed 42, memory 320\n- LLaMA-2 (70B): speed 91, memory 128\n- Mistral (7B): speed 310, memory 14\n- Phi-2 (2.7B): speed 520, memory 6",
-        "human_output": null
+        "instruction": "Plot in HTML a 2×4 grid of bar charts. The top row is titled 'Creativity' and the bottom row 'Memorization'. Each panel has 2 bars: Standard/Next-Token (blue) and Teacherless/Multi-Token (orange), with error bars. The 4 column tasks are: Sibling Discovery, Triangle Discovery, Circle Construction, Line Construction. The approximate values (blue, orange) are:\n\nCreativity: Sibling Discovery: 0.10, 0.40. Triangle Discovery: 0.10, 0.95. Circle Construction: 0.15, 0.40. Line Construction: 0.63, 0.78.\n\nMemorization: Sibling Discovery: 0.83, 0.30. Triangle Discovery: 0.85, 0.02. Circle Construction: 0.65, 0.07. Line Construction: 0.22, 0.09.\n\nEach panel has its own y-axis scale. Add error bars to each bar reflecting visible uncertainty in the figure.",
+        "title": "Roll the dice & look before you leap: Going beyond the creative limits of next-token prediction",
+        "figure": "Figure 3"
     },
     {
         "id": 11,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML the ROUGE-L score (%) of summarization models trained on increasing amounts of data:\n- 1k examples: BART (28.3), PEGASUS (30.1), T5 (29.4)\n- 10k examples: BART (33.7), PEGASUS (36.2), T5 (35.8)\n- 50k examples: BART (38.1), PEGASUS (40.5), T5 (40.2)\n- 100k examples: BART (40.3), PEGASUS (42.7), T5 (42.5)\n\nShow that PEGASUS consistently leads, and all models benefit substantially from more data but with diminishing returns.",
-        "human_output": null
+        "instruction": "Plot in HTML a horizontal bar chart comparing the relative frequency (%) of exceeding the target risk threshold for 3 decision rules: CRC = 21.20% [95% CI: 20.40%, 22.01%], RCPS = 0.00% [95% CI: 0.00%, 0.04%], Ours (β=0.95) = 0.03% [95% CI: 0.01%, 0.09%]. The x-axis is relative frequency (%), add error bars using the 95% CI bounds. Add a vertical dashed reference line at the target risk threshold α to indicate the acceptable limit.",
+        "title": "Conformal Prediction as Bayesian Quadrature",
+        "figure": "Table 1"
     },
     {
         "id": 12,
         "type": "Data Visualization",
-        "instruction": "Visualize in HTML the toxicity reduction (% of toxic outputs) for a language model under different safety interventions:\n- No intervention: 18.4%\n- Keyword filter: 12.1%\n- RLHF: 6.3%\n- Constitutional AI: 3.8%\n- RLHF + Constitutional AI: 1.9%\n\nShow a clear monotonic decrease, with combined methods achieving the lowest toxicity.",
-        "human_output": null
+        "instruction": "Plot in HTML a line chart with x-axis as Sample Size (200, 400, 600, 800, 1000) and y-axis as Fisher Divergence. Plot 4 lines with error bars (95% CI): Marg-IW (green), Marg-Var (red), Zeroed (blue), EM (orange). Add a horizontal dashed red reference line at y=0. The approximate values are:\nMarg-IW: 1.75, 0.85, 0.58, 0.48, 0.40. Marg-Var: 3.15, 1.22, 1.00, 0.65, 0.55. Zeroed: 2.15, 1.25, 1.00, 0.88, 0.85. EM: 1.80, 0.85, 0.58, 0.48, 0.40.\nMarg-Var has the largest error bar at sample size 200. Marg-IW and EM overlap closely across all sample sizes.",
+        "title": "Score Matching With Missing Data",
+        "figure": "Figure 1"
     },
     {
         "id": 13,
         "type": "Data Visualization",
-        "instruction": "Show the win rate (%) of our dialogue system vs. baselines in a pairwise human preference study across four criteria:\n- Engagingness: vs. Blenderbot (61%), vs. DialoGPT (67%), vs. ChatGPT (48%)\n- Informativeness: vs. Blenderbot (70%), vs. DialoGPT (72%), vs. ChatGPT (52%)\n- Empathy: vs. Blenderbot (74%), vs. DialoGPT (69%), vs. ChatGPT (44%)\n- Overall: vs. Blenderbot (68%), vs. DialoGPT (71%), vs. ChatGPT (49%)\n\nNote that our system underperforms ChatGPT on empathy and overall, but outperforms all other baselines.",
-        "human_output": null
+        "instruction": "Plot in HTML a horizontal timeline diagram with a shared x-axis from 2010 to 2018 and three rows labeled Training, Validation, and Test. Each row has a colored rectangle spanning its full period, with a smaller red dashed rectangle inside indicating the possible start dates. The data are:\nTraining (blue): full span 2010–2014, red dashed box 2010–2013. Validation (green): full span 2012–2014, red dashed box 2012–2013. Test (orange): full span 2015–2018, red dashed box 2015–2016.",
+        "title": "The Value of Prediction in Identifying the Worst-Off",
+        "figure": "Figure 4"
     },
     {
         "id": 14,
         "type": "Data Visualization",
-        "instruction": "Plot the code generation pass@1 rate (%) on HumanEval across programming languages for two systems:\n- Python: CodeLlama (62.3), GPT-4 (87.1)\n- JavaScript: CodeLlama (55.8), GPT-4 (79.4)\n- Java: CodeLlama (51.2), GPT-4 (74.6)\n- C++: CodeLlama (48.7), GPT-4 (72.1)\n- Rust: CodeLlama (31.4), GPT-4 (58.3)\n\nEmphasize that the performance gap widens for less common languages like Rust.",
-        "human_output": null
+        "instruction": "Plot in HTML a grouped horizontal bar chart comparing 10 datasets across 3 metrics: Original Size (TB), Indexing Time (CPU node-days), and Index Size (TB). Exclude Num. Shards. The x-axis is the numeric value and the y-axis lists the datasets. Add a visual separator between DCLM-baseline and CC-2025-05 to reflect the two groups. The data are:\n\nPile-validation: 0.0001345, 0.00057, 0.000602. Pile-train: 1.308, 1.31, 0.588. DCLM-baseline: 16.666, 12.6, 7.523. CC-2025-05: 9.079, 11.8, 3.972. CC-2025-08: 8.163, 10.6, 3.574. CC-2025-13: 10.393, 13.6, 4.563. CC-2025-18: 10.498, 13.7, 4.664. CC-2025-21: 9.221, 12.1, 4.302. CC-2025-26: 8.724, 11.4, 3.835. CC-2025-30: 9.006, 11.7, 3.952. Total: 83.059, 98.8, 36.884.\n\nNote: Pile-validation values are near zero and may need a log scale to be visible alongside the other datasets.",
+        "title": "INFINI-GRAM MINI: Exact n-gram Search at the Internet Scale with FM-Index",
+        "figure": "Table 1"
     },
     {
         "id": 15,
         "type": "Data Visualization",
-        "instruction": "Here is the cumulative number of published papers on large language models per year. Plot the exponential growth trend and annotate only 3\u20134 key inflection points (e.g., GPT-3 release, ChatGPT release).\n\n2017: 45\n2018: 120\n2019: 380\n2020: 910\n2021: 1820\n2022: 3650\n2023: 9400\n2024: 21300\n2025: 38700",
-        "human_output": null
+        "instruction": "Plot in HTML a grouped bar chart comparing Experts and Annotators across 4 metrics: Correct (Actions), Harmless (Actions), Sufficient (Attr), and Plausible (Exp). The y-axis is the score ranging from 0 to 1. The data are: Experts: 0.93, 0.96, 0.94, 1.00. Annotators: 0.88, 0.80, 0.89, 0.92.",
+        "title": "Mind the Value-Action Gap: Do LLMs Act in Alignment with Their Values?",
+        "figure": "Table 2"
     },
     {
         "id": 16,
         "type": "Data Visualization",
-        "instruction": "Visualize the accuracy (%) of vision-language models on a visual question answering (VQA) benchmark broken down by question type:\n- Yes/No: CLIP (82.1), BLIP-2 (87.4), LLaVA (89.2), GPT-4V (92.3)\n- Number: CLIP (43.2), BLIP-2 (51.7), LLaVA (56.3), GPT-4V (63.8)\n- Other: CLIP (51.4), BLIP-2 (58.2), LLaVA (63.1), GPT-4V (70.5)\n\nShow that Number questions are the hardest for all models, and GPT-4V leads by the largest margin there.",
-        "human_output": null
+        "instruction": "Plot in HTML a grouped bar chart showing accuracy for 10 model variants across 4 difficulty/input settings: S, S+G, S+G+KP, S+G+KP+T. The x-axis is the input setting and the y-axis is accuracy (%). The 10 models are grouped by family: Qwen2.5 (7B, 32B), Gemma3 (4B, 12B, 27B), DeepSeek-R1 (7B, 32B), LLaMA3 (8B, 70B), GPT-4 (o4-mini). The data are:\nQwen2.5-7B: 33.04, 41.64, 56.08, 71.09. Qwen2.5-32B: 38.66, 46.75, 60.97, 78.29. Gemma3-4B: 32.74, 38.88, 49.76, 63.92. Gemma3-12B: 43.63, 47.03, 59.47, 73.97. Gemma3-27B: 41.48, 48.17, 61.83, 77.02. DeepSeek-R1-7B: 33.39, 35.24, 46.18, 54.39. DeepSeek-R1-32B: 39.62, 48.16, 65.50, 81.17. LLaMA3-8B: 29.62, 30.83, 39.44, 50.32. LLaMA3-70B: 34.46, 42.37, 59.64, 78.25. GPT-4-o4-mini: 41.74, 46.02, 57.28, 73.88.\nBold values indicate the best score per input setting: S=41.74 (GPT-4), S+G=48.17 (Gemma3-27B), S+G+KP=65.50 (DeepSeek-R1-32B), S+G+KP+T=81.17 (DeepSeek-R1-32B).",
+        "title": "LINGGYM: How Far Are LLMs from Thinking Like Field Linguists?",
+        "figure": "Table 3"
     },
     {
         "id": 17,
         "type": "Data Visualization",
-        "instruction": "Plot the trade-off between precision and recall for three document retrieval systems on a legal QA dataset. Use a scatter plot where each point represents a system:\n- BM25: precision 71.2, recall 68.4\n- Dense Retrieval: precision 74.5, recall 79.3\n- Hybrid: precision 78.1, recall 80.6\n- Our Method: precision 82.4, recall 83.7\n\nAnnotate the Pareto frontier and show our method is the only one in the top-right corner.",
-        "human_output": null
+        "instruction": "Plot in HTML a heatmap table with 8 properties as rows and 5 methods (ENC, AR, AR(p), MLM, DIFF) as columns. Cell values are High, Medium, Low, or N/A. Color cells green for preferred values and yellow for less favorable ones, with uncolored cells for neutral. The data are:\nRequires significant data: High, Low(green), Medium, High, Low(green). Requires bigger model size: Low(green), High, High, High, High. Sample efficiency: Low, High(green), Medium, Low, High(green). Ordinality in scores: High(green), Low, Medium, High(green), Low. Unimodality in Scores: High(green), Low, Medium, High(green), Low. Well-calibrated scores: High(green), Low, Medium, High(green), N/A. Robustness to Noise: Medium, Low, Low, Low, High(green). Inference Speed: High(green), Medium, High(green), High(green), Low.",
+        "title": "Generative or Discriminative? Revisiting Text Classification in the Era of Transformers",
+        "figure": "Table 1"
     },
     {
         "id": 18,
         "type": "Data Visualization",
-        "instruction": "Visualize the hallucination rate (%) of LLMs on a medical QA benchmark as a function of context length (in tokens):\n- GPT-4: 512 (8.2), 1024 (11.4), 2048 (15.7), 4096 (21.3)\n- Claude-3: 512 (7.1), 1024 (9.8), 2048 (13.2), 4096 (17.6)\n- Gemini-Pro: 512 (9.4), 1024 (13.1), 2048 (18.5), 4096 (25.2)\n\nShow that all models hallucinate more with longer contexts, and Claude-3 is the most robust.",
-        "human_output": null
+        "instruction": "Plot in HTML a heatmap table with 4 models as rows (LLaMA-8B, LLaMA-3B, Mistral-2, Phi-3) and 16 columns grouped by: Base Gen, then 5 benchmarks (ARC-Challenge, OpenbookQA, Sports, StrategyQA, TruthfulQA) each with 3 sub-columns (Eff, Spec, Gen). Apply a green colormap where higher Spec values are darker green; Eff and Gen columns are uncolored or lightly shaded. The data are:\n\nLLaMA-8B: Base=63.9 | ARC: 43.2, 98.3, 63.8 | Obook: 44.1, 97.7, 63.8 | Sports: 20.8, 98.1, 63.8 | StrategyQA: 48.3, 95.7, 63.8 | TruthfulQA: 39.6, 97.0, 63.8.\n\nLLaMA-3B: Base=60.4 | ARC: 30.7, 98.1, 60.2 | Obook: 36.6, 96.1, 60.2 | Sports: 29.3, 96.6, 60.3 | StrategyQA: 36.3, 96.9, 60.3 | TruthfulQA: 28.9, 95.9, 60.3.\n\nMistral-2: Base=59.0 | ARC: 71.5, 96.4, 58.9 | Obook: 72.1, 97.6, 58.8 | Sports: 50.6, 94.8, 59.0 | StrategyQA: 65.4, 96.3, 59.0 | TruthfulQA: 48.6, 95.0, 59.0.\n\nPhi-3: Base=69.9 | ARC: 40.8, 99.5, 69.6 | Obook: 44.2, 99.4, 69.6 | Sports: 31.1, 97.0, 69.9 | StrategyQA: 18.7, 98.2, 69.9 | TruthfulQA: 11.0, 97.4, 69.8.",
+        "title": "Measuring Chain of Thought Faithfulness by Unlearning Reasoning Steps",
+        "figure": "Table 1"
     },
     {
         "id": 19,
         "type": "Data Visualization",
-        "instruction": "Plot the latency (ms) of a multi-agent system as the number of agents scales from 1 to 64:\n- Synchronous: 1 (120), 2 (240), 4 (480), 8 (950), 16 (1920), 32 (3900), 64 (7850)\n- Asynchronous: 1 (120), 2 (135), 4 (155), 8 (190), 16 (240), 32 (320), 64 (490)\n- Our Method: 1 (120), 2 (128), 4 (142), 8 (163), 16 (195), 32 (245), 64 (360)\n\nHighlight that synchronous latency grows nearly linearly while our method and asynchronous scale much more gracefully.",
-        "human_output": null
+        "instruction": "Create a bar chart in HTML with 4 bars showing weighted memory recall scores for the following conditions and approximate values:\n- Unedited Images: ~32\n- AI-Gen Videos of Unedited Imgs: ~25\n- AI-Edited Images: ~16\n- AI-Gen Videos of AI-Edited Imgs: ~3\n\nError bars (SEM) are approximately: ±2, ±3, ±3, ±4 respectively.\n\nAdd significance brackets between the following pairs (post hoc Tukey):\n- Unedited Images vs. AI-Edited Images: ** P=0.0030\n- Unedited Images vs. AI-Gen Videos of AI-Edited Imgs: *** P=0.0010\n- AI-Gen Videos of Unedited Imgs vs. AI-Gen Videos of AI-Edited Imgs: *** P=0.0010\n- AI-Edited Images vs. AI-Gen Videos of AI-Edited Imgs: * P=0.0301\n\nY-axis runs from 0 to 70. Title/caption: 'The weighted score of recalled memories based on number and confidence was analyzed using a one-way ANOVA and post hoc Tukey.'",
+        "title": "Synthetic Human Memories: AI-Edited Images and Videos Can Implant False Memories and Distort Recollection",
+        "figure": "Figure 8"
     },
     {
         "id": 20,
         "type": "Data Visualization",
-        "instruction": "Create a radar/spider chart comparing five LLMs across six capability dimensions (scores out of 100):\n- GPT-4: Reasoning (91), Coding (89), Math (88), Factuality (85), Safety (80), Instruction-following (93)\n- Claude-3: Reasoning (89), Coding (85), Math (84), Factuality (88), Safety (92), Instruction-following (91)\n- Gemini-Pro: Reasoning (86), Coding (84), Math (87), Factuality (82), Safety (81), Instruction-following (88)\n- LLaMA-3: Reasoning (80), Coding (79), Math (76), Factuality (77), Safety (74), Instruction-following (82)\n- Mistral: Reasoning (78), Coding (81), Math (74), Factuality (74), Safety (70), Instruction-following (79)",
-        "human_output": null
-    },
-    {
-        "id": 21,
-        "type": "Data Visualization",
-        "instruction": "Plot the relationship between model size (in billions of parameters, x-axis, log scale) and few-shot accuracy (%) on a reasoning benchmark (y-axis):\n\n0.3B: 24.1\n1B: 31.7\n3B: 40.2\n7B: 51.8\n13B: 59.3\n30B: 68.4\n70B: 76.2\n175B: 83.5\n540B: 88.1\n\nShow the emergent behavior: performance grows slowly at first, then accelerates sharply beyond ~7B parameters.",
-        "human_output": null
-    },
-    {
-        "id": 22,
-        "type": "Data Visualization",
-        "instruction": "Visualize reward scores across five training checkpoints for three RLHF variants:\n- Standard PPO: 1k (1.2), 5k (2.1), 10k (2.8), 20k (3.1), 40k (3.2)\n- PPO + KL penalty: 1k (1.1), 5k (2.3), 10k (3.1), 20k (3.5), 40k (3.6)\n- Our DPO method: 1k (1.4), 5k (2.7), 10k (3.4), 20k (3.8), 40k (4.1)\n\nShow that our DPO method achieves higher reward at every checkpoint, with the gap widening at later stages.",
-        "human_output": null
-    },
-    {
-        "id": 23,
-        "type": "Data Visualization",
-        "instruction": "Show the energy consumption (kWh) and CO2 emissions (kg) for training different model sizes. Use a dual-axis bar+line chart, one axis for energy and one for emissions:\n- BERT-base: energy 13, CO2 11\n- GPT-2: energy 78, CO2 65\n- T5-11B: energy 520, CO2 433\n- GPT-3: energy 1287, CO2 1072\n- LLaMA-2-70B: energy 3200, CO2 2666",
-        "human_output": null
-    },
-    {
-        "id": 24,
-        "type": "Data Visualization",
-        "instruction": "Visualize question answering accuracy (%) on three domains comparing retrieval-augmented generation (RAG) versus fine-tuning versus our hybrid approach:\n- Open-domain: RAG (67.3), Fine-tuning (71.2), Hybrid (79.4)\n- Closed-domain (Medical): RAG (54.8), Fine-tuning (63.7), Hybrid (72.1)\n- Temporal (news): RAG (71.5), Fine-tuning (48.3), Hybrid (74.8)\n\nHighlight that fine-tuning struggles severely with temporal data, while our hybrid approach is robust across all three domains.",
-        "human_output": null
-    },
-    {
-        "id": 25,
-        "type": "Data Visualization",
-        "instruction": "Create a stacked bar chart showing the error breakdown (%) for a speech recognition system across four conditions. Each bar should sum to 100%.\n- Clean speech: substitution (4.2), deletion (1.8), insertion (0.9), correct (93.1)\n- Noisy speech: substitution (14.3), deletion (6.7), insertion (3.2), correct (75.8)\n- Accented speech: substitution (18.1), deletion (5.4), insertion (2.8), correct (73.7)\n- Telephone audio: substitution (21.3), deletion (9.8), insertion (5.1), correct (63.8)",
-        "human_output": null
-    },
-    {
-        "id": 26,
-        "type": "Data Visualization",
-        "instruction": "Plot the user task completion rate (%) in a human-computer interaction study, comparing three UI configurations over five weeks of use (learning curve):\n- Standard UI: week 1 (52.3), week 2 (61.4), week 3 (67.8), week 4 (71.2), week 5 (73.1)\n- Adaptive UI: week 1 (55.1), week 2 (67.3), week 3 (75.6), week 4 (81.4), week 5 (85.2)\n- Our AI-assisted UI: week 1 (63.4), week 2 (74.2), week 3 (82.1), week 4 (87.6), week 5 (91.3)\n\nShow that our AI-assisted UI starts highest and maintains the steepest improvement slope over time.",
-        "human_output": null
-    },
-    {
-        "id": 27,
-        "type": "Data Visualization",
-        "instruction": "Visualize the performance degradation (drop in accuracy, %) of models under five types of adversarial attacks:\n- TextFooler: BERT (-18.3), RoBERTa (-14.2), ALBERT (-15.7), Ours (-7.4)\n- PWWS: BERT (-15.1), RoBERTa (-11.8), ALBERT (-13.2), Ours (-5.9)\n- DeepWordBug: BERT (-21.4), RoBERTa (-17.3), ALBERT (-19.1), Ours (-9.2)\n- BERT-Attack: BERT (-24.7), RoBERTa (-19.5), ALBERT (-22.3), Ours (-10.8)\n- BAE: BERT (-16.8), RoBERTa (-13.1), ALBERT (-14.9), Ours (-6.7)\n\nShow that our model consistently suffers the smallest drop under all attack types.",
-        "human_output": null
-    },
-    {
-        "id": 28,
-        "type": "Data Visualization",
-        "instruction": "Plot a heatmap of pairwise F1 (%) between six intent labels on a dialogue intent classifier (rows = true label, columns = predicted):\n- Greeting\u2192Greeting (94.2), Greeting\u2192Farewell (2.1), Greeting\u2192Booking (1.3), Greeting\u2192Cancel (0.8), Greeting\u2192FAQ (1.6)\n- Booking\u2192Greeting (1.8), Booking\u2192Booking (91.7), Booking\u2192Cancel (3.4), Booking\u2192FAQ (2.1), Booking\u2192Farewell (0.9)\n- Cancel\u2192Booking (4.2), Cancel\u2192Cancel (89.5), Cancel\u2192FAQ (3.1), Cancel\u2192Greeting (1.4), Cancel\u2192Farewell (1.8)\n- FAQ\u2192FAQ (88.3), FAQ\u2192Booking (5.6), FAQ\u2192Greeting (2.7), FAQ\u2192Cancel (2.4), FAQ\u2192Farewell (1.0)\n- Farewell\u2192Farewell (96.1), Farewell\u2192Greeting (1.5), Farewell\u2192Booking (0.7), Farewell\u2192FAQ (1.2), Farewell\u2192Cancel (0.5)\n- Off-topic\u2192FAQ (12.4), Off-topic\u2192Greeting (8.3), Off-topic\u2192Booking (6.1), Off-topic\u2192Off-topic (71.2), Off-topic\u2192Cancel (2.0)\n\nUse a diverging color scale and annotate the diagonal. Show that Booking and Cancel are the most confused pair.",
-        "human_output": null
-    },
-    {
-        "id": 29,
-        "type": "Data Visualization",
-        "instruction": "Create a Sankey diagram showing how 10,000 training examples flow through a data-cleaning pipeline into final splits:\n- Raw crawl: 10,000\n- After deduplication: 7,400 (2,600 removed)\n- After language filter: 6,100 (1,300 removed)\n- After toxicity filter: 5,200 (900 removed)\n- After quality scorer (threshold 0.7): 3,850 (1,350 removed)\n- Train split: 3,080 | Validation: 385 | Test: 385\n\nEmphasize that deduplication removes the largest single share, and less than 40% of raw data reaches training.",
-        "human_output": null
-    },
-    {
-        "id": 30,
-        "type": "Data Visualization",
-        "instruction": "Compare score distributions across 10 random seeds using violin plots for four RL policies on a continuous control task (success rate % per seed):\n- PPO: seeds [62, 58, 71, 65, 54, 68, 61, 59, 73, 66]\n- SAC: seeds [71, 74, 68, 77, 70, 72, 69, 75, 73, 71]\n- TD3: seeds [68, 63, 70, 67, 64, 69, 66, 62, 71, 65]\n- Ours: seeds [81, 84, 78, 86, 82, 85, 80, 83, 87, 84]\n\nOverlay median markers. Show that Ours has the highest median and narrowest spread.",
-        "human_output": null
-    },
-    {
-        "id": 31,
-        "type": "Data Visualization",
-        "instruction": "Turn this ablation into a waterfall chart starting from a random baseline and building up to the full model (accuracy %):\n- Random baseline: 50.0\n- + pre-training: 75.6 (+25.6)\n- + data augmentation: 79.1 (+3.5)\n- + attention module: 84.3 (+5.2)\n- Full model (verify): 84.3\n\nShow cumulative gains; pre-training provides the largest single step.",
-        "human_output": null
-    },
-    {
-        "id": 32,
-        "type": "Data Visualization",
-        "instruction": "Visualize a hyperparameter sweep with parallel coordinates (each line = one run). Normalize scores to 0\u2013100. Report final validation F1:\n- lr=1e-5, batch=32, dropout=0.1, warmup=500 \u2192 F1 78.2\n- lr=3e-5, batch=32, dropout=0.1, warmup=500 \u2192 F1 84.6\n- lr=3e-5, batch=64, dropout=0.1, warmup=500 \u2192 F1 82.1\n- lr=3e-5, batch=32, dropout=0.3, warmup=500 \u2192 F1 81.4\n- lr=3e-5, batch=32, dropout=0.1, warmup=2000 \u2192 F1 86.9\n- lr=1e-4, batch=32, dropout=0.1, warmup=500 \u2192 F1 79.8\n- lr=3e-5, batch=128, dropout=0.2, warmup=1000 \u2192 F1 83.5\n\nHighlight the best run in a distinct color. Show that warmup=2000 with moderate lr stands out.",
-        "human_output": null
-    },
-    {
-        "id": 33,
-        "type": "Data Visualization",
-        "instruction": "Plot a stacked area chart of GPU memory usage (GB) over a 24-hour training run, broken down by component:\n- Hour 0\u20136: optimizer states (42), activations (28), gradients (18), KV cache (0)\n- Hour 6\u201312: optimizer states (44), activations (31), gradients (20), KV cache (8)\n- Hour 12\u201318: optimizer states (46), activations (35), gradients (22), KV cache (24)\n- Hour 18\u201324: optimizer states (48), activations (38), gradients (24), KV cache (52)\n\nShow that KV cache memory dominates growth in the second half of training.",
-        "human_output": null
-    },
-    {
-        "id": 34,
-        "type": "Data Visualization",
-        "instruction": "Create a streamgraph of topic proportions (%) in a pretraining corpus by year (topics sum to 100% each year):\n- 2019: Code (18), Math (12), Science (22), News (28), Fiction (20)\n- 2020: Code (22), Math (14), Science (20), News (24), Fiction (20)\n- 2021: Code (26), Math (16), Science (18), News (20), Fiction (20)\n- 2022: Code (31), Math (18), Science (16), News (17), Fiction (18)\n- 2023: Code (38), Math (20), Science (14), News (14), Fiction (14)\n- 2024: Code (45), Math (22), Science (12), News (11), Fiction (10)\n\nShow the rising share of Code and Math at the expense of News and Fiction.",
-        "human_output": null
-    },
-    {
-        "id": 35,
-        "type": "Data Visualization",
-        "instruction": "Draw a slope chart comparing model rankings on MMLU (2023 rank \u2192 2024 rank; lower rank is better). Only include models present in both years:\n- GPT-4: 2023 rank 1 \u2192 2024 rank 3\n- Claude-3: 2023 rank 4 \u2192 2024 rank 2\n- Gemini-Pro: 2023 rank 6 \u2192 2024 rank 4\n- LLaMA-2-70B: 2023 rank 5 \u2192 2024 rank 8\n- Mistral-7B: 2023 rank 12 \u2192 2024 rank 6\n- GPT-3.5: 2023 rank 8 \u2192 2024 rank 14\n\nHighlight upward slopes (worse rank). Show Claude-3 and Mistral-7B improved the most.",
-        "human_output": null
-    },
-    {
-        "id": 36,
-        "type": "Data Visualization",
-        "instruction": "Create dumbbell charts (paired dots connected by a line) for accuracy (%) before vs. after domain-adaptive fine-tuning on five biomedical NER entity types:\n- Disease: base 72.4 \u2192 adapted 89.1\n- Chemical: base 68.9 \u2192 adapted 86.3\n- Gene: base 74.2 \u2192 adapted 90.5\n- Species: base 81.0 \u2192 adapted 92.8\n- Cell line: base 63.5 \u2192 adapted 81.7\n\nShow the largest gain on Cell line, the smallest on Species.",
-        "human_output": null
-    },
-    {
-        "id": 37,
-        "type": "Data Visualization",
-        "instruction": "Plot a funnel chart for a web-navigation agent on 1,000 e-commerce tasks:\n- Tasks attempted: 1000\n- Valid plan generated: 842\n- First action executed: 731\n- Reached correct page: 524\n- Completed purchase step: 318\n- Order confirmed (success): 187\n\nLabel conversion % between stages. Show the steepest drop between reaching the correct page and completing purchase.",
-        "human_output": null
-    },
-    {
-        "id": 38,
-        "type": "Data Visualization",
-        "instruction": "Use ridge plots (joyplot) to overlay validation loss curves across 8 seeds for three architectures (loss at epochs 1, 5, 10, 20, 40):\n- LSTM: all seeds start ~4.8\u20135.0, epoch 40 range 2.1\u20132.8\n- Transformer-S: all seeds start ~4.5\u20134.7, epoch 40 range 1.4\u20131.9\n- Transformer-L: all seeds start ~4.2\u20134.4, epoch 40 range 0.9\u20131.2\n\nShow that Transformer-L ridges are narrowest at epoch 40 (most stable across seeds).",
-        "human_output": null
-    },
-    {
-        "id": 39,
-        "type": "Data Visualization",
-        "instruction": "Plot a hexbin density chart of 2,400 (prompt length tokens, human helpfulness score 1\u20135) ratings for an LLM assistant:\n- Densest bin center: length 120, score 4.2, count 310\n- Secondary cluster: length 45, score 4.5, count 185\n- Sparse long-prompt tail: length 3500+, scores mostly 2.0\u20133.1\n- Overall correlation: r = -0.42\n\nAdd a smoothing trend line. Show that very long prompts correlate with lower helpfulness.",
-        "human_output": null
-    },
-    {
-        "id": 40,
-        "type": "Data Visualization",
-        "instruction": "Create a connected scatter plot (trajectory) for three retrieval systems across scaling index size (million docs) on x and Recall@10 (%) on y:\n- BM25: 1M (78.2) \u2192 10M (71.4) \u2192 100M (63.8)\n- Dense: 1M (82.5) \u2192 10M (80.1) \u2192 100M (77.6)\n- Ours: 1M (85.3) \u2192 10M (84.7) \u2192 100M (83.9)\n\nUse arrows between points. Show BM25 degrades sharply at scale while Ours stays nearly flat.",
-        "human_output": null
-    },
-    {
-        "id": 41,
-        "type": "Data Visualization",
-        "instruction": "Build a Marimekko (mosaic) chart: x-width = share of 2024 API traffic by model family, y-height = outcome mix within each family (all % within family sum to 100):\n- Open-weight (38% of traffic): success 72, refusal 18, error 10\n- Closed API tier-1 (34%): success 86, refusal 9, error 5\n- Closed API tier-2 (20%): success 79, refusal 14, error 7\n- Fine-tuned enterprise (8%): success 91, refusal 6, error 3\n\nShow that enterprise fine-tunes are a small traffic slice but the highest success proportion.",
-        "human_output": null
-    },
-    {
-        "id": 42,
-        "type": "Data Visualization",
-        "instruction": "Draw a chord diagram of cross-task transfer (F1 gain % when fine-tuned on source then evaluated on target; only show flows \u22658%):\n- NER\u2192RE: 12.4\n- NER\u2192QA: 9.1\n- QA\u2192NER: 8.7\n- QA\u2192Summarization: 14.2\n- Summarization\u2192QA: 11.8\n- RE\u2192NER: 10.3\n- RE\u2192QA: 9.6\n- Summarization\u2192NER: 8.2\n\nThickness encodes gain. Show QA\u2192Summarization is the strongest transfer link.",
-        "human_output": null
-    },
-    {
-        "id": 43,
-        "type": "Data Visualization",
-        "instruction": "Plot a polar area (coxcomb) chart of monthly share of total inference spend (%) for a research lab in 2024 (months sum to 100%):\n- Jan 6.2, Feb 7.1, Mar 8.4, Apr 9.0, May 10.2, Jun 11.5, Jul 12.8, Aug 11.9, Sep 9.6, Oct 8.3, Nov 7.4, Dec 7.6\n\nShow spend peaking mid-year (Jun\u2013Jul) during large-scale pretraining.",
-        "human_output": null
-    },
-    {
-        "id": 44,
-        "type": "Data Visualization",
-        "instruction": "Create bullet charts for three production SLAs (target / actual / poor threshold):\n- P50 latency (ms): poor >300, target 180, actual 142\n- Availability (%): poor <99.0, target 99.9, actual 99.94\n- Cost per 1M tokens ($): poor >6.0, target 3.5, actual 2.8\n\nShow all three metrics exceed targets with comfortable margin.",
-        "human_output": null
-    },
-    {
-        "id": 45,
-        "type": "Data Visualization",
-        "instruction": "Plot overlapping histograms with KDE curves for perplexity on a held-out set for two language models:\n- Base model: bins centered at [2.8, 3.2, 3.6, 4.0, 4.4, 4.8] with counts [85, 210, 340, 290, 150, 45]\n- Instruction-tuned: bins centered at [2.0, 2.4, 2.8, 3.2, 3.6, 4.0] with counts [120, 380, 410, 220, 90, 30]\n\nUse transparency. Show the instruction-tuned distribution shifted left (lower perplexity).",
-        "human_output": null
-    },
-    {
-        "id": 46,
-        "type": "Data Visualization",
-        "instruction": "Plot a Gantt-style timeline (horizontal bars) for a 70B model training schedule:\n- Data prep: day 0\u201314\n- Pretrain phase 1 (4k ctx): day 14\u201380\n- Pretrain phase 2 (32k ctx): day 80\u2013162\n- Mid-training cooldown: day 162\u2013175\n- SFT: day 175\u2013195\n- RLHF: day 195\u2013210\n- Eval & red-team: day 210\u2013220\n\nColor phases differently. Show pretraining dominates wall-clock.",
-        "human_output": null
-    },
-    {
-        "id": 47,
-        "type": "Data Visualization",
-        "instruction": "Use a horizon chart (compact layered areas) to compare four metrics over 20 training epochs (0\u201319) for one run:\n- Train loss: starts 3.8, ends 1.1 (monotonic decrease)\n- Val loss: starts 3.9, min 1.3 at epoch 14, ends 1.5 (slight uptick)\n- Val accuracy (%): starts 42, ends 89, peak 90 at epoch 14\n- Gradient norm: starts 2.4, spikes 5.1 at epoch 3, stabilizes ~0.8 after epoch 10\n\nNormalize each metric to 0\u20131 for display. Show early overfitting signal: val loss bottoms at epoch 14 then rises while train loss keeps falling.",
-        "human_output": null
-    },
-    {
-        "id": 48,
-        "type": "Data Visualization",
-        "instruction": "Plot a lollipop chart ranking ten embedding models by MTEB average score (%) \u2014 only show top and bottom five for clarity:\n- E5-large-v2: 64.8\n- BGE-large-en: 63.5\n- GTE-large: 62.9\n- OpenAI-ada-002: 60.1\n- Instructor-XL: 59.4\n- GloVe-840B: 38.2\n- Universal-Sentence: 41.5\n- MiniLM-L6: 48.7\n- all-MiniLM-L12: 51.3\n- TF-IDF baseline: 32.4\n\nSort descending. Show the gap between neural embedders and TF-IDF.",
-        "human_output": null
-    },
-    {
-        "id": 49,
-        "type": "Data Visualization",
-        "instruction": "Create a bump chart of leaderboard rank (1=best) over four benchmark rounds for five agents on WebArena:\n- Round 1: AWM 1, AutoEval 3, BrowserGym 2, GPT-4o 4, Human 5\n- Round 2: AWM 1, BrowserGym 2, AutoEval 4, GPT-4o 3, Human 5\n- Round 3: AWM 1, GPT-4o 2, BrowserGym 3, AutoEval 4, Human 5\n- Round 4: AWM 1, GPT-4o 2, BrowserGym 4, AutoEval 3, Human 5\n\nMinimize line crossings. Show AWM stays rank 1 while GPT-4o climbs from 4 to 2.",
-        "human_output": null
-    },
-    {
-        "id": 50,
-        "type": "Data Visualization",
-        "instruction": "Draw a population-pyramid-style diverging bar chart for human vs. model annotation disagreement rates (%) across ten error categories:\n- Left (human over-predicts): Hallucination 8.2, Omission 5.4, Wrong entity 4.1, Temporal 6.8, Coreference 3.2\n- Right (model over-predicts): Hallucination 2.1, Omission 9.6, Wrong entity 7.3, Temporal 1.4, Coreference 5.9\n\nCategories on the y-axis. Show Omission and Wrong entity skew toward model over-prediction.",
-        "human_output": null
-    },
-    {
-        "id": 51,
-        "type": "Data Visualization",
-        "instruction": "Plot a candlestick-style chart (open/high/low/close) for daily benchmark score volatility over one week on GAIA (higher is better):\n- Mon: O 41.2 H 43.8 L 40.1 C 42.6\n- Tue: O 42.6 H 44.1 L 41.9 C 43.5\n- Wed: O 43.5 H 45.0 L 42.8 C 44.2\n- Thu: O 44.2 H 46.3 L 43.7 C 45.8\n- Fri: O 45.8 H 48.1 L 45.2 C 47.4\n\nShow four consecutive bullish days (close > open) with widening highs.",
-        "human_output": null
-    },
-    {
-        "id": 52,
-        "type": "Data Visualization",
-        "instruction": "Use a sunburst chart for hierarchical compute usage on one training job:\n- Total GPU-hours: 10,000\n- Pretrain: 7,200 (Forward 4,100, Backward 2,400, Optimizer 700)\n- Data loading: 1,400 (Tokenize 900, Disk I/O 500)\n- Checkpointing: 900\n- Logging & eval: 500\n\nInner ring = top level, outer ring = sub-components. Show forward pass dominates pretrain.",
-        "human_output": null
+        "instruction": "Create a visualization in HTML titled 'Degree of Professionalization for Interviewees' with a section header 'Compensation for Creative Work' and the following rows (label, count):\n\nMost income comes from creative writing practice: 11\nMost income comes from writing-related profession: 10\nMost income does not come from writing: 8\nUnknown: 4",
+        "title": "Creative Writers' Attitudes on Writing as Training Data for Large Language Models",
+        "figure":"Table 4"
     }
 ]
