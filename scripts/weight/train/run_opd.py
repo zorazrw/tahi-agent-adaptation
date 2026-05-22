@@ -28,6 +28,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import os
@@ -734,15 +735,57 @@ _BASH_CAT_WRITE_HEREDOC_RE = re.compile(
     re.DOTALL,
 )
 
+_BASH_CAT_WRITE_HEREDOC_REVERSED_RE = re.compile(
+    r"""cat\s+<<\s*['"]?(\w+)['"]?\s*>\s*['"]?([^'"\s<>\n]+)['"]?\n(.*?)\n\1(?:\n|$)""",
+    re.DOTALL,
+)
+
 _BASH_TEE_WRITE_HEREDOC_RE = re.compile(
     r"""tee\s+['"]?([^'"\s<>\n]+)['"]?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\2(?:\n|$)""",
     re.DOTALL,
 )
 
 _BASH_PYTHON_INLINE_HEREDOC_RE = re.compile(
-    r"""python3?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\1(?:\n|$)""",
+    r"""python3?(?:\s+-)?\s+<<\s*['"]?(\w+)['"]?\n(.*?)\n\1(?:\n|$)""",
     re.DOTALL,
 )
+
+_BASH_PYTHON_INLINE_C_RE = re.compile(
+    r"""python3?(?:\s+-[\w]+)*\s+-c\s+(?P<quoted>'(?:\\.|[^'])*'|"(?:\\.|[^"])*")""",
+    re.DOTALL,
+)
+
+_BASH_CAT_WRITE_HEREDOC_REVERSED_LENIENT_RE = re.compile(
+    r"""^\s*cat\s+<<\s*['"]?(\w+)['"]?\s*>\s*['"]?([^'"\s<>\n]+)['"]?\n(.*)\s*$""",
+    re.DOTALL,
+)
+
+_BASH_PYTHON_INLINE_HEREDOC_LENIENT_RE = re.compile(
+    r"""^\s*python3?(?:\s+-)?\s+<<\s*['"]?(\w+)['"]?\n(.*)\s*$""",
+    re.DOTALL,
+)
+
+
+def _strip_optional_heredoc_delimiter(content: str, delimiter: str) -> str:
+    """Trim a trailing heredoc delimiter when a lenient match captured it."""
+    lines = content.splitlines()
+    if lines and lines[-1].strip() == delimiter:
+        return "\n".join(lines[:-1])
+    return content
+
+
+def _python_c_args(command: str) -> dict[str, str] | None:
+    """Parse a simple ``python -c "..."`` command as a synthetic source artifact."""
+    m = _BASH_PYTHON_INLINE_C_RE.search(command)
+    if not m:
+        return None
+    try:
+        content = ast.literal_eval(m.group("quoted"))
+    except (SyntaxError, ValueError):
+        return None
+    if not isinstance(content, str) or not content.strip():
+        return None
+    return {"path": "<inline_script>.py", "content": content}
 
 
 def _bash_heredoc_write_args(command: Any) -> dict[str, str] | None:
@@ -751,8 +794,10 @@ def _bash_heredoc_write_args(command: Any) -> dict[str, str] | None:
     This intentionally does not execute shell.  It only accepts obvious
     artifact-producing heredocs:
       cat > artifact <<EOF
+      cat <<EOF > artifact
       tee artifact <<EOF
       python3 <<EOF
+      python3 -c "..."
 
     Append forms and arbitrary redirections are left filtered.  Inline Python
     scripts are treated as synthetic source artifacts, regardless of the image
@@ -767,10 +812,38 @@ def _bash_heredoc_write_args(command: Any) -> dict[str, str] | None:
             content = m.group(3)
             if path and content.strip():
                 matches.append((path, content))
+    for m in _BASH_CAT_WRITE_HEREDOC_REVERSED_RE.finditer(command):
+        path = m.group(2).strip()
+        content = m.group(3)
+        if path and content.strip():
+            matches.append((path, content))
     for m in _BASH_PYTHON_INLINE_HEREDOC_RE.finditer(command):
         content = m.group(2)
         if content.strip():
             matches.append(("<inline_script>.py", content))
+    python_c = _python_c_args(command)
+    if python_c is not None:
+        matches.append((python_c["path"], python_c["content"]))
+
+    # Some tool-rendered bash calls omit the shell heredoc closing delimiter but
+    # still contain the source body as the tool argument. Salvage only the two
+    # narrow artifact-producing shapes; pure probes such as ls/pip/read remain
+    # filtered.
+    if not matches:
+        m = _BASH_CAT_WRITE_HEREDOC_REVERSED_LENIENT_RE.match(command)
+        if m:
+            delimiter = m.group(1)
+            path = m.group(2).strip()
+            content = _strip_optional_heredoc_delimiter(m.group(3), delimiter)
+            if path and content.strip():
+                matches.append((path, content))
+    if not matches:
+        m = _BASH_PYTHON_INLINE_HEREDOC_LENIENT_RE.match(command)
+        if m:
+            delimiter = m.group(1)
+            content = _strip_optional_heredoc_delimiter(m.group(2), delimiter)
+            if content.strip():
+                matches.append(("<inline_script>.py", content))
     if len(matches) != 1:
         return None
     path, content = matches[0]
