@@ -21,8 +21,10 @@ from typing import Any, Callable, cast
 import tinker
 import torch
 import torch.nn.functional as F
+import chz
 
 from tinker_cookbook import checkpoint_utils, model_info
+from tinker_cookbook.eval.evaluators import EvaluatorBuilder
 from tinker_cookbook.supervised.train import run_evals
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
@@ -31,6 +33,7 @@ from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
 from tinker_cookbook.supervised.types import (
+    ChatDatasetBuilder,
     ChatDatasetBuilderCommonConfig,
     SupervisedDataset,
 )
@@ -38,6 +41,47 @@ from tinker_cookbook.supervised.types import (
 from .formatter import WeightDPODataBuilder
 
 logger = logging.getLogger(__name__)
+
+
+@chz.chz
+class Config:
+    """Configuration shared by the offline CLI and online server DPO trainer."""
+
+    log_path: str = chz.field(munger=lambda _, s: str(Path(s).expanduser()))
+    model_name: str
+    dataset_builder: ChatDatasetBuilder
+    load_checkpoint_path: str | None = None
+    renderer_name: str | None = None
+
+    learning_rate: float = 1e-5
+    lr_schedule: LRSchedule = "linear"
+    num_epochs: int = 1
+    dpo_beta: float = 0.1
+    rpo_alpha: float = 0.0
+    use_ipo: bool = False
+
+    lora_rank: int = 32
+    num_replicas: int = 8
+    base_url: str | None = None
+
+    evaluator_builders: list[EvaluatorBuilder] = chz.field(default_factory=list)
+    infrequent_evaluator_builders: list[EvaluatorBuilder] = chz.field(default_factory=list)
+    save_every: int = 20
+    eval_every: int = 10
+    infrequent_eval_every: int = 100
+    ttl_seconds: int | None = 604800
+    rolling_save_every: int = 0
+    rolling_ttl_seconds: int = 7200
+
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    adam_eps: float = 1e-8
+
+    wandb_project: str | None = None
+    wandb_name: str | None = None
+    enable_trace: bool = False
+    span_chart_every: int = 0
+    max_steps: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +120,7 @@ def _load_env() -> None:
 # 2. Tinker path (default): on the real Tinker cloud API we snapshot
 #    the initial weights into a frozen ``SamplingClient`` once, then call
 #    ``reference_client.compute_logprobs_async`` per batch.  This is the
-#    canonical DPO recipe (see ``scripts/tinker_dpo.py``).
+#    canonical DPO recipe.
 # ---------------------------------------------------------------------------
 
 def _datum_fingerprint(datum: tinker.Datum) -> tuple:

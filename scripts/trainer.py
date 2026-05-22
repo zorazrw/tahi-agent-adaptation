@@ -20,7 +20,7 @@ from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
 try:
-    from tinker_reinforce import (
+    from weight.train.run_reinforce import (
         Config as REINFORCEConfig,
         make_reinforce_loss_fn,
         print_example as _REINFORCE_print_example,
@@ -35,10 +35,10 @@ except Exception as e:  # noqa: BLE001
     REINFORCE_IMPORT_ERROR = e
 
 try:
-    from tinker_dpo import (
+    from weight.train.run_dpo import (
         Config as DPOConfig,
         compute_dpo_loss,
-        print_example as _DPO_print_example,
+        _print_example as _DPO_print_example,
     )
     DPO_IMPORT_ERROR: Exception | None = None
 except Exception as e:  # noqa: BLE001
@@ -168,7 +168,7 @@ class REINFORCETrainer(Trainer):
 
         The dataset is expected to expose ``get_batch(i)`` (standard
         ``SupervisedDataset`` interface) as well as ``get_batch_rewards(i)``,
-        which :class:`~tinker_formatter.ReinforceDataset` provides.
+        which :class:`weight.train.formatter._ReinforceDataset` provides.
 
         Returns sampler and state paths for the final checkpoint produced this round.
         """
@@ -550,7 +550,13 @@ class DPOTrainer(Trainer):
                 )
 
                 # Extract the relevant logprobs (skip the first token which is the prompt)
-                all_ref_logprob_seqs = [torch.tensor(logprobs[1:]) for logprobs in all_ref_logprobs]
+                all_ref_logprob_seqs = [
+                    torch.tensor(
+                        [lp if lp is not None else 0.0 for lp in logprobs[1:]],
+                        dtype=torch.float32,
+                    )
+                    for logprobs in all_ref_logprobs
+                ]
 
                 # Split reference results into chosen and rejected
                 chosen_ref_logprob_seqs = [all_ref_logprob_seqs[i] for i in range(0, len(data), 2)]
@@ -600,6 +606,8 @@ class DPOTrainer(Trainer):
                     chosen_ref_logprobs=chosen_ref_logprobs,
                     rejected_ref_logprobs=rejected_ref_logprobs,
                     dpo_beta=self.config.dpo_beta,
+                    rpo_alpha=self.config.rpo_alpha,
+                    use_ipo=self.config.use_ipo,
                 )
 
             async with trace.scope_span("step"):

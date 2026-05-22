@@ -21,6 +21,9 @@ save_every: 20
 
 # -- DPO-specific --
 dpo_beta: 0.1
+dpo_pair_mode: first_last
+dpo_rpo_alpha: 0.0
+dpo_use_ipo: false
 
 # -- OPD-specific --
 opd_max_tokens: 16384

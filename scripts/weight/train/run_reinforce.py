@@ -29,9 +29,10 @@ from typing import cast
 
 import tinker
 import torch
+import chz
 
 from tinker_cookbook import checkpoint_utils, model_info
-from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
+from tinker_cookbook.supervised.types import ChatDatasetBuilder, ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.format_colorized import format_colorized
@@ -42,6 +43,44 @@ from .formatter import WeightReinforceDataBuilder
 
 logger = logging.getLogger(__name__)
 BASELINE_STATE_FILENAME = "reinforce_baseline_state.json"
+
+
+@chz.chz
+class Config:
+    """Configuration shared by the offline CLI and online server REINFORCE trainer."""
+
+    log_path: str = chz.field(munger=lambda _, s: str(Path(s).expanduser()))
+    model_name: str
+    dataset_builder: ChatDatasetBuilder
+
+    load_checkpoint_path: str | None = None
+    renderer_name: str | None = None
+    lora_rank: int = 32
+
+    learning_rate: float = 1e-5
+    lr_schedule: LRSchedule = "linear"
+    num_epochs: int = 1
+
+    reward_alpha: float = 0.05
+    initial_baseline: float = 0.0
+
+    num_replicas: int = 8
+    base_url: str | None = None
+
+    save_every: int = 20
+    ttl_seconds: int | None = 604800
+    rolling_save_every: int = 0
+    rolling_ttl_seconds: int = 7200
+
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    adam_eps: float = 1e-8
+
+    wandb_project: str | None = None
+    wandb_name: str | None = None
+    enable_trace: bool = False
+    span_chart_every: int = 0
+    max_steps: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +170,13 @@ def make_reinforce_loss_fn(advantages: list[float]):
         return loss, metrics
 
     return loss_fn
+
+
+def print_example(datum: tinker.Datum, tokenizer: Tokenizer, label: str = "") -> None:
+    int_tokens = list(datum.model_input.to_ints())
+    weights = datum.loss_fn_inputs["weights"].data
+    logger.info(f"\n{label}:")
+    logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
 
 
 # ---------------------------------------------------------------------------

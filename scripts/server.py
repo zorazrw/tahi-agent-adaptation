@@ -24,14 +24,12 @@ from contextlib import asynccontextmanager
 
 import tinker
 
-import session_export_common as s
-from export_dpo_data import _session as _dpo_session
-from export_reinforce_data import _session as _reinforce_session
-
 from tinker_cookbook import renderers
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
-from formatter import WeightDPODataBuilder, WeightReinforceDataBuilder
+from weight.train.formatter import WeightDPODataBuilder, WeightReinforceDataBuilder
+from weight.train.run_dpo import Config as DPOConfig
+from weight.train.run_reinforce import Config as ReinforceConfig
 from weight.train.run_opd import Config as ArtifactOPDConfig, OnlineOPDRolloutDataset
 
 from model_manager import ModelManager, ModelUpdate
@@ -66,6 +64,9 @@ class Config:
 
     # -- DPO-specific --
     dpo_beta: float = 0.1
+    dpo_pair_mode: Literal["first_last", "adjacent"] = "first_last"
+    dpo_rpo_alpha: float = 0.0
+    dpo_use_ipo: bool = False
 
     # -- OPD-specific --
     opd_max_tokens: int = 2048
@@ -355,19 +356,15 @@ class Server:
         return app
 
     async def _process_sessions(self):
-        loop = asyncio.get_running_loop()
         while True:
             session_data = await self.sessions_queue.get()
             try:
-                # for session_blob in s.blobs(session_data):
                 if self.config.mode == "dpo":
-                    data = await loop.run_in_executor(None, _dpo_session, session_data)
+                    data = session_data
                 elif self.config.mode == "opd":
-                    # OPD uses the weight-format session directly.  The frontend
-                    # export path already calls export_task_sessions --format weight.
                     data = session_data
                 elif self.config.mode == "reinforce":
-                    data = await loop.run_in_executor(None, _reinforce_session, session_data)
+                    data = session_data
                 else:
                     raise ValueError(f"Unknown training mode: {self.config.mode} (expected one of 'dpo', 'opd', 'reinforce')")
 
@@ -507,7 +504,6 @@ class Server:
         return state_path
 
     async def _train_round(self, items: list) -> TrainingCheckpoint:
-        # TODO: Modify this to include DPO and REINFORCE training
         """Run one online training round using the persistent mode-specific Trainer.
 
         The Trainer is obtained via :meth:`ModelManager.get_trainer`, which
@@ -540,7 +536,6 @@ class Server:
             model_name, renderer_name = self.model_manager.resolve_renderer(model_path)
             load_checkpoint_path = self._load_checkpoint_path_for_active_model()
 
-            # TODO: Modify this to include DPO and REINFORCE training
             if self.config.mode == "dpo":
                 dataset, build = self._prepare_dpo(train_path, model_name, renderer_name)
             elif self.config.mode == "reinforce":
@@ -567,21 +562,19 @@ class Server:
             os.unlink(train_path)
 
     def _prepare_dpo(self, train_path: str, model_name: str, renderer_name: str):
-        # TODO
-        from tinker_dpo import Config as DPOConfig
-
         dataset_builder = WeightDPODataBuilder(
             train_path=train_path,
+            pair_mode=self.config.dpo_pair_mode,
             common_config=ChatDatasetBuilderCommonConfig(
                 model_name_for_tokenizer=model_name,
                 renderer_name=renderer_name,
-                max_length=None,
+                max_length=self.config.max_length,
                 batch_size=self.config.batch_size,
             ),
         )
         dataset, _ = dataset_builder()
 
-        log_path = f"logs/tinker_dpo/{int(time.time())}"
+        log_path = f"logs/weight_dpo/{int(time.time())}"
         trainer_config = DPOConfig(
             log_path=log_path,
             model_name=model_name,
@@ -590,8 +583,11 @@ class Server:
             learning_rate=self.config.learning_rate,
             lr_schedule=self.config.lr_schedule,
             dpo_beta=self.config.dpo_beta,
+            rpo_alpha=self.config.dpo_rpo_alpha,
+            use_ipo=self.config.dpo_use_ipo,
             num_epochs=self.config.num_epochs,
             lora_rank=self.config.lora_rank,
+            save_every=self.config.save_every,
             max_steps=self.config.max_steps,
             wandb_project=self.config.wandb_project,
             wandb_name=self.config.wandb_name,
@@ -613,22 +609,18 @@ class Server:
         return dataset, build
 
     def _prepare_reinforce(self, train_path: str, model_name: str, renderer_name: str):
-        # TODO
-        from tinker_reinforce import Config as ReinforceConfig
-
         dataset_builder = WeightReinforceDataBuilder(
             train_path=train_path,
-            reward_alpha=self.config.reward_alpha,
             common_config=ChatDatasetBuilderCommonConfig(
                 model_name_for_tokenizer=model_name,
                 renderer_name=renderer_name,
-                max_length=None,
+                max_length=self.config.max_length,
                 batch_size=self.config.batch_size,
             ),
         )
         dataset, _ = dataset_builder()
 
-        log_path = f"logs/tinker_reinforce/{int(time.time())}"
+        log_path = f"logs/weight_reinforce/{int(time.time())}"
         trainer_config = ReinforceConfig(
             log_path=log_path,
             model_name=model_name,
@@ -640,6 +632,7 @@ class Server:
             lora_rank=self.config.lora_rank,
             reward_alpha=self.config.reward_alpha,
             initial_baseline=self.config.initial_baseline,
+            save_every=self.config.save_every,
             max_steps=self.config.max_steps,
             wandb_project=self.config.wandb_project,
             wandb_name=self.config.wandb_name,
@@ -673,7 +666,7 @@ class Server:
             artifact_only_instruction=self.config.opd_artifact_only_rollout_instruction,
         )
 
-        log_path = f"logs/tinker_opd/{int(time.time())}"
+        log_path = f"logs/weight_opd/{int(time.time())}"
         trainer_config = ArtifactOPDConfig(
             model_name=model_name,
             renderer_name=renderer_name,

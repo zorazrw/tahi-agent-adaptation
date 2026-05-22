@@ -1,7 +1,7 @@
 """Tinker DatasetBuilders for weight-format session JSON.
 
-Replaces ``tinker_formatter.py`` — reads weight-format JSON directly,
-no reverse parsing via ``traj_to_chat()`` needed.
+Reads weight-format JSON directly; no reverse parsing via ``traj_to_chat()``
+needed.
 
 Three builders:
 - ``WeightDPODataBuilder``       → chosen/rejected Datum pairs for DPO

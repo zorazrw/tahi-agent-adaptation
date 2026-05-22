@@ -1,7 +1,6 @@
 """Offline OPD (On-Policy Distillation) training on weight-format session JSON.
 
-Unlike the on-policy ``tinker_opd.py`` which does student rollout + teacher
-scoring, this script operates on **historical trajectories**:
+This script operates on **historical trajectories**:
 
 1. Student datums: tokenized conversation (prompt + completion) with weights
    on assistant tokens.
@@ -379,8 +378,7 @@ async def _build_offline_topk_datums_async(
 ) -> tuple[list[tinker.Datum], dict[str, float]]:
     """Build cross_entropy datums with top-K teacher soft targets (offline version).
 
-    Adapted from ``tinker_opd.build_topk_distillation_datums`` for the offline
-    setting: teacher prompts are pre-built (stored in the dataset) and map
+    Teacher prompts are pre-built (stored in the dataset) and map
     1-to-1 with student datums (no group-index indirection needed).
 
     For each student datum:
