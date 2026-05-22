@@ -99,4 +99,62 @@ bash tinker_opd.sh
 # REINFORCE
 python export_reinforce_data.py out.json -o out_reinforce.json
 bash tinker_reinforce.sh
+
+# Score a redo session's final outputs against final verifiers from baseline export
+python score_redo_against_verifiers.py \
+  --verifiers-json out.json \
+  --outputs-json out_redo.json \
+  --task task2
+
+# Optional: print full request blocks (text + image metadata) before model call
+python score_redo_against_verifiers.py \
+  --verifiers-json out.json \
+  --outputs-json out_redo.json \
+  --task task2 \
+  --debug-prompts
 ```
+
+## Online RL Server
+
+`server.py` runs a small **FastAPI** proxy in front of the Tinker OpenAI-compatible API. It accepts chat completions (streaming or not), enqueues exported **sessions** for training, and periodically runs **DPO**, **OPD**, or **REINFORCE** updates depending on `mode` in the YAML.
+
+**Prerequisites**
+
+- Set `TINKER_API_KEY` in the environment (or `.env` under the root directory).
+- Install the dependencies: `pip install -r scripts/requirements.txt`
+
+**Configuration**
+
+Edit `config.yaml` (or any YAML with the same keys). Important fields:
+
+- `mode`: `dpo` | `opd` | `reinforce` — which trainer runs when enough sessions are queued.
+- `update_every_n_sessions`: enqueue this many sessions before triggering a training job.
+- `proxy_host` / `proxy_port`: where the HTTP server listens (default `localhost:8000`).
+
+**Run**
+
+From the root directory:
+
+```bash
+python3 scripts/server.py --config scripts/config.yaml
+```
+
+`GET /healthz` returns `{"ok": true}` when the process is up.
+
+**Frontend**
+
+Point your provider at this proxy (base URL and port from `proxy_host` / `proxy_port`). Example layout:
+
+![](assets/serverconfig.png)
+
+**Training**
+
+Training is triggered from the frontend with the **Train on this session** button in the lower-left corner. The frontend posts the current session to the server, and the server converts it into the format required by the configured training mode (`dpo`, `opd`, or `reinforce`).
+
+Alternatively, you can also upload a session directly to the `/session` endpoint using the same format as `out.json`. This triggers the same training flow as the frontend button, which can be useful for quick experiments or scripted runs.
+
+The session is queued for training. Once `update_every_n_sessions` sessions have been processed, the server runs one Tinker update unless `dry_run` is enabled. During the checkpoint swap, inference waits until the new checkpoint is ready.
+
+After training completes, the server broadcasts a `model-update` SSE event to the frontend. The frontend automatically points at the new checkpoint, so you normally do not need to switch models manually. If the new checkpoint is not visible in the model picker, click **Load models** to refresh the list.
+
+The server persists the model registry, latest model path, and latest model-update event to `state_path` (default: `scripts/state.json`). On restart, this state is loaded so trained checkpoint slugs and the active model pointer are restored.

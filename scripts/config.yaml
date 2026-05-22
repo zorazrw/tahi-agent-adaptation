@@ -1,0 +1,49 @@
+# -- Mode --
+mode: opd  # "dpo", "opd", or "reinforce"
+
+# -- Inference --
+temperature: 0.3
+logprobs: false
+
+# -- Update --
+update_every_n_sessions: 6
+
+# -- Training (shared) --
+lora_rank: 64
+dry_run: false
+learning_rate: 5e-5
+num_epochs: 8
+batch_size: 8
+lr_schedule: cosine
+max_steps: null
+
+# -- DPO-specific --
+dpo_beta: 0.1
+
+# -- OPD-specific --
+opd_max_tokens: 16384
+opd_temperature: 0.7
+opd_topk: 20
+opd_max_context_length: 32768
+# Direction of the KL the SDFT teacher distillation minimizes.
+#   "forward" = KL(P_teacher || P_student) -- mode-covering (top-K cross_entropy).
+#   "reverse" = KL(P_student || P_teacher) -- mode-seeking (REINFORCE estimator
+#               with per-token advantage = teacher_lp - student_lp, plus optional
+#               top-K monitoring metrics when opd_topk > 0).
+opd_kl_direction: forward
+
+# -- REINFORCE-specific --
+reward_alpha: 0.05
+initial_baseline: 0.0
+
+# -- Logging --
+wandb_project: null
+wandb_name: null
+
+# -- Proxy Server --
+proxy_host: localhost
+proxy_port: 8000
+state_path: scripts/state.json
+# When true, /v1/chat/completions requests are rejected with HTTP 503
+# while a training round (or checkpoint swap) is in progress.
+block_during_training: true

@@ -28,14 +28,23 @@ function logLine(message: string): void {
   console.error(`[context-export] ${message}`);
 }
 
+// const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions.py");
+const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions_backup.py");
+const INDUCE_SCRIPT_REL = "induce.py";
+
 function scriptsRootDir(): string | null {
   if (app.isPackaged) {
     const bundled = join(process.resourcesPath, "scripts");
-    if (existsSync(join(bundled, "export_task_sessions.py"))) return bundled;
+    if (existsSync(join(bundled, EXPORT_SCRIPT_REL)) && existsSync(join(bundled, INDUCE_SCRIPT_REL))) {
+      return bundled;
+    }
     return null;
   }
   const dev = join(app.getAppPath(), "scripts");
-  return existsSync(join(dev, "export_task_sessions.py")) ? dev : null;
+  if (existsSync(join(dev, EXPORT_SCRIPT_REL)) && existsSync(join(dev, INDUCE_SCRIPT_REL))) {
+    return dev;
+  }
+  return null;
 }
 
 function pythonExecutable(): string {
@@ -86,9 +95,9 @@ function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<v
 }
 
 /**
- * When every workflow step is done, export the full session once and run induce.py.
- * Queued after any prior per-step jobs so the DB holds the complete trajectory.
- * Full-session file uses the same `{ uuid, name, trajectory }` schema (full trajectory in one object).
+ * Export the current session from SQLite and run induce.py (memories + flat skills).
+ * Called after each completed workflow step (or verification continue) when auto-induction is on;
+ * jobs are queued per session so exports do not overlap.
  */
 export function runFullSessionExportAndExtract(sessionId: string): void {
   const root = scriptsRootDir();
@@ -96,8 +105,8 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
     logLine("Skip (full session): scripts/ not found.");
     return;
   }
-  const exportScript = join(root, "export_task_sessions.py");
-  const induceScript = join(root, "induce.py");
+  const exportScript = join(root, EXPORT_SCRIPT_REL);
+  const induceScript = join(root, INDUCE_SCRIPT_REL);
   if (!existsSync(exportScript) || !existsSync(induceScript)) {
     logLine(`Skip (full session): missing export or induce script under ${root}`);
     return;
@@ -127,6 +136,8 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
           sessionId,
           "--output",
           fullJsonPath,
+          "--format",
+          "weight",
         ],
         { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
       );

@@ -1,0 +1,8 @@
+pyyaml
+uvicorn
+openai
+fastapi
+tinker
+tinker-cookbook
+python-dotenv
+orjson
