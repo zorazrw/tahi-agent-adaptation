@@ -25,17 +25,14 @@ from contextlib import asynccontextmanager
 import tinker
 
 import session_export_common as s
-from opd.export_opd_data import _session as _opd_session
-from dpo.export_dpo_data import _session as _dpo_session
-from reinforce.export_reinforce_data import export_session as _reinforce_session
+from export_dpo_data import _session as _dpo_session
+from export_reinforce_data import _session as _reinforce_session
 
 from tinker_cookbook import renderers
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
-from opd.tinker_opd import Config as OPDConfig
-from dpo.tinker_dpo import Config as DPOConfig
-from reinforce.tinker_reinforce import Config as ReinforceConfig
-from formatter import WeightDPODataBuilder, OPDSDFTDataset, WeightReinforceDataBuilder
+from formatter import WeightDPODataBuilder, WeightReinforceDataBuilder
+from weight.train.run_opd import Config as ArtifactOPDConfig, OnlineOPDRolloutDataset
 
 from model_manager import ModelManager, ModelUpdate
 from trainer import DPOTrainer, OPDTrainer, REINFORCETrainer, Trainer, TrainingCheckpoint
@@ -64,6 +61,8 @@ class Config:
     batch_size: int = 1
     lr_schedule: str = "linear"
     max_steps: int | None = None
+    max_length: int | None = None
+    save_every: int = 20
 
     # -- DPO-specific --
     dpo_beta: float = 0.1
@@ -73,10 +72,14 @@ class Config:
     opd_temperature: float = 1.0
     opd_topk: int = 20
     opd_max_context_length: int = 32768
-    # KL direction for SDFT distillation. "forward" reproduces the existing
-    # top-K cross_entropy training (mode-covering); "reverse" switches to a
-    # REINFORCE-style mode-seeking estimator on the student rollout.
-    opd_kl_direction: Literal["forward", "reverse"] = "forward"
+    opd_pair_mode: Literal["first_last", "adjacent"] = "first_last"
+    opd_use_gt: bool = True
+    opd_use_student: bool = True
+    opd_rollout_attempts: int = 1
+    opd_teacher_temperature: float = 1.0
+    opd_log_rollout_samples: bool = True
+    opd_rollout_sample_log_chars: int = 4000
+    opd_artifact_only_rollout_instruction: bool = False
 
     # -- REINFORCE-specific --
     reward_alpha: float = 0.05
@@ -360,7 +363,9 @@ class Server:
                 if self.config.mode == "dpo":
                     data = await loop.run_in_executor(None, _dpo_session, session_data)
                 elif self.config.mode == "opd":
-                    data = await loop.run_in_executor(None, _opd_session, session_data)
+                    # OPD uses the weight-format session directly.  The frontend
+                    # export path already calls export_task_sessions --format weight.
+                    data = session_data
                 elif self.config.mode == "reinforce":
                     data = await loop.run_in_executor(None, _reinforce_session, session_data)
                 else:
@@ -368,9 +373,12 @@ class Server:
 
                 if data:
                     await self.training_queue.put(data)
+                    unit_count = len(data.get("task_units", [])) if isinstance(data, dict) else 0
+                    if unit_count == 0 and isinstance(data, dict):
+                        unit_count = len(data.get("learning_units", []))
                     log.info("Session processed: id=%s mode=%s units=%d training_queue=%d/%d",
                             session_data.get('uuid'), self.config.mode,
-                            len(data.get('learning_units', [])),
+                            unit_count,
                             self.training_queue.qsize(), self.config.update_every_n_sessions)
 
                 # trigger training if the queue has reached the update threshold
@@ -517,7 +525,18 @@ class Server:
         try:
             model_path = self.model_manager.model_path
             if model_path is None:
-                raise RuntimeError("No active model; cannot run a training round")
+                if self.config.preload_model:
+                    model_path = (
+                        self.model_manager.resolve_slug(self.config.preload_model)
+                        if self.model_manager.has_slug(self.config.preload_model)
+                        else self.config.preload_model
+                    )
+                    self.model_manager.set_active(model_path)
+                    log.info("No active model; using preload_model=%s for training", model_path)
+                else:
+                    raise RuntimeError(
+                        "No active model; send one chat completion or set preload_model before training"
+                    )
             model_name, renderer_name = self.model_manager.resolve_renderer(model_path)
             load_checkpoint_path = self._load_checkpoint_path_for_active_model()
 
@@ -549,6 +568,8 @@ class Server:
 
     def _prepare_dpo(self, train_path: str, model_name: str, renderer_name: str):
         # TODO
+        from tinker_dpo import Config as DPOConfig
+
         dataset_builder = WeightDPODataBuilder(
             train_path=train_path,
             common_config=ChatDatasetBuilderCommonConfig(
@@ -593,6 +614,8 @@ class Server:
 
     def _prepare_reinforce(self, train_path: str, model_name: str, renderer_name: str):
         # TODO
+        from tinker_reinforce import Config as ReinforceConfig
+
         dataset_builder = WeightReinforceDataBuilder(
             train_path=train_path,
             reward_alpha=self.config.reward_alpha,
@@ -636,30 +659,45 @@ class Server:
         return dataset, build
 
     def _prepare_opd(self, train_path: str, model_name: str, renderer_name: str):
-        """Build the OPD/SDFT dataset for this round and a trainer-builder closure."""
+        """Build the weight-format online artifact OPD dataset and trainer."""
         tokenizer = get_tokenizer(model_name)
         renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
-        dataset = OPDSDFTDataset.from_json(
-            data_path=train_path,
+        dataset = OnlineOPDRolloutDataset.from_weight_json(
+            path=train_path,
             renderer=renderer,
+            max_length=self.config.max_length,
             batch_size=self.config.batch_size,
+            pair_mode=self.config.opd_pair_mode,
+            use_gt=self.config.opd_use_gt,
+            use_student=self.config.opd_use_student,
+            artifact_only_instruction=self.config.opd_artifact_only_rollout_instruction,
         )
 
         log_path = f"logs/tinker_opd/{int(time.time())}"
-        trainer_config = OPDConfig(
+        trainer_config = ArtifactOPDConfig(
             model_name=model_name,
             renderer_name=renderer_name,
             log_path=log_path,
             lora_rank=self.config.lora_rank,
             learning_rate=self.config.learning_rate,
-            max_tokens=self.config.opd_max_tokens,
-            temperature=self.config.opd_temperature,
-            topk=self.config.opd_topk,
-            kl_direction=self.config.opd_kl_direction,
-            max_context_length=self.config.opd_max_context_length,
+            lr_schedule=self.config.lr_schedule,
+            num_epochs=self.config.num_epochs,
+            save_every=self.config.save_every,
             max_steps=self.config.max_steps,
             wandb_project=self.config.wandb_project,
             wandb_name=self.config.wandb_name,
+            pair_mode=self.config.opd_pair_mode,
+            use_gt=self.config.opd_use_gt,
+            use_student=self.config.opd_use_student,
+            topk=self.config.opd_topk,
+            teacher_temperature=self.config.opd_teacher_temperature,
+            online_rollout=True,
+            rollout_max_tokens=self.config.opd_max_tokens,
+            rollout_temperature=self.config.opd_temperature,
+            rollout_attempts=self.config.opd_rollout_attempts,
+            log_rollout_samples=self.config.opd_log_rollout_samples,
+            rollout_sample_log_chars=self.config.opd_rollout_sample_log_chars,
+            artifact_only_rollout_instruction=self.config.opd_artifact_only_rollout_instruction,
         )
 
         def build(
@@ -671,6 +709,7 @@ class Server:
                 config=trainer_config,
                 training_client=training_client,
                 service_client=service_client,
+                max_context_length=self.config.opd_max_context_length,
             )
 
         return dataset, build

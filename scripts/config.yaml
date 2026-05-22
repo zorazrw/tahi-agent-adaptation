@@ -16,6 +16,8 @@ num_epochs: 8
 batch_size: 8
 lr_schedule: cosine
 max_steps: null
+max_length: null
+save_every: 20
 
 # -- DPO-specific --
 dpo_beta: 0.1
@@ -25,12 +27,16 @@ opd_max_tokens: 16384
 opd_temperature: 0.7
 opd_topk: 20
 opd_max_context_length: 32768
-# Direction of the KL the SDFT teacher distillation minimizes.
-#   "forward" = KL(P_teacher || P_student) -- mode-covering (top-K cross_entropy).
-#   "reverse" = KL(P_student || P_teacher) -- mode-seeking (REINFORCE estimator
-#               with per-token advantage = teacher_lp - student_lp, plus optional
-#               top-K monitoring metrics when opd_topk > 0).
-opd_kl_direction: forward
+opd_pair_mode: first_last
+opd_use_gt: true
+opd_use_student: true
+opd_rollout_attempts: 1
+opd_teacher_temperature: 1.0
+opd_log_rollout_samples: true
+opd_rollout_sample_log_chars: 4000
+# Set true only for a prompt-control upper-bound experiment. Default false keeps
+# train-time rollout prompts matched to normal inference prompts.
+opd_artifact_only_rollout_instruction: false
 
 # -- REINFORCE-specific --
 reward_alpha: 0.05

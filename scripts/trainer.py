@@ -9,19 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from tinker_cookbook import checkpoint_utils, renderers
-from tinker_cookbook.display import colorize_example
-from tinker_cookbook.eval.evaluators import SamplingClientEvaluator
-from tinker_cookbook.rl.data_processing import (
-    assemble_training_data,
-    compute_advantages,
-)
-from tinker_cookbook.rl.metric_util import compute_trajectory_metrics
-from tinker_cookbook.rl.rollouts import do_group_rollout_and_filter_constant_reward
 from tinker_cookbook.rl.train import (
     save_checkpoint_and_get_sampling_client,
-    train_step,
 )
-from tinker_cookbook.rl.types import TrajectoryGroup
 from tinker_cookbook.supervised.train import run_evals
 from tinker_cookbook.supervised.types import SupervisedDataset
 from tinker_cookbook.tokenizer_utils import get_tokenizer
@@ -29,24 +19,39 @@ from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
-from reinforce.tinker_reinforce import (
-    Config as REINFORCEConfig,
-    make_reinforce_loss_fn,
-    print_example as _REINFORCE_print_example,
-    _save_baseline_state,
-)
-from dpo.tinker_dpo import (
-    Config as DPOConfig,
-    compute_dpo_loss,
-    print_example as _DPO_print_example,
-)
-from opd.tinker_opd import (
-    Config as OPDConfig,
-    SDFTBatchProvider,
-    build_reverse_kl_datums,
-    build_sdft_teacher_prompt,
-    build_topk_distillation_datums,
-    compute_sdft_advantages,
+try:
+    from tinker_reinforce import (
+        Config as REINFORCEConfig,
+        make_reinforce_loss_fn,
+        print_example as _REINFORCE_print_example,
+        _save_baseline_state,
+    )
+    REINFORCE_IMPORT_ERROR: Exception | None = None
+except Exception as e:  # noqa: BLE001
+    REINFORCEConfig = Any
+    make_reinforce_loss_fn = None
+    _REINFORCE_print_example = None
+    _save_baseline_state = None
+    REINFORCE_IMPORT_ERROR = e
+
+try:
+    from tinker_dpo import (
+        Config as DPOConfig,
+        compute_dpo_loss,
+        print_example as _DPO_print_example,
+    )
+    DPO_IMPORT_ERROR: Exception | None = None
+except Exception as e:  # noqa: BLE001
+    DPOConfig = Any
+    compute_dpo_loss = None
+    _DPO_print_example = None
+    DPO_IMPORT_ERROR = e
+from weight.train.run_opd import (
+    Config as ArtifactOPDConfig,
+    OnlineOPDRolloutDataset,
+    _build_offline_topk_datums_async,
+    _count_topk_supervision_tokens,
+    _sample_online_artifact_datums_async,
 )
 
 
@@ -112,6 +117,8 @@ class REINFORCETrainer(Trainer):
         training_client: tinker.TrainingClient,
         service_client: tinker.ServiceClient,
     ):
+        if REINFORCE_IMPORT_ERROR is not None:
+            raise RuntimeError("REINFORCE trainer dependencies failed to import") from REINFORCE_IMPORT_ERROR
         self.logger = logger
         self.total_steps = config.max_steps if config.max_steps is not None else 100_000  # TODO: fix the hardcoded value?
         self.config = config
@@ -332,6 +339,8 @@ class DPOTrainer(Trainer):
         service_client: tinker.ServiceClient,
         reference_client: tinker.SamplingClient,
     ):
+        if DPO_IMPORT_ERROR is not None:
+            raise RuntimeError("DPO trainer dependencies failed to import") from DPO_IMPORT_ERROR
         self.logger = logger
         self.total_steps = config.max_steps if config.max_steps is not None else 100_000  # TODO: fix the hardcoded value?
         self.config = config
@@ -630,39 +639,28 @@ class DPOTrainer(Trainer):
                 
 
 class OPDTrainer(Trainer):
-    """Long-lived online OPD / SDFT trainer.
+    """Long-lived online artifact OPD trainer for the server.
 
-    Mirrors the shape of :class:`DPOTrainer` and :class:`REINFORCETrainer`
-    but wraps the self-distillation loop from ``tinker_opd.main``:
-
-    * The student generates on-policy rollouts; a (static or periodically
-      synced) teacher sees the question *and* the golden answer and provides
-      either top-K soft targets (``cfg.topk > 0``) or per-token importance
-      weights (``cfg.topk == 0``).
-    * Training uses ``tinker_cookbook.rl.train.train_step`` rather than a
-      bespoke ``forward_backward_custom`` call, and the student
-      ``SamplingClient`` is refreshed after every optimizer step via
-      ``save_checkpoint_and_get_sampling_client``.
-    * There is no reference client, no running baseline, no rolling
-      checkpoint manager, and no LR schedule -- ``OPDConfig`` omits those
-      knobs deliberately.
-
-    Unlike the other trainers, ``dataset`` here is an :class:`SDFTBatchProvider`
-    whose ``get_batch`` returns ``(builders, questions, golden_answers)``.
+    This keeps Aspen's server-friendly packaging (persistent training client,
+    teacher client, student sampler refresh, step/round counters, final
+    checkpoint handoff), but replaces the prompt-only SDFT data path with the
+    weight-format artifact OPD path from ``weight.train.run_opd``.
     """
 
     def __init__(
         self,
         logger: logging.Logger,
-        config: OPDConfig,
+        config: ArtifactOPDConfig,
         training_client: tinker.TrainingClient,
         service_client: tinker.ServiceClient,
+        max_context_length: int = 32768,
     ):
         self.logger = logger
         self.total_steps = config.max_steps if config.max_steps is not None else 100_000  # TODO: fix the hardcoded value?
         self.config = config
         self.training_client = training_client
         self.service_client = service_client
+        self.max_context_length = max_context_length
         self.ml_logger = ml_log.setup_logging(
             log_dir=config.log_path,
             wandb_project=config.wandb_project,
@@ -672,29 +670,12 @@ class OPDTrainer(Trainer):
         self.log_path = config.log_path
         self.tokenizer = get_tokenizer(config.model_name)
 
-        assert config.renderer_name is not None, (
-            "OPDTrainer requires config.renderer_name (resolve before constructing the trainer)"
-        )
+        if config.topk <= 0:
+            raise ValueError("Server OPD currently supports artifact top-K mode only; set opd_topk > 0")
+        assert config.renderer_name is not None, "OPDTrainer requires config.renderer_name"
         self.renderer = renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
-        # Reasoning-aware renderers (Qwen3, Kimi K2, DeepSeek V3 thinking, ...)
-        # carry a per-instance ``strip_thinking_from_history`` flag controlling
-        # whether ``<think>...</think>`` survives in non-last assistant
-        # messages. Surface OPDConfig.strip_thinking_from_history here so the
-        # SDFT teacher can attend to the golden answer's chain-of-thought.
-        if hasattr(self.renderer, "strip_thinking_from_history"):
-            self.renderer.strip_thinking_from_history = config.strip_thinking_from_history
-            self.logger.info(
-                "Renderer %s: strip_thinking_from_history=%s",
-                type(self.renderer).__name__,
-                config.strip_thinking_from_history,
-            )
 
-        # Evaluators run every ``eval_every`` steps against the student
-        # sampling client (same semantics as tinker_opd.main).
-        self.evaluators: list[SamplingClientEvaluator] = [e() for e in config.evaluator_builders]
-
-        # Static teacher sampling client. May be re-pointed at a fresh
-        # snapshot of the student every ``teacher_sync_every`` steps.
+        # Static frozen teacher, matching the weight OPD script.
         self.teacher_client: tinker.SamplingClient = service_client.create_sampling_client(
             base_model=config.model_name
         )
@@ -732,44 +713,36 @@ class OPDTrainer(Trainer):
 
     async def do_update(
         self,
-        dataset: SDFTBatchProvider,
-        num_epochs: int,
+        dataset: OnlineOPDRolloutDataset,
+        num_epochs: int | None = None,
     ) -> TrainingCheckpoint:
-        """Run one pass over the incoming batches and save a checkpoint.
-
-        OPD's ``Config`` has no ``num_epochs`` -- each batch is consumed
-        exactly once per round (matching ``tinker_opd.main``). The per-round
-        sampler checkpoint follows the same naming conventions as DPO and
-        REINFORCE. The paired state checkpoint lets the server resume training.
-        """
+        """Run online artifact OPD over the freshly queued session batch."""
         await self._ensure_sampling_client()
 
         self.round_idx += 1
         n_batches = len(dataset)
+        epochs = num_epochs if num_epochs is not None else self.config.num_epochs
         round_start_step = self.step_idx
 
         self.logger.info(
-            "Round %d: step_idx=%d, n_batches=%d",
-            self.round_idx, self.step_idx, n_batches,
+            "Round %d: step_idx=%d, n_batches=%d, epochs=%d",
+            self.round_idx, self.step_idx, n_batches, epochs,
         )
-        
-        self.logger.info(f"Training for {num_epochs} epochs")
-        for epoch_idx in range(num_epochs):
-            # Reshuffle the inter-session row order each epoch so batches
-            # mix across sessions and successive epochs see a different
-            # curriculum. Same seed convention as DPOTrainer / REINFORCETrainer
-            # (``round_idx * 1000 + epoch_idx``) so a given (round, epoch)
-            # is reproducible. Guarded by hasattr to keep the SDFTBatchProvider
-            # protocol's set_epoch hook optional for external implementations.
-            if hasattr(dataset, "set_epoch"):
-                dataset.set_epoch(seed=self.round_idx * 1000 + epoch_idx)
+
+        for epoch_idx in range(epochs):
+            dataset.set_epoch(seed=self.round_idx * 1000 + epoch_idx)
             for batch_idx in range(n_batches):
                 if (
                     self.config.max_steps is not None
                     and self.step_idx >= self.config.max_steps
                 ):
                     break
-                await self.step(epoch_idx=epoch_idx, batch_idx=batch_idx, dataset=dataset)
+                await self.step(
+                    epoch_idx=epoch_idx,
+                    batch_idx=batch_idx,
+                    dataset=dataset,
+                    total_steps=max(1, self.total_steps),
+                )
 
         # Final sampler-ready checkpoint for the server to swap onto. Same
         # rationale as DPOTrainer: always produce one, even if max_steps
@@ -804,20 +777,10 @@ class OPDTrainer(Trainer):
         self,
         epoch_idx: int,
         batch_idx: int,
-        dataset: SDFTBatchProvider,
+        dataset: OnlineOPDRolloutDataset,
+        total_steps: int,
     ) -> None:
-        """Perform a single OPD / SDFT training update step.
-
-        Handles evaluation, on-policy rollouts with the current student
-        sampling client, teacher-conditioned distillation target construction
-        (top-K CE or importance-sampling advantages), the optimizer step via
-        ``train_step``, refreshing the student sampling client, optional
-        teacher hard-sync, and metric logging for one batch.
-
-        ``epoch_idx`` is carried for signature parity with the other
-        trainers; OPD always passes 0 because ``OPDConfig`` has no
-        ``num_epochs`` knob.
-        """
+        """Sample artifact completions, filter them, then train top-K OPD."""
         assert self.sampling_client is not None, (
             "step() invoked before _ensure_sampling_client(); call do_update() as the entry point"
         )
@@ -827,226 +790,133 @@ class OPDTrainer(Trainer):
             "round": self.round_idx,
             "epoch": epoch_idx,
             "progress/batch": batch_idx,
-            "optim/lr": self.config.learning_rate,
         }
 
         with trace.trace_iteration(step=step) as window:
-            # Evaluation against the *current* student sampling client
-            if self.config.eval_every > 0 and step % self.config.eval_every == 0:
-                async with trace.scope_span("run_evals"):
-                    for evaluator in self.evaluators:
-                        eval_metrics = await evaluator(self.sampling_client)
-                        metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
-
-            # Get batch: builders + questions + golden answers
-            builders_P, questions_P, golden_answers_P = dataset.get_batch(batch_idx)
-
-            # On-policy rollouts. Uses do_group_rollout so group_size > 1 and
-            # multi-turn envs work without extra code; with group_size=1 this
-            # collapses to a single sample_async per problem.
             async with trace.scope_span("sample"):
-                trajectory_groups_raw = await asyncio.gather(
-                    *[
-                        asyncio.create_task(
-                            do_group_rollout_and_filter_constant_reward(
-                                self.sampling_client,
-                                builder,
-                                temperature=self.config.temperature,
-                                max_tokens=self.config.max_tokens,
-                                do_remove_constant_reward_groups=False,
-                            ),
-                            name=f"sample_task_{i}",
-                        )
-                        for i, builder in enumerate(builders_P)
-                    ],
+                rows = dataset.get_batch(batch_idx)
+                student_datums, teacher_prompt_inputs, rollout_metrics = await _sample_online_artifact_datums_async(
+                    rows,
+                    self.renderer,
+                    self.sampling_client,
+                    max_tokens=self.config.rollout_max_tokens,
+                    temperature=self.config.rollout_temperature,
+                    attempts=self.config.rollout_attempts,
+                    max_length=dataset._max_length,
+                    step=step,
+                    sample_log_path=(
+                        Path(self.config.log_path) / "online_rollout_samples.jsonl"
+                        if self.config.log_rollout_samples else None
+                    ),
+                    sample_log_chars=self.config.rollout_sample_log_chars,
                 )
-            trajectory_groups_P: list[TrajectoryGroup] = [
-                tg for tg in trajectory_groups_raw if tg is not None
-            ]
+            metrics.update(rollout_metrics)
 
-            taglist_P = [b.logging_tags() for b in builders_P]
-            metrics.update(compute_trajectory_metrics(trajectory_groups_P, taglist_P))
-
-            # Advantages start as 0 here (rewards are all 0 for pure SDFT);
-            # they'll be overwritten by the teacher-based target builder below.
-            async with trace.scope_span("assemble_training_data"):
-                advantages_P = compute_advantages(trajectory_groups_P)
-                data_D, metadata_D = assemble_training_data(trajectory_groups_P, advantages_P)
-
-            # Teacher prompts: one per problem, conditioned on the golden answer.
-            teacher_prompts_P = [
-                build_sdft_teacher_prompt(
-                    question=question,
-                    golden_answer=golden_answer,
-                    renderer=self.renderer,
-                    system_prompt=self.config.system_prompt,
-                    demo_template=self.config.demo_template,
-                    chat_redo_message=self.config.chat_redo_message,
+            if not student_datums:
+                learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
+                    lr_schedule=self.config.lr_schedule,
+                    step=step,
+                    total_steps=total_steps,
                 )
-                for question, golden_answer in zip(questions_P, golden_answers_P)
-            ]
-            
-            # Log rollouts and teacher prompts 
-            for idx, datum in enumerate(data_D):
-                self.logger.info(f"Example {idx}: ")
-                self.logger.info("Student rollout: ")
-                self.logger.info(colorize_example(datum, self.tokenizer, key="mask"))
-                self.logger.info("Teacher prompt: ")
-                teacher_prompt = self.renderer.tokenizer.decode(teacher_prompts_P[idx].to_ints())
-                self.logger.info(teacher_prompt)
-
-            # Optional: free-form teacher rollout for debugging. The teacher
-            # samples from ``teacher_prompts_P`` (which already includes the
-            # golden answer + redo) so we can eyeball whether the teacher's
-            # "ideal" generation actually matches what we want the student to
-            # learn. Gated behind a config flag + cadence to bound extra cost.
-            do_teacher_rollout = (
-                getattr(self.config, "debug_teacher_rollout", False)
-                and self.teacher_client is not None
-                and len(teacher_prompts_P) > 0
-                and (
-                    getattr(self.config, "debug_teacher_rollout_every", 0) <= 0
-                    or step % self.config.debug_teacher_rollout_every == 0
+                metrics.update(
+                    {
+                        "opd_online/no_valid_batch": 1.0,
+                        "learning_rate": learning_rate,
+                        "progress": step / max(total_steps, 1),
+                    }
                 )
+                self.ml_logger.log_metrics(metrics=metrics, step=step)
+                self.logger.warning(
+                    "Skipping OPD step %d: no valid artifact samples (filter_rate=%.3f)",
+                    step,
+                    rollout_metrics.get("opd_online/filter_rate", 0.0),
+                )
+                self.step_idx += 1
+                return
+
+            async with trace.scope_span("build_topk_distillation_datums"):
+                topk_datums, topk_metrics = await _build_offline_topk_datums_async(
+                    student_datums,
+                    teacher_prompt_inputs,
+                    self.teacher_client,
+                    topk=self.config.topk,
+                    max_context_length=self.max_context_length,
+                    vocab_size=len(self.tokenizer),
+                    teacher_temperature=self.config.teacher_temperature,
+                )
+            metrics.update(topk_metrics)
+
+            if self.config.save_every > 0 and step % self.config.save_every == 0 and step > 0:
+                save_result = await checkpoint_utils.save_checkpoint_async(
+                    training_client=self.training_client,
+                    name=f"{step:06d}",
+                    log_path=self.log_path,
+                    kind="both",
+                    loop_state={"epoch": epoch_idx, "batch": batch_idx},
+                    ttl_seconds=self.config.ttl_seconds,
+                )
+                if "state_path" in save_result:
+                    metrics["state_path"] = save_result["state_path"]
+
+            learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
+                lr_schedule=self.config.lr_schedule,
+                step=step,
+                total_steps=total_steps,
             )
-            if do_teacher_rollout:
-                async with trace.scope_span("debug_teacher_sample"):
-                    teacher_sampling_params = tinker.SamplingParams(
-                        max_tokens=self.config.max_tokens,
-                        temperature=self.config.temperature,
-                        stop=self.renderer.get_stop_sequences(),
-                    )
-                    teacher_samples_P = await asyncio.gather(
-                        *[
-                            self.teacher_client.sample_async(
-                                prompt=tp,
-                                num_samples=1,
-                                sampling_params=teacher_sampling_params,
-                            )
-                            for tp in teacher_prompts_P
-                        ]
-                    )
-                for idx, resp in enumerate(teacher_samples_P):
-                    sequences = getattr(resp, "sequences", None) or []
-                    if not sequences:
-                        self.logger.info(f"Teacher rollout (Example {idx}): <empty>")
-                        continue
-                    out_tokens = list(getattr(sequences[0], "tokens", []) or [])
-                    stop_reason = getattr(sequences[0], "stop_reason", None)
-                    out_text = self.renderer.tokenizer.decode(out_tokens)
-                    self.logger.info(
-                        f"Teacher rollout (Example {idx}, "
-                        f"n_tokens={len(out_tokens)}, stop={stop_reason}): "
-                    )
-                    self.logger.info("Teacher rollout: ")
-                    self.logger.info(out_text)
+            adam_params = tinker.AdamParams(
+                learning_rate=learning_rate,
+                beta1=self.config.adam_beta1,
+                beta2=self.config.adam_beta2,
+                eps=self.config.adam_eps,
+            )
 
-            if self.config.kl_direction == "forward":
-                # Forward KL: KL(P_teacher || P_student) -- mode-covering.
-                if self.config.topk > 0:
-                    # Top-K CE distillation (the validated path).
-                    async with trace.scope_span("build_topk_distillation_datums"):
-                        topk_datums, topk_metrics = await build_topk_distillation_datums(
-                            data_D,
-                            metadata_D,
-                            self.teacher_client,
-                            teacher_prompts_P,
-                            student_client=self.sampling_client,
-                            topk=self.config.topk,
-                            max_context_length=self.config.max_context_length,
-                            vocab_size=len(self.tokenizer),
-                        )
-                    metrics.update(topk_metrics)
-
-                    async with trace.scope_span("train"):
-                        training_logprobs_D = await train_step(
-                            data_D=topk_datums,
-                            training_client=self.training_client,
-                            learning_rate=self.config.learning_rate,
-                            num_substeps=self.config.num_substeps,
-                            loss_fn="cross_entropy",
-                            metrics=metrics,
-                        )
-                else:
-                    # Importance-sampling fallback (topk=0): compute per-token
-                    # teacher_lp - student_lp advantages, then train with the
-                    # configured loss.
-                    async with trace.scope_span("compute_sdft_advantages"):
-                        is_metrics = await compute_sdft_advantages(
-                            data_D,
-                            metadata_D,
-                            self.teacher_client,
-                            teacher_prompts_P,
-                            max_context_length=self.config.max_context_length,
-                        )
-                    metrics.update(is_metrics)
-
-                    async with trace.scope_span("train"):
-                        await train_step(
-                            data_D=data_D,
-                            training_client=self.training_client,
-                            learning_rate=self.config.learning_rate,
-                            num_substeps=self.config.num_substeps,
-                            loss_fn=self.config.loss_fn,
-                            metrics=metrics,
-                        )
-
-            elif self.config.kl_direction == "reverse":
-                # Reverse KL: KL(P_student || P_teacher) -- mode-seeking.
-                # REINFORCE-style estimator with per-token advantage
-                # log p_teacher(x_t) - log p_student(x_t) at student-sampled
-                # tokens. When self.config.topk > 0, additional teacher AND
-                # student top-K queries are issued for monitoring metrics
-                # (top-K forward/reverse KL, overlap, entropy gap) -- those
-                # never affect the gradient.
-                async with trace.scope_span("build_reverse_kl_datums"):
-                    rkl_datums, rkl_metrics = await build_reverse_kl_datums(
-                        data_D,
-                        metadata_D,
-                        self.teacher_client,
-                        teacher_prompts_P,
-                        student_client=self.sampling_client,
-                        topk=self.config.topk,
-                        max_context_length=self.config.max_context_length,
-                        vocab_size=len(self.tokenizer),
-                    )
-                metrics.update(rkl_metrics)
-
-                async with trace.scope_span("train"):
-                    await train_step(
-                        data_D=rkl_datums,
-                        training_client=self.training_client,
-                        learning_rate=self.config.learning_rate,
-                        num_substeps=self.config.num_substeps,
-                        loss_fn="importance_sampling",
-                        metrics=metrics,
-                    )
-
-            else:
-                raise ValueError(
-                    f"Unknown OPD kl_direction: {self.config.kl_direction!r} "
-                    f"(expected 'forward' or 'reverse')"
+            async with trace.scope_span("train"):
+                fb_future = await self.training_client.forward_backward_async(
+                    topk_datums,
+                    loss_fn="cross_entropy",
                 )
+                backward_result = await fb_future.result_async()
+                optim_future = await self.training_client.optim_step_async(adam_params)
+                await optim_future.result_async()
+
+            result_metrics = backward_result.metrics
+            if not isinstance(result_metrics, dict):
+                try:
+                    result_metrics = dict(result_metrics.items())
+                except Exception:
+                    result_metrics = {}
+
+            loss_sum = float(result_metrics.get("loss:sum", result_metrics.get("loss", 0.0)))
+            batch_tokens = _count_topk_supervision_tokens(topk_datums, topk=self.config.topk)
+            per_token_ce = loss_sum / float(batch_tokens)
+            metrics.update(
+                {
+                    "opd_loss": per_token_ce,
+                    "opd/loss_sum": loss_sum,
+                    "opd/batch_completion_tokens": float(batch_tokens),
+                    "opd/per_token_ce": per_token_ce,
+                    "num_examples": len(topk_datums),
+                    "learning_rate": learning_rate,
+                    "progress": step / max(total_steps, 1),
+                    **result_metrics,
+                }
+            )
 
             # Refresh the student sampling client onto the just-updated weights.
-            # save_checkpoint_and_get_sampling_client handles save_every internally.
-            self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-                self.training_client, step + 1, self.config.log_path, self.config.save_every
+            self.sampling_client, sampler_metrics = await save_checkpoint_and_get_sampling_client(
+                self.training_client,
+                step + 1,
+                self.config.log_path,
+                self.config.save_every,
             )
-
-            # Optional teacher hard-sync (approximates EMA at a coarse cadence).
-            if self.config.teacher_sync_every and (step + 1) % self.config.teacher_sync_every == 0:
-                sync_name = f"teacher_sync_{step + 1}"
-                sync_future = await self.training_client.save_weights_for_sampler_async(sync_name)
-                sync_result = await sync_future.result_async()
-                self.teacher_client = self.service_client.create_sampling_client(
-                    base_model=self.config.model_name, model_path=sync_result.path
-                )
-                self.logger.info(f"Synced teacher weights at step {step + 1}")
-
-            metrics.update(
-                num_trajectory_groups=len(trajectory_groups_P),
-                progress=step / self.total_steps,
+            metrics.update(sampler_metrics)
+            self.logger.info(
+                "Online OPD step %d: valid=%d/%d filter_rate=%.3f loss=%.4f",
+                step,
+                int(rollout_metrics.get("opd_online/valid_examples", 0.0)),
+                int(rollout_metrics.get("opd_online/batch_examples", 0.0)),
+                rollout_metrics.get("opd_online/filter_rate", 0.0),
+                per_token_ce,
             )
 
         # Log timing metrics from trace_iteration window.
