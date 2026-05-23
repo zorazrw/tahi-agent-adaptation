@@ -9,14 +9,11 @@ export type ExpertiseTaskCategory =
   | "data-viz"
   | "data-viz-html";
 
-// Task JSON shape varies by category under expertise-examples/.
+/** Fields shared by every expertise-examples task JSON entry. */
 export interface ExpertiseTaskInstance {
   id: number;
   type: string;
   instruction: string;
-  human_output?: string | null;
-  title?: string;
-  figure?: string;
 }
 
 export const EXPERTISE_TASK_CATEGORIES: ReadonlyArray<{
@@ -29,11 +26,17 @@ export const EXPERTISE_TASK_CATEGORIES: ReadonlyArray<{
   { key: "data-viz-html", label: "Data Viz HTML" },
 ] as const;
 
+function toExpertiseTasks(
+  raw: ReadonlyArray<{ id: number; type: string; instruction: string }>,
+): ExpertiseTaskInstance[] {
+  return raw.map(({ id, type, instruction }) => ({ id, type, instruction }));
+}
+
 const TASKS_BY_CATEGORY: Record<ExpertiseTaskCategory, ExpertiseTaskInstance[]> = {
-  "abstract-writing": abstractWritingTasks as ExpertiseTaskInstance[],
-  "literature-writing": literatureWritingTasks as ExpertiseTaskInstance[],
-  "data-viz": dataVizTasks as ExpertiseTaskInstance[],
-  "data-viz-html": dataVizHtmlTasks as ExpertiseTaskInstance[],
+  "abstract-writing": toExpertiseTasks(abstractWritingTasks),
+  "literature-writing": toExpertiseTasks(literatureWritingTasks),
+  "data-viz": toExpertiseTasks(dataVizTasks),
+  "data-viz-html": toExpertiseTasks(dataVizHtmlTasks),
 };
 
 export function getExpertiseTasks(category: ExpertiseTaskCategory): ExpertiseTaskInstance[] {
