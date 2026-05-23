@@ -9,11 +9,14 @@ export type ExpertiseTaskCategory =
   | "data-viz"
   | "data-viz-html";
 
+// Task JSON shape varies by category under expertise-examples/.
 export interface ExpertiseTaskInstance {
   id: number;
   type: string;
   instruction: string;
-  human_output: string | null;
+  human_output?: string | null;
+  title?: string;
+  figure?: string;
 }
 
 export const EXPERTISE_TASK_CATEGORIES: ReadonlyArray<{
