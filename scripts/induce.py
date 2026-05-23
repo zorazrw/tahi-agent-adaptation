@@ -1,7 +1,8 @@
 """
 Extract memories and skills from session JSON (e.g. ``out.json``).
 
-Accepts export shape ``{ uuid, name, trajectory }``, a JSON array of those objects, or legacy ``{ sessions: [...] }``.
+Accepts export shape ``{ uuid, name, trajectory }``, weight-based ``{ uuid, name, task_units, ... }``
+(a JSON array of those objects), or legacy ``{ sessions: [...] }``.
 Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 
 Requires: anthropic, python-dotenv. API key resolution matches the Electron app (see below).
@@ -151,7 +152,15 @@ def anthropic_user_text(
     if system:
         kwargs["system"] = system
     msg = client.messages.create(**kwargs)
-    return "".join(b.text for b in msg.content if b.type == "text")
+    parts: list[str] = []
+    for b in getattr(msg, "content", None) or []:
+        btype = getattr(b, "type", None)
+        if btype == "text":
+            t = getattr(b, "text", None)
+            if t:
+                parts.append(str(t))
+        # Extended-thinking models may emit thinking blocks; ignore those for extraction.
+    return "".join(parts)
 
 
 def _session_blobs(data: Any) -> list[dict[str, Any]]:
@@ -168,12 +177,46 @@ def _session_blobs(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _normalized_trajectory(blob: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Flat trajectory with per-step ``actor`` for induce.
+
+    Legacy exports use a top-level ``trajectory`` list. Weight-based exports use ``task_units``;
+    each unit has ``actor`` and a ``trajectory`` of steps (without per-step actor).
+    """
+    raw = blob.get("trajectory")
+    if isinstance(raw, list) and raw:
+        return [x for x in raw if isinstance(x, dict)]
+
+    units = blob.get("task_units")
+    if not isinstance(units, list) or not units:
+        return []
+
+    merged: list[dict[str, Any]] = []
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        actor = str(u.get("actor") or "user")
+        traj = u.get("trajectory")
+        if not isinstance(traj, list):
+            continue
+        for step in traj:
+            if not isinstance(step, dict):
+                continue
+            row = dict(step)
+            row.setdefault("actor", actor)
+            merged.append(row)
+    return merged
+
+
 def build_context_inputs(data: Any) -> list[dict[str, Any]]:
-    """Rows: ``name``, ``actions`` (trajectory action strings), ``source`` (uuid or session_i)."""
+    """Rows: ``name``, ``task`` (long instruction when present), ``actions``, ``source``."""
     rows: list[dict[str, Any]] = []
     for i, blob in enumerate(_session_blobs(data)):
-        raw_traj = blob.get("trajectory")
-        if not isinstance(raw_traj, list):
+        if not isinstance(blob, dict):
+            continue
+        raw_traj = _normalized_trajectory(blob)
+        if not raw_traj:
             continue
         if not any(isinstance(s, dict) and s.get("actor") == "agent" for s in raw_traj):
             continue
@@ -186,11 +229,19 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
         ]
         sid = blob.get("uuid")
         source = sid.strip() if isinstance(sid, str) and sid.strip() else f"session_{i}"
-        rows.append({"name": name_str, "actions": actions, "source": source})
+        task_blob = blob.get("task")
+        task_str = task_blob.strip() if isinstance(task_blob, str) else ""
+        rows.append({"name": name_str, "task": task_str, "actions": actions, "source": source})
     return rows
 
-MEMORY_SYSTEM = """From the task and numbered action log, write up to 6 facts or user preferences that should remembered later.
-Each line: {text} (one sentence; no long paths or raw dumps). If nothing fits: NONE"""
+
+MEMORY_SYSTEM = """From the task description and the numbered action log, write up to 6 short facts or user preferences worth remembering later.
+
+Output rules:
+- One fact per line. Plain text only (no markdown headers like # or ##).
+- Each line is a single sentence (no numbered lists in the sense of "1." as list markers—use plain sentences).
+- Optional prefixes "Fact:" or "Preference:" on a line are OK.
+- If nothing is worth saving, output exactly the single word NONE (nothing else)."""
 
 SKILL_SYSTEM = """From the task and numbered log, describe the workflow the agent used: ordered steps, generalized (no long paths).
 Reply with:
@@ -205,32 +256,76 @@ def _llm_text(client, model: str, system: str, user: str, max_tokens: int = 1024
     return anthropic_user_text(client, model, user, system=system, max_tokens=max_tokens, temperature=0.0)
 
 
+def _strip_outer_fences(text: str) -> str:
+    t = text.strip()
+    if not t.startswith("```"):
+        return t
+    first_nl = t.find("\n")
+    if first_nl != -1:
+        t = t[first_nl + 1 :]
+    if t.rstrip().endswith("```"):
+        t = t.rstrip()[:-3].rstrip()
+    return t
+
+
+_NUM_BULLET_RE = re.compile(r"^\s*(?:[-*+•]|\d+[\.)])\s+")
+
+
+def _normalize_memory_line(line: str) -> str | None:
+    s = line.strip()
+    if not s:
+        return None
+    if s.upper().rstrip(".") in ("NONE", "N/A", "NA"):
+        return None
+    if s.startswith("##") or re.match(r"^#\s+\S", s):
+        return None
+    low = s.lower()
+    if (
+        low.startswith(("here are the", "below are the", "the following ", "summary:", "memories:", "facts:"))
+        and len(s) < 140
+    ):
+        return None
+    while _NUM_BULLET_RE.match(s):
+        s = _NUM_BULLET_RE.sub("", s, count=1).strip()
+    low = s.lower()
+    if low.startswith("fact:"):
+        s = s[5:].strip()
+    elif low.startswith("preference:"):
+        s = s[11:].strip()
+    s = " ".join(s.split())
+    if not s or s.upper().rstrip(".") == "NONE":
+        return None
+    if s.startswith("##"):
+        return None
+    return s
+
+
 def extract_memories(client, model: str, task: str, log: str) -> list[str]:
-    user = f"Task:\n{task}\n\nLog:\n{log or '(empty)'}\n"
+    task_block = (task or "").strip() or "(no title)"
+    user = f"Task / session title:\n{task_block}\n\nLog:\n{log or '(empty)'}\n"
     try:
         raw = _llm_text(client, model, MEMORY_SYSTEM, user)
     except Exception:
         logger.exception("Memory LLM failed")
         return []
+    raw = _strip_outer_fences(raw)
     out: list[str] = []
-    for line in raw.splitlines():
-        s = line.strip()
-        if not s or s.upper() == "NONE":
-            continue
-        low = s.lower()
-        if low.startswith("fact:"):
-            s = s[5:].strip()
-        elif low.startswith("preference:"):
-            s = s[11:].strip()
-        s = " ".join(s.split())
-        if s and not s.startswith("##"):
+    for line in raw.replace("\r\n", "\n").split("\n"):
+        s = _normalize_memory_line(line)
+        if s:
             out.append(s)
-    return out
+    if not out and raw.strip() and raw.strip().upper() not in ("NONE",):
+        logger.warning(
+            "Memory extraction produced 0 lines after parsing (model returned non-empty text). Preview: %s",
+            raw.strip()[:500],
+        )
+    return out[:6]
 
 
 def extract_skill(client, model: str, task: str, log: str) -> tuple[str, list[str]] | None:
+    task_block = (task or "").strip() or "(no title)"
     user = (
-        f"Task:\n{task}\n\nLog:\n{log or '(empty)'}\n\n"
+        f"Task:\n{task_block}\n\nLog:\n{log or '(empty)'}\n\n"
         "Use Title: plus numbered steps only.\n"
     )
     try:
@@ -238,7 +333,7 @@ def extract_skill(client, model: str, task: str, log: str) -> tuple[str, list[st
     except Exception:
         logger.exception("Skill LLM failed")
         return None
-    blob = raw.strip()
+    blob = _strip_outer_fences(raw.strip())
     if not blob or blob.upper() == "NONE":
         return None
     title, steps = "", []
@@ -315,6 +410,9 @@ def main() -> None:
     for row in inputs:
         name = row["name"]
         src = row["source"]
+        task_for_llm = (row.get("task") or "").strip() if isinstance(row.get("task"), str) else ""
+        if not task_for_llm:
+            task_for_llm = (name or "").strip()
         actions = row.get("actions") or []
         log = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
         base = _slug(name, src)
@@ -322,13 +420,13 @@ def main() -> None:
         seen[base] = n + 1
         stem = base if n == 0 else f"{base}-{''.join(c for c in src if c.isalnum())[:8] or n}"
 
-        memories = extract_memories(client, model, name, log)
+        memories = extract_memories(client, model, task_for_llm, log)
         (mem_dir / f"{stem}.md").write_text(
             ("\n\n".join(memories) + "\n") if memories else "",
             encoding="utf-8",
         )
 
-        skill = extract_skill(client, model, name, log)
+        skill = extract_skill(client, model, task_for_llm, log)
         if skill:
             t, steps = skill
             body = t + "\n" + "\n".join(f"{i + 1}. {st}" for i, st in enumerate(steps)) + "\n"

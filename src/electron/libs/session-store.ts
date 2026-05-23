@@ -8,6 +8,7 @@ import type {
   WorkflowNode,
 } from "../types.js";
 import { migrateFromFlatSteps } from "./workflow-tree-utils.js";
+import type { ExportEnvironmentSnapshot } from "./message-state-snapshot.js";
 
 // ── Zod schemas for JSON columns ──────────────────────────────────────
 
@@ -333,17 +334,14 @@ export class SessionStore {
   }
 
   replaceMessages(sessionId: string, messages: StreamMessage[]): void {
-    /** Rows with these `data.type` values are written after each agent run (verifier / human) and must not be wiped. */
-    const notPreserved = `coalesce(json_extract(data, '$.type'), '') not in ('verifier_label', 'edit_verifier')`;
-
     const tx = this.db.transaction((items: StreamMessage[]) => {
-      const canonicalRows = this.db.prepare(
-        `SELECT data, state_snapshot FROM messages WHERE session_id = ? AND ${notPreserved} ORDER BY rowid`
+      const oldRows = this.db.prepare(
+        `SELECT data, state_snapshot FROM messages WHERE session_id = ? ORDER BY rowid`
       ).all(sessionId) as { data: string; state_snapshot: string | null }[];
 
-      // Collect snapshots per type in chronological order (canonical rows only)
+      // Collect snapshots per type in chronological order
       const snapshotsByType = new Map<string, string[]>();
-      for (const row of canonicalRows) {
+      for (const row of oldRows) {
         if (!row.state_snapshot) continue;
         try {
           const parsed = JSON.parse(row.data) as { type?: string };
@@ -373,7 +371,7 @@ export class SessionStore {
         }
       }
 
-      this.db.prepare(`delete from messages where session_id = ? AND ${notPreserved}`).run(sessionId);
+      this.db.prepare(`delete from messages where session_id = ?`).run(sessionId);
 
       const insert = this.db.prepare(
         `insert into messages (id, session_id, data, created_at, state_snapshot) values (?, ?, ?, ?, ?)`
@@ -609,6 +607,29 @@ export class SessionStore {
       .prepare(`SELECT data FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`)
       .all(sessionId) as Array<Record<string, unknown>>)
       .map((row) => JSON.parse(String(row.data)) as StreamMessage);
+  }
+
+  /** Messages with optional per-row environment snapshots (chronological). */
+  getMessageRowsWithSnapshots(sessionId: string): Array<{
+    message: StreamMessage;
+    snapshot: ExportEnvironmentSnapshot | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT data, state_snapshot FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`
+      )
+      .all(sessionId) as Array<{ data: string; state_snapshot: string | null }>;
+
+    return rows.map((row) => {
+      const message = JSON.parse(row.data) as StreamMessage;
+      if (!row.state_snapshot) return { message, snapshot: null };
+      try {
+        const snapshot = JSON.parse(row.state_snapshot) as ExportEnvironmentSnapshot;
+        return { message, snapshot };
+      } catch {
+        return { message, snapshot: null };
+      }
+    });
   }
 
   close(): void {

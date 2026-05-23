@@ -47,6 +47,21 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
   const [isCopying, setIsCopying] = useState(false);
   const dragCounterRef = useRef(0);
 
+  // Resize textarea when prompt is set externally (e.g. expertise example picker)
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const scrollHeight = el.scrollHeight;
+    if (scrollHeight > MAX_HEIGHT) {
+      el.style.height = `${MAX_HEIGHT}px`;
+      el.style.overflowY = "auto";
+    } else {
+      el.style.height = `${Math.max(scrollHeight, LINE_HEIGHT * 2)}px`;
+      el.style.overflowY = "hidden";
+    }
+  }, [prompt]);
+
   // Prevent Electron from navigating to dropped files (must be global)
   useEffect(() => {
     const preventNav = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); };

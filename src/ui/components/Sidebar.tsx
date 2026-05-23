@@ -1,9 +1,27 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/ui/components/ui/combobox";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/ui/components/ui/tooltip";
 import type { ClientEvent, WorkflowNode } from "../types";
 import { useAppStore } from "../store/useAppStore";
+import { ExpertiseExamplePicker } from "./ExpertiseExamplePicker";
+
+const SIDEBAR_WIDTH_STORAGE_KEY = "layout.sidebarWidth";
+const VERIFIERS_HEIGHT_STORAGE_KEY = "layout.verifiersHeight";
+const DEFAULT_SIDEBAR_WIDTH = 280;
+const MIN_SIDEBAR_WIDTH = 200;
+const MAX_SIDEBAR_WIDTH = 480;
+const DEFAULT_VERIFIERS_HEIGHT = 200;
+const MIN_VERIFIERS_HEIGHT = 96;
+const MAX_VERIFIERS_HEIGHT = 520;
+
+function readStoredLayoutNumber(key: string, fallback: number): number {
+  if (typeof window === "undefined") return fallback;
+  const raw = localStorage.getItem(key);
+  if (raw == null) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 interface SidebarProps {
   connected: boolean;
@@ -403,6 +421,78 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const [newOutputFileDraft, setNewOutputFileDraft] = useState("");
   const [addingOutputFile, setAddingOutputFile] = useState(false);
   const skipNextOutputFileBlurSave = useRef(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    readStoredLayoutNumber(SIDEBAR_WIDTH_STORAGE_KEY, DEFAULT_SIDEBAR_WIDTH)
+  );
+  const [verifiersHeight, setVerifiersHeight] = useState(() =>
+    readStoredLayoutNumber(VERIFIERS_HEIGHT_STORAGE_KEY, DEFAULT_VERIFIERS_HEIGHT)
+  );
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const verifiersHeightRef = useRef(verifiersHeight);
+  sidebarWidthRef.current = sidebarWidth;
+  verifiersHeightRef.current = verifiersHeight;
+
+  useLayoutEffect(() => {
+    const clamped = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, sidebarWidth));
+    document.documentElement.style.setProperty("--sidebar-width", `${clamped}px`);
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(clamped));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const clamped = Math.min(
+      MAX_VERIFIERS_HEIGHT,
+      Math.max(MIN_VERIFIERS_HEIGHT, verifiersHeight)
+    );
+    localStorage.setItem(VERIFIERS_HEIGHT_STORAGE_KEY, String(clamped));
+  }, [verifiersHeight]);
+
+  const handleSidebarResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidthRef.current;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const next = Math.min(
+        MAX_SIDEBAR_WIDTH,
+        Math.max(MIN_SIDEBAR_WIDTH, startWidth + (ev.clientX - startX))
+      );
+      setSidebarWidth(next);
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, []);
+
+  const handleVerifiersResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = verifiersHeightRef.current;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const next = Math.min(
+        MAX_VERIFIERS_HEIGHT,
+        Math.max(MIN_VERIFIERS_HEIGHT, startHeight + (startY - ev.clientY))
+      );
+      setVerifiersHeight(next);
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, []);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const workflowTree = activeSession?.workflowTree ?? [];
@@ -726,9 +816,24 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     return list;
   }, [sessions]);
 
+  const clampedVerifiersHeight = Math.min(
+    MAX_VERIFIERS_HEIGHT,
+    Math.max(MIN_VERIFIERS_HEIGHT, verifiersHeight)
+  );
+
   return (
     <aside className="fixed inset-y-0 left-0 flex h-full w-[var(--sidebar-width)] flex-col border-r border-ink-900/5 bg-[#FAF9F6] px-3 pb-3 pt-12">
       <div className="absolute top-0 left-0 right-0 h-12" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        onMouseDown={handleSidebarResizeMouseDown}
+        className="absolute top-0 right-0 bottom-0 z-20 w-2 cursor-col-resize group flex items-center justify-center hover:bg-primary/5"
+        style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+      >
+        <div className="h-12 w-[3px] rounded-full bg-ink-900/15 opacity-0 group-hover:opacity-100 group-active:bg-primary/40 transition-opacity duration-150" />
+      </div>
 
       {/* New Task + Settings */}
       <div className="flex shrink-0 gap-2 mt-4">
@@ -789,6 +894,12 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
           </div>
         )}
       </div>
+
+      {!activeSessionId && (
+        <div className="shrink-0 pt-2 pb-2">
+          <ExpertiseExamplePicker />
+        </div>
+      )}
 
       {/* Progress: tree + slider + run button — only when a task is selected (hidden on new-task home) */}
       {activeSessionId && (
@@ -1052,7 +1163,20 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
       {/* Verifiers (compact) */}
       {selectedNode && (
-        <div className="shrink-0 max-h-[200px] flex flex-col overflow-hidden border-t border-ink-900/10 pt-2.5 pb-3">
+        <>
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize verifiers panel"
+            onMouseDown={handleVerifiersResizeMouseDown}
+            className="shrink-0 flex h-2 cursor-row-resize items-center justify-center border-t border-ink-900/10 hover:bg-primary/5 group"
+          >
+            <div className="h-[3px] w-10 rounded-full bg-ink-900/15 opacity-0 group-hover:opacity-100 transition-opacity duration-150" />
+          </div>
+          <div
+            className="shrink-0 flex flex-col overflow-hidden pt-2.5 pb-3"
+            style={{ height: clampedVerifiersHeight }}
+          >
           <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Verifiers</span>
@@ -1133,7 +1257,8 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
               );
             })}
           </div>
-        </div>
+          </div>
+        </>
       )}
 
       {/* Delete confirmation dialog */}

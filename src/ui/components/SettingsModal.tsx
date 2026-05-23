@@ -13,7 +13,19 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "api" | "workflow" | "skills";
+type Tab = "api" | "workflow" | "skills" | "data";
+const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
+
+function readStoredAutoInduction(): boolean {
+  try {
+    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
+    if (v === "false") return false;
+    if (v === "true") return true;
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
 
 function WorkflowPanel() {
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
@@ -123,6 +135,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               >
                 Skills
               </button>
+              <button
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  tab === "data"
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
+                }`}
+                onClick={() => setTab("data")}
+              >
+                Data
+              </button>
             </div>
 
             {/* Tab content */}
@@ -131,8 +153,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <ApiPanel onClose={onClose} />
               ) : tab === "workflow" ? (
                 <WorkflowPanel />
-              ) : (
+              ) : tab === "skills" ? (
                 <SkillsPanel />
+              ) : (
+                <DataPanel />
               )}
             </div>
           </div>
@@ -975,15 +999,83 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
+/* ---------- Data / export panel ---------- */
+
+function DataPanel() {
+  const [exporting, setExporting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleExport = async () => {
+    setExporting(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const result = await window.electron.exportRecordingsBundle();
+      if (result.success) {
+        setMessage(`Saved to ${result.path}`);
+      } else if (result.canceled) {
+        setMessage(null);
+      } else {
+        setError(result.error ?? "Export failed.");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground leading-relaxed">
+        Package your local app data (database, memories, skills, session files) into a zip you can email or upload.
+        API keys are not included.
+      </p>
+      <button
+        type="button"
+        onClick={() => void handleExport()}
+        disabled={exporting}
+        className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+      >
+        {exporting ? (
+          <span className="inline-flex items-center gap-2">
+            <Spinner className="w-4 h-4" color="currentColor" />
+            Preparing zip…
+          </span>
+        ) : (
+          "Export recordings (zip)"
+        )}
+      </button>
+      {message ? <p className="text-xs text-ink-700 break-all">{message}</p> : null}
+      {error ? <p className="text-xs text-red-600">{error}</p> : null}
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        Includes <code className="bg-ink-900/5 px-1 rounded">sessions.db</code> and related files from your app data
+        folder. Choose where to save in the dialog, then send that zip back to the study team.
+      </p>
+    </div>
+  );
+}
+
 /* ---------- Skills Panel ---------- */
 
 function SkillsPanel() {
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
   const [skillContent, setSkillContent] = useState<string | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
+  const [autoContextInduction, setAutoContextInduction] = useState<boolean>(readStoredAutoInduction);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(AUTO_INDUCTION_KEY, autoContextInduction ? "true" : "false");
+    } catch {
+      /* ignore */
+    }
+  }, [autoContextInduction]);
 
   useEffect(() => {
     window.electron.listSkills().then((result) => {
@@ -1032,6 +1124,35 @@ function SkillsPanel() {
 
   return (
     <>
+      <div className="mb-4 rounded-xl border border-ink-900/10 bg-surface px-4 py-3">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 accent-primary"
+            checked={autoContextInduction}
+            onChange={(e) => {
+              const next = e.target.checked;
+              setAutoContextInduction(next);
+              if (activeSessionId && typeof window !== "undefined" && window.electron?.sendClientEvent) {
+                window.electron.sendClientEvent({
+                  type: "session.setAutoContextInduction",
+                  payload: { sessionId: activeSessionId, autoContextInduction: next },
+                });
+              }
+            }}
+          />
+          <div>
+            <div className="text-sm font-medium text-ink-800">Auto-generate memory and skill</div>
+            <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+              When enabled, the app exports the task session and runs context induction after each completed
+              workflow step (and after follow-up verification turns), updating memory and skill markdown under
+              your app data folder. The Brain control shows activity while induction runs. When disabled, no
+              automatic generation runs during task sessions.
+            </p>
+          </div>
+        </label>
+      </div>
+
       <div className="flex items-center justify-between mb-4">
         <p className="text-sm text-muted-foreground">Manage installed skills.</p>
         <button

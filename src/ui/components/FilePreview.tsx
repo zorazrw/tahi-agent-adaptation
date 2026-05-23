@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
 import { CopyIcon, FolderOpenIcon, Loader2Icon, RefreshCcwIcon, SaveIcon } from "lucide-react";
-import { getRenderer, type HtmlVisualSaveChrome } from "./file-renderers";
+import { getRenderer, type PreviewSaveChrome } from "./file-renderers";
 import { ZoomControls } from "./file-renderers/DocxRenderer";
 
 const FILE_TOOL_NAMES = new Set(["Read", "Write", "Edit"]);
@@ -122,15 +122,26 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
   const [zoom, setZoom] = useState(0.6);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [htmlVisualSaveChrome, setHtmlVisualSaveChrome] = useState<HtmlVisualSaveChrome | null>(null);
+  const [previewSaveChrome, setPreviewSaveChrome] = useState<PreviewSaveChrome | null>(null);
 
-  const onHtmlVisualSaveChromeChange = useCallback((chrome: HtmlVisualSaveChrome | null) => {
-    setHtmlVisualSaveChrome(chrome);
+  const onPreviewSaveChromeChange = useCallback((chrome: PreviewSaveChrome | null) => {
+    setPreviewSaveChrome(chrome);
   }, []);
 
   useEffect(() => {
-    setHtmlVisualSaveChrome(null);
+    setPreviewSaveChrome(null);
   }, [filePath]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "s") return;
+      if (!previewSaveChrome || previewSaveChrome.disabled) return;
+      e.preventDefault();
+      previewSaveChrome.save();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewSaveChrome]);
 
   const handleCopyFileContent = () => {
     const text = getCopyableContent(result);
@@ -170,29 +181,35 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
   const isNotFound = result && "error" in result && isFileNotFoundError(result.error);
   const Renderer = result && "kind" in result ? getRenderer(result.kind) : null;
   const showZoom = result && "kind" in result && result.kind === "docx";
+  const isTextualPreview =
+    result && "kind" in result && (result.kind === "txt" || result.kind === "md");
 
   return (
-    <div className="flex-1 flex flex-col rounded-lg border border-ink-900/10 bg-surface-secondary overflow-hidden">
+    <div
+      className={`flex h-full min-h-0 flex-1 flex-col overflow-hidden border bg-surface-secondary/60 ${
+        isTextualPreview ? "rounded-xl border-ink-900/8 shadow-card" : "rounded-lg border-ink-900/10"
+      }`}
+    >
       <div className="px-3 py-1.5 border-b border-ink-900/10 flex items-center gap-2 shrink-0">
         <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}
         </span>
-        {result && "kind" in result && result.kind === "html" && htmlVisualSaveChrome && (
+        {previewSaveChrome && (
           <button
             type="button"
-            onClick={() => htmlVisualSaveChrome.save()}
-            disabled={htmlVisualSaveChrome.disabled}
+            onClick={() => previewSaveChrome.save()}
+            disabled={previewSaveChrome.disabled}
             className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors disabled:opacity-50 disabled:pointer-events-auto"
-            aria-label={htmlVisualSaveChrome.saving ? "Saving preview changes" : "Save preview changes"}
+            aria-label={previewSaveChrome.saving ? "Saving preview changes" : "Save preview changes"}
             title={
-              htmlVisualSaveChrome.error
-                ? htmlVisualSaveChrome.error
-                : htmlVisualSaveChrome.disabled && !htmlVisualSaveChrome.saving
+              previewSaveChrome.error
+                ? previewSaveChrome.error
+                : previewSaveChrome.disabled && !previewSaveChrome.saving
                   ? "No preview changes to save yet"
-                  : "Save preview changes to file (Ctrl or ⌘+S)"
+                  : "Save changes to file (Ctrl or ⌘+S)"
             }
           >
-            {htmlVisualSaveChrome.saving ? (
+            {previewSaveChrome.saving ? (
               <Loader2Icon className="size-4 animate-spin" aria-hidden />
             ) : (
               <SaveIcon className="size-4" aria-hidden />
@@ -235,7 +252,7 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
           />
         )}
       </div>
-      <div className="flex-1 flex flex-col min-h-0 overflow-auto px-3 py-2">
+      <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden px-3 py-2">
         {loading && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -258,15 +275,18 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
           <p className="text-sm text-error">{result.error}</p>
         )}
         {Renderer && !loading && (
-          <Renderer
-            data={result}
-            zoom={showZoom ? zoom : undefined}
-            filePath={filePath}
-            cwd={cwd ?? undefined}
-            sessionId={sessionId ?? undefined}
-            onReload={() => setRefreshKey((k) => k + 1)}
-            onHtmlVisualSaveChromeChange={onHtmlVisualSaveChromeChange}
-          />
+          <div className="flex-1 flex flex-col min-h-0 min-w-0 h-full">
+            <Renderer
+              data={result}
+              zoom={showZoom ? zoom : undefined}
+              filePath={filePath}
+              cwd={cwd ?? undefined}
+              sessionId={sessionId ?? undefined}
+              onReload={() => setRefreshKey((k) => k + 1)}
+              onHtmlVisualSaveChromeChange={onPreviewSaveChromeChange}
+              onTextSaveChromeChange={onPreviewSaveChromeChange}
+            />
+          </div>
         )}
       </div>
     </div>

@@ -6,7 +6,14 @@ import { EditableTextPanel } from "./EditableTextPanel";
 
 type Props = { data: { kind: "code"; content: string; language: string } } & EditableRendererProps;
 
-export function CodeRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
+export function CodeRenderer({
+  data,
+  filePath,
+  cwd,
+  sessionId,
+  onReload,
+  onTextSaveChromeChange,
+}: Props) {
   const [mode, setMode] = useViewToggle("source");
   const codeRef = useRef<HTMLElement>(null);
   const canEdit = Boolean(filePath && onReload);
@@ -34,6 +41,7 @@ export function CodeRenderer({ data, filePath, cwd, sessionId, onReload }: Props
               window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
             }
             onSaved={onReload}
+            onSaveChromeChange={onTextSaveChromeChange}
           />
         ) : (
           <pre className="text-sm overflow-x-auto">

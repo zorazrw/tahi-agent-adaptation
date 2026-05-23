@@ -21,6 +21,7 @@
         "noUnusedParameters": true,
         "noFallthroughCasesInSwitch": true,
         "noUncheckedSideEffectImports": true,
+        "resolveJsonModule": true,
         "baseUrl": ".",
         "paths": {
             "@/*": [
@@ -32,7 +33,8 @@
         ]
     },
     "include": [
-        "src"
+        "src",
+        "expertise-examples/**/tasks.json"
     ],
     "exclude": [
         "src/electron"

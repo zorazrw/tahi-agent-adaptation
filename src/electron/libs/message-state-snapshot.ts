@@ -30,16 +30,18 @@ export type ExportEnvironmentSnapshot = {
   skill: Record<string, string>;
 };
 
-function verifierStatusForExport(mark: VerifierMark | undefined): "success" | "failure" {
+/** Align with in-app sidebar: no mark means not yet labeled, not a failed check. */
+function verifierStatusForExport(mark: VerifierMark | undefined): "success" | "failure" | "unchecked" {
   if (mark === "check") return "success";
-  return "failure";
+  if (mark === "cross") return "failure";
+  return "unchecked";
 }
 
 function workflowNestedForExport(nodes: WorkflowNode[]): Array<{
   id: string;
   description: string;
   outputFiles: string[];
-  verifiers: Array<{ criterion: string; status: "success" | "failure" }>;
+  verifiers: Array<{ criterion: string; status: "success" | "failure" | "unchecked" }>;
   status: string;
   children: ReturnType<typeof workflowNestedForExport>;
 }> {
@@ -234,7 +236,7 @@ export function buildExportEnvironmentSnapshot(session: Session): ExportEnvironm
 }
 
 /** Canonical path key for matching workflow output paths (absolute vs cwd-relative mix). */
-function resolvedFileKey(cwd: string | undefined, filePath: string): string {
+export function resolvedFileKey(cwd: string | undefined, filePath: string): string {
   const p = String(filePath ?? "").trim();
   if (!p) return "";
   try {
@@ -276,6 +278,42 @@ export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
     files.push(entry);
   }
   return { workflow: base.workflow, file: files, memory: base.memory, skill: base.skill };
+}
+
+/** UTF-8 text from a snapshot ``file`` entry for ``filePath`` (skips base64/binary). */
+export function snapshotFileUtf8Content(
+  snapshot: ExportEnvironmentSnapshot | null | undefined,
+  filePath: string,
+  cwd?: string
+): string | null {
+  if (!snapshot?.file?.length) return null;
+  const wantKey = resolvedFileKey(cwd, filePath);
+  if (!wantKey) return null;
+
+  const basename = filePath.replace(/\\/g, "/").split("/").pop() ?? "";
+  let fallback: string | null = null;
+
+  for (const entry of snapshot.file) {
+    const fp = String(entry.path ?? "").trim();
+    if (!fp) continue;
+    const key = resolvedFileKey(cwd, fp);
+    const matches =
+      key === wantKey ||
+      fp === filePath ||
+      fp.replace(/\\/g, "/") === filePath.replace(/\\/g, "/");
+    if (!matches) {
+      if (basename && fp.replace(/\\/g, "/").endsWith(`/${basename}`)) {
+        const c = entry.content;
+        if (typeof c === "string" && entry.content_encoding !== "base64") {
+          fallback = c;
+        }
+      }
+      continue;
+    }
+    if (entry.content_encoding === "base64") return null;
+    return typeof entry.content === "string" ? entry.content : null;
+  }
+  return fallback;
 }
 
 /** Whether to persist a snapshot for this SDK message (per meaningful agent turn / tool outcome). */

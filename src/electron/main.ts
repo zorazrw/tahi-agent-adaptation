@@ -42,6 +42,7 @@ import {
     saveTinkerProviderConfig,
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint, shutdownTinkerBridge } from "./libs/tinker-provider.js";
+import { defaultRecordingsZipName, exportRecordingsBundleToZip } from "./libs/recording-bundle.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -271,6 +272,29 @@ app.on("ready", () => {
         }
 
         return result.filePaths[0];
+    });
+
+    ipcMainHandle("export-recordings-bundle", async () => {
+        const defaultName = defaultRecordingsZipName();
+        const save = await dialog.showSaveDialog({
+            title: "Save recordings bundle",
+            defaultPath: join(homedir(), "Downloads", defaultName),
+            filters: [{ name: "Zip archive", extensions: ["zip"] }],
+        });
+        if (save.canceled || !save.filePath) {
+            return { success: false, canceled: true };
+        }
+        let zipPath = save.filePath;
+        if (!zipPath.toLowerCase().endsWith(".zip")) {
+            zipPath = `${zipPath}.zip`;
+        }
+        try {
+            await exportRecordingsBundleToZip(zipPath);
+            return { success: true, path: zipPath };
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+        }
     });
 
     // Create temp session directory

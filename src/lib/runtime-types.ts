@@ -213,9 +213,11 @@ export type LegacyMessage =
   | LegacyStreamEventMessage;
 
 export type BrainEditMessage = { type: "brain_edit" };
-export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string; runEndTimestamp?: number };
+export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string };
 export type EditWorkflowMessage = { type: "edit_workflow" };
 export type EditVerifierMessage = { type: "edit_verifier" };
+/** LLM auto-refinement of verifiers after user prompts / file edits (not manual sidebar edits). */
+export type UpdateVerifiersMessage = { type: "update_verifiers" };
 export type FileEditMessage = { type: "file_edit"; path: string };
 
 export type StreamMessage =
@@ -230,6 +232,7 @@ export type StreamMessage =
   | VerifierLabelMessage
   | EditWorkflowMessage
   | EditVerifierMessage
+  | UpdateVerifiersMessage
   | FileEditMessage
   | LegacyMessage;
 
@@ -363,4 +366,8 @@ export type ClientEvent =
   | { type: "memory.read"; payload: { requestId: string } }
   | { type: "memory.write"; payload: { requestId: string; sections: Array<{ fileName: string; content: string }>; deletedFileNames?: string[] } }
   | { type: "skills.write"; payload: { requestId: string; sections: Array<{ fileName?: string; content?: string }>; deletedFileNames?: string[] } }
-  | { type: "session.recordBrainEdit"; payload: { sessionId: string } };
+  | { type: "session.recordBrainEdit"; payload: { sessionId: string } }
+  | {
+      type: "session.setAutoContextInduction";
+      payload: { sessionId: string; autoContextInduction: boolean };
+    };

@@ -1,28 +1,42 @@
 import type { EditableRendererProps } from "./index";
 import { EditableTextPanel } from "./EditableTextPanel";
+import { PlainTextReadingView, TextDocumentFrame } from "./TextDocumentFrame";
 
 type Props = { data: { kind: "txt"; content: string } } & EditableRendererProps;
 
-export function TextRenderer({ data, filePath, cwd, sessionId, onReload }: Props) {
+export function TextRenderer({
+  data,
+  filePath,
+  cwd,
+  sessionId,
+  onReload,
+  onTextSaveChromeChange,
+}: Props) {
   const canEdit = Boolean(filePath && onReload);
 
   if (canEdit) {
     return (
-      <EditableTextPanel
-        content={data.content}
-        contentKey={data.content}
-        monospace
-        onSave={async (content) =>
-          window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
-        }
-        onSaved={onReload}
-      />
+      <TextDocumentFrame label="Plain text">
+        <EditableTextPanel
+          content={data.content}
+          contentKey={data.content}
+          monospace
+          variant="document"
+          onSave={async (content) =>
+            window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
+          }
+          onSaved={onReload}
+          onSaveChromeChange={onTextSaveChromeChange}
+        />
+      </TextDocumentFrame>
     );
   }
 
   return (
-    <pre className="text-sm text-ink-700 whitespace-pre-wrap break-words font-mono">
-      {data.content}
-    </pre>
+    <TextDocumentFrame label="Plain text">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <PlainTextReadingView content={data.content} />
+      </div>
+    </TextDocumentFrame>
   );
 }

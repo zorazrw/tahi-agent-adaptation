@@ -2,17 +2,17 @@
 
 ## Data Export
 
-`export_task_sessions.py` is a standalone Python 3 script (stdlib only) to export task sessions from the Agent Cowork SQLite database to JSON.
+`tasks/export_task_sessions.py` is a standalone Python 3 script (stdlib only) to export task sessions from the Agent Cowork SQLite database to JSON.
 
 **Usage:**
 ```bash
-python scripts/export_task_sessions.py -o out.json
+python scripts/tasks/export_task_sessions.py -o out.json
 
 # Single session
-python scripts/export_task_sessions.py --session-id <uuid> -o session.json
+python scripts/tasks/export_task_sessions.py --session-id <uuid> -o session.json
 
-# Weight-based export (for training; see Formats table above)
-python scripts/export_task_sessions.py --format weight -o out_weight.json
+# Default export is weight-style for training compatibility.
+python scripts/tasks/export_task_sessions.py -o out_weight.json
 ```
 
 **Exported Data Structure:**
@@ -79,11 +79,11 @@ python scripts/induce.py --data_path out.json --output_dir "."
 ## Weight-Based Update
 
 DPO, OPD, and REINFORCE now share the weight-format training stack under
-`scripts/weight/`. Export sessions once with `--format weight`, then either run
-the online server or invoke a specific trainer module.
+`scripts/weight/`. Export sessions once, then either run the online server or
+invoke a specific trainer module.
 
 ```bash
-python3 scripts/export_task_sessions.py --format weight -o scripts/out_weight.json
+python3 scripts/tasks/export_task_sessions.py -o scripts/out_weight.json
 
 python3 -m scripts.weight.train.run_dpo \
   --train-path scripts/out_weight.json \
@@ -148,3 +148,21 @@ The session is queued for training. Once `update_every_n_sessions` sessions have
 After training completes, the server broadcasts a `model-update` SSE event to the frontend. The frontend automatically points at the new checkpoint, so you normally do not need to switch models manually. If the new checkpoint is not visible in the model picker, click **Load models** to refresh the list.
 
 The server persists the model registry, latest model path, and latest model-update event to `state_path` (default: `scripts/state.json`). On restart, this state is loaded so trained checkpoint slugs and the active model pointer are restored.
+
+## Scoring Redo Sessions
+
+```bash
+
+# Score a redo session's final outputs against final verifiers from baseline export
+python scripts/tools/score_redo_against_verifiers.py \
+  --verifiers-json out.json \
+  --outputs-json out_redo.json \
+  --task task2
+
+# Optional: print full request blocks (text + image metadata) before model call
+python scripts/tools/score_redo_against_verifiers.py \
+  --verifiers-json out.json \
+  --outputs-json out_redo.json \
+  --task task2 \
+  --debug-prompts
+```

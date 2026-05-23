@@ -50,6 +50,7 @@ export function CsvRenderer({
   cwd,
   sessionId,
   onReload,
+  onTextSaveChromeChange,
 }: { data: { kind: "csv"; content: string } } & EditableRendererProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("table");
   const rows = useMemo(() => parseCsv(data.content), [data.content]);
@@ -80,6 +81,7 @@ export function CsvRenderer({
             window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
           }
           onSaved={onReload}
+          onSaveChromeChange={onTextSaveChromeChange}
         />
       </div>
     );

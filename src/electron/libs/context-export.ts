@@ -28,8 +28,7 @@ function logLine(message: string): void {
   console.error(`[context-export] ${message}`);
 }
 
-// const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions.py");
-const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions_backup.py");
+const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions.py");
 const INDUCE_SCRIPT_REL = "induce.py";
 
 function scriptsRootDir(): string | null {
@@ -136,8 +135,6 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
           sessionId,
           "--output",
           fullJsonPath,
-          "--format",
-          "weight",
         ],
         { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
       );

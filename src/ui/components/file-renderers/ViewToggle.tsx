@@ -15,14 +15,15 @@ export function ViewToggle({
   onChange: (mode: ViewMode) => void;
 }) {
   return (
-    <div className="inline-flex rounded-md border border-ink-900/15 overflow-hidden">
+    <div className="inline-flex rounded-lg border border-ink-900/12 bg-surface-secondary/80 p-0.5 shadow-sm">
       <button
+        type="button"
         onClick={() => onChange("preview")}
         title="Preview"
-        className={`px-1.5 py-1 transition-colors ${
+        className={`rounded-md px-2 py-1 transition-colors ${
           mode === "preview"
-            ? "bg-ink-900/10 text-ink-900"
-            : "text-ink-400 hover:text-ink-700 hover:bg-ink-900/5"
+            ? "bg-white text-ink-900 shadow-sm"
+            : "text-ink-500 hover:text-ink-800"
         }`}
       >
         {/* Eye icon */}
@@ -32,12 +33,13 @@ export function ViewToggle({
         </svg>
       </button>
       <button
+        type="button"
         onClick={() => onChange("source")}
         title="Source"
-        className={`px-1.5 py-1 border-l border-ink-900/15 transition-colors ${
+        className={`rounded-md px-2 py-1 transition-colors ${
           mode === "source"
-            ? "bg-ink-900/10 text-ink-900"
-            : "text-ink-400 hover:text-ink-700 hover:bg-ink-900/5"
+            ? "bg-white text-ink-900 shadow-sm"
+            : "text-ink-500 hover:text-ink-800"
         }`}
       >
         {/* Code icon */}

@@ -388,13 +388,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         const { sessionId, messages } = event.payload;
         set((state) => {
           const existing = state.sessions[sessionId] ?? createSession(sessionId);
-          const isActive = sessionId === state.activeSessionId;
           return {
             sessions: {
               ...state.sessions,
               [sessionId]: { ...existing, messages }
             },
-            ...(isActive ? { previewPanelOpen: false } : {})
           };
         });
         break;
