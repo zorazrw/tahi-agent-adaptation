@@ -683,6 +683,21 @@ class OPDTrainer(Trainer):
         assert config.renderer_name is not None, "OPDTrainer requires config.renderer_name"
         self.renderer = renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
 
+        # Reasoning-aware renderers (Qwen3, Kimi K2, DeepSeek V3 thinking, ...)
+        # carry a per-instance ``strip_thinking_from_history`` flag controlling
+        # whether ``<think>...</think>`` survives in non-last assistant
+        # messages. The SDFT teacher prompt always ends with the ``redo`` user
+        # message, so every assistant turn (including the golden demonstration)
+        # sits in history and would otherwise lose its thinking. Default False
+        # in OPD config so the teacher can attend to the golden chain-of-thought.
+        if hasattr(self.renderer, "strip_thinking_from_history"):
+            self.renderer.strip_thinking_from_history = config.strip_thinking_from_history
+            self.logger.info(
+                "Renderer %s: strip_thinking_from_history=%s",
+                type(self.renderer).__name__,
+                config.strip_thinking_from_history,
+            )
+
         # Static frozen teacher, matching the weight OPD script.
         self.teacher_client: tinker.SamplingClient = service_client.create_sampling_client(
             base_model=config.model_name
@@ -817,6 +832,9 @@ class OPDTrainer(Trainer):
                         if self.config.log_rollout_samples else None
                     ),
                     sample_log_chars=self.config.rollout_sample_log_chars,
+                    extract_version=self.config.extract_version,
+                    log_teacher_prompts=self.config.log_teacher_prompts,
+                    rollout_pipeline=self.config.rollout_pipeline,
                 )
             metrics.update(rollout_metrics)
 
@@ -854,17 +872,17 @@ class OPDTrainer(Trainer):
                 )
             metrics.update(topk_metrics)
 
-            if self.config.save_every > 0 and step % self.config.save_every == 0 and step > 0:
-                save_result = await checkpoint_utils.save_checkpoint_async(
-                    training_client=self.training_client,
-                    name=f"{step:06d}",
-                    log_path=self.log_path,
-                    kind="both",
-                    loop_state={"epoch": epoch_idx, "batch": batch_idx},
-                    ttl_seconds=self.config.ttl_seconds,
-                )
-                if "state_path" in save_result:
-                    metrics["state_path"] = save_result["state_path"]
+            # if self.config.save_every > 0 and step % self.config.save_every == 0 and step > 0:
+            #     save_result = await checkpoint_utils.save_checkpoint_async(
+            #         training_client=self.training_client,
+            #         name=f"{step:06d}",
+            #         log_path=self.log_path,
+            #         kind="both",
+            #         loop_state={"epoch": epoch_idx, "batch": batch_idx},
+            #         ttl_seconds=self.config.ttl_seconds,
+            #     )
+            #     if "state_path" in save_result:
+            #         metrics["state_path"] = save_result["state_path"]
 
             learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
                 lr_schedule=self.config.lr_schedule,

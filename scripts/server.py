@@ -80,7 +80,28 @@ class Config:
     opd_teacher_temperature: float = 1.0
     opd_log_rollout_samples: bool = True
     opd_rollout_sample_log_chars: int = 4000
+    opd_log_teacher_prompts: bool = True
     opd_artifact_only_rollout_instruction: bool = False
+    opd_extract_version: Literal["v1", "v2"] = "v2"
+    # Reasoning-renderer toggle (Qwen3/Kimi K2/DeepSeek thinking). When False,
+    # the golden answer's ``<think>...</think>`` block survives in the
+    # teacher prompt so the teacher can attend to the golden chain-of-thought.
+    # When True, the renderer's default behavior strips CoT from non-last
+    # assistant turns — which silently hides the golden CoT from the teacher
+    # because SDFT teacher prompts always end with the ``redo`` user message.
+    # Default False matches legacy ``tinker_opd.Config``.
+    opd_strip_thinking_from_history: bool = False
+
+    # OPD rollout pipeline.  "current" (default) uses the in-house
+    # ``sampling_client.sample_async`` + parse-filter + canonicalization path
+    # that the v2 extractor was originally paired with.  "legacy" routes
+    # through ``tinker_cookbook.rl.rollouts.do_group_rollout_and_filter_constant_reward``
+    # + ``assemble_training_data`` — the exact dispatch path the legacy
+    # ``tinker_opd`` recipe used.  Pick "legacy" when you want the trained
+    # tokens to be the raw sampled tokens (no canonicalization, no
+    # parse-filter, no retry) — i.e. bit-identical training dynamics to the
+    # legacy codebase.
+    opd_rollout_pipeline: Literal["current", "legacy"] = "current"
 
     # -- REINFORCE-specific --
     reward_alpha: float = 0.05
@@ -655,6 +676,21 @@ class Server:
         """Build the weight-format online artifact OPD dataset and trainer."""
         tokenizer = get_tokenizer(model_name)
         renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
+        if hasattr(renderer, "strip_thinking_from_history"):
+            renderer.strip_thinking_from_history = self.config.opd_strip_thinking_from_history
+            log.info(
+                "Dataset renderer %s: strip_thinking_from_history=%s",
+                type(renderer).__name__,
+                self.config.opd_strip_thinking_from_history,
+            )
+        artifact_only = self.config.opd_artifact_only_rollout_instruction
+        if self.config.opd_extract_version == "v2" and artifact_only:
+            log.warning(
+                "opd_artifact_only_rollout_instruction=True is v1-only and is "
+                "incompatible with opd_extract_version='v2'. Forcing it to "
+                "False for this OPD training run."
+            )
+            artifact_only = False
         dataset = OnlineOPDRolloutDataset.from_weight_json(
             path=train_path,
             renderer=renderer,
@@ -663,7 +699,8 @@ class Server:
             pair_mode=self.config.opd_pair_mode,
             use_gt=self.config.opd_use_gt,
             use_student=self.config.opd_use_student,
-            artifact_only_instruction=self.config.opd_artifact_only_rollout_instruction,
+            artifact_only_instruction=artifact_only,
+            extract_version=self.config.opd_extract_version,
         )
 
         log_path = f"logs/weight_opd/{int(time.time())}"
@@ -690,7 +727,11 @@ class Server:
             rollout_attempts=self.config.opd_rollout_attempts,
             log_rollout_samples=self.config.opd_log_rollout_samples,
             rollout_sample_log_chars=self.config.opd_rollout_sample_log_chars,
-            artifact_only_rollout_instruction=self.config.opd_artifact_only_rollout_instruction,
+            log_teacher_prompts=self.config.opd_log_teacher_prompts,
+            artifact_only_rollout_instruction=artifact_only,
+            extract_version=self.config.opd_extract_version,
+            strip_thinking_from_history=self.config.opd_strip_thinking_from_history,
+            rollout_pipeline=self.config.opd_rollout_pipeline,
         )
 
         def build(

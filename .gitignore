@@ -35,6 +35,7 @@ scripts/test_sessions.db
 trash/*
 **/__pycache__/
 scripts/*.json
+scripts/sessions/*.json
 
 # Local Tinker bridge environment
 tinker-bridge/.venv/

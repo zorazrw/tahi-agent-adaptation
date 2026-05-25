@@ -756,6 +756,415 @@ def extract_opd_examples(
 
 
 # ---------------------------------------------------------------------------
+# OPD ver 2
+# ---------------------------------------------------------------------------
+_HUMAN_ACTION_TYPES = (
+    "follow_up",
+    "file_edit",
+    "brain_edit",
+    "edit_workflow",
+    "edit_verifier",
+)
+
+
+OPD_REDO_MESSAGE = (
+    "The user messages above are follow-ups from a previous session based "
+    "on the given chat history. Please think about the reason why the user "
+    "asked these specific follow-ups, and reason through the user "
+    "preferences reflected by them. Then, provide a response to the "
+    "following user request that incorporates the feedback."
+)
+
+
+def _normalize_human_action(item: dict) -> dict | None:
+    """Coerce a ``human_trajectories`` entry into a compact dict.
+
+    Keeps the type discriminator and the most useful payload fields; passes
+    through long bodies (e.g. ``ai``/``edited`` for ``file_edit``) so the
+    summarizer can decide what to keep or diff.
+    """
+    if not isinstance(item, dict):
+        return None
+    t = item.get("type")
+    if t not in _HUMAN_ACTION_TYPES:
+        return None
+    out: dict = {"type": t, "round_index": item.get("round_index")}
+    if t == "follow_up":
+        out["prompt"] = item.get("prompt") or ""
+    elif t == "file_edit":
+        out["path"] = item.get("path") or ""
+        if "ai" in item:
+            out["ai"] = item.get("ai")
+        if "edited" in item:
+            out["edited"] = item.get("edited")
+    elif t == "brain_edit":
+        if "memory" in item:
+            out["memory"] = item.get("memory")
+        if "skill" in item:
+            out["skill"] = item.get("skill")
+    elif t == "edit_workflow":
+        if "workflow" in item:
+            out["workflow"] = item.get("workflow")
+    elif t == "edit_verifier":
+        for key in ("nodeId", "criterion", "raw"):
+            if key in item:
+                out[key] = item[key]
+    return out
+
+
+def _normalized_humans_per_task(tasks: list[dict]) -> list[list[dict]]:
+    """Per-task normalized human actions, each annotated with ``task_index``."""
+    out: list[list[dict]] = []
+    for task_idx, task in enumerate(tasks):
+        per_task: list[dict] = []
+        for h in task.get("human_trajectories") or []:
+            n = _normalize_human_action(h)
+            if n is None:
+                continue
+            n["task_index"] = task_idx
+            per_task.append(n)
+        out.append(per_task)
+    return out
+
+
+def _cumulative_humans_from(per_task_humans: list[list[dict]]) -> list[list[dict]]:
+    """``out[i]`` = concatenation of ``per_task_humans[i:]`` (in original order)."""
+    out: list[list[dict]] = []
+    for i in range(len(per_task_humans)):
+        tail: list[dict] = []
+        for j in range(i, len(per_task_humans)):
+            tail.extend(per_task_humans[j])
+        out.append(tail)
+    return out
+
+
+def _is_assistant_msg(msg: object) -> bool:
+    return isinstance(msg, dict) and msg.get("role") == "assistant"
+
+
+def _split_initial_trajectory_into_units(
+    msgs: list[dict],
+    *,
+    base_history: list[dict],
+    task_intent: str | None,
+    task_index: int,
+    followup_actions: list[dict],
+    next_index: int,
+) -> tuple[list[dict], list[dict]]:
+    """Walk a task's initial ``agent_trajectory`` and emit one unit per assistant message.
+
+    The trajectory typically begins with a leading user message that contains
+    the task instruction (e.g. the workflow-plan prompt or the per-step
+    instruction). That message is carried in the first sub-unit's
+    ``user_messages``; subsequent sub-units leave ``user_messages`` empty
+    because their trigger (a tool result) is already in ``history``.
+
+    Returns ``(new_units, advanced_history)`` where ``advanced_history``
+    contains every message in ``msgs`` (so callers can append the rest of the
+    task's trajectories to it).
+    """
+    new_units: list[dict] = []
+    cursor_history = list(base_history)
+    pending: list[dict] = []  # messages between the previous emitted assistant and the next one
+    initial_user_msg_obj: dict | None = None
+    initial_user_msg_text = ""
+    sub_index = 0
+
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        if not _is_assistant_msg(m):
+            if (
+                sub_index == 0
+                and initial_user_msg_obj is None
+                and m.get("role") == "user"
+            ):
+                initial_user_msg_obj = m
+                initial_user_msg_text = m.get("content") or ""
+            pending.append(m)
+            continue
+
+        if sub_index == 0 and initial_user_msg_obj is not None:
+            # First sub-unit: hoist the leading user message out of history into
+            # ``user_messages`` so the teacher demo prepends it explicitly.
+            unit_history = list(cursor_history) + [
+                p for p in pending if p is not initial_user_msg_obj
+            ]
+            unit_user_messages = [initial_user_msg_text]
+        else:
+            unit_history = list(cursor_history) + pending
+            unit_user_messages = []
+
+        new_units.append({
+            "index": next_index + len(new_units),
+            "task_intent": task_intent,
+            "task_index": task_index,
+            "sub_index": sub_index,
+            "is_continuation": sub_index > 0,
+            "user_messages": unit_user_messages,
+            "response_messages": [m],
+            "followup_actions": followup_actions,
+            "history": unit_history,
+        })
+
+        cursor_history.extend(pending)
+        cursor_history.append(m)
+        pending = []
+        sub_index += 1
+
+    # Trailing non-assistant messages (e.g. a final tool result) are folded into
+    # the cursor history so the next task picks up after them.
+    cursor_history.extend(pending)
+    return new_units, cursor_history
+
+
+def _followups_to_golden_chat(human_actions: list[dict]) -> list[dict]:
+    """Convert normalized cumulative human actions into a chat-form golden_answer.
+    Each item becomes a user-roled message:
+    - ``follow_up`` → verbatim user turn with the human's text.
+    - ``file_edit`` → synthetic user turn containing a unified diff between
+      the assistant's text (``ai``) and the human-edited version (``edited``).
+      Truncated at :data:`_MAX_FILE_EDIT_DIFF_CHARS`.
+    - ``brain_edit``, ``edit_workflow``, ``edit_verifier`` → terse synthetic
+      user notes so the teacher knows non-text user actions occurred.
+    Items with no usable payload are skipped. Returns ``[]`` when there are
+    no actionable entries.
+    """
+    out: list[dict] = []
+    for action in human_actions:
+        atype = action.get("type")
+        if atype == "follow_up":
+            text = action.get("prompt", "")
+            if text:
+                out.append({"role": "user", "content": text})
+        elif atype == "file_edit":
+            path = action.get("path") or "<file>"
+            ai_text = action.get("ai") or ""
+            edited = action.get("edited") or ""
+            if edited.strip():
+                diff_lines = list(difflib.unified_diff(
+                    ai_text.splitlines(keepends=True),
+                    edited.splitlines(keepends=True),
+                    fromfile=f"{path} (ai)",
+                    tofile=f"{path} (human-edited)",
+                    lineterm="",
+                ))
+                if diff_lines:
+                    diff_text = "".join(diff_lines)
+                    if len(diff_text) > _MAX_FILE_EDIT_DIFF_CHARS:
+                        diff_text = diff_text[:_MAX_FILE_EDIT_DIFF_CHARS] + "\n... [truncated]"
+                    out.append({
+                        "role": "user",
+                        "content": f"I edited '{path}':\n```diff\n{diff_text}\n```",
+                    })
+        elif atype == "brain_edit":
+            parts: list[str] = []
+            if action.get("memory"):
+                parts.append("memory")
+            if action.get("skill"):
+                parts.append("skill")
+            if parts:
+                out.append({
+                    "role": "user",
+                    "content": f"I edited my {' and '.join(parts)}.",
+                })
+        elif atype == "edit_workflow":
+            out.append({"role": "user", "content": "I edited the workflow plan."})
+        elif atype == "edit_verifier":
+            crit = action.get("criterion") or ""
+            content = "I edited a verifier criterion"
+            if crit:
+                content += f": {crit}"
+            out.append({"role": "user", "content": content + "."})
+    return out
+
+
+def _build_teacher_prompt_chat(
+    student_prompt: list[dict],
+    golden_chat: list[dict],
+    redo_message: str = OPD_REDO_MESSAGE,
+) -> list[dict]:
+    """Mirror :func:`build_sdft_teacher_prompt` (chat-list branch) but return
+    a ``list[dict]`` instead of a ``tinker.ModelInput``.
+    Tokenization is left to the downstream dataset (``conversation_to_datum``
+    in :mod:`weight.train.formatter`), preserving v1's four-key contract.
+    Pattern: ``head + golden_chat + [redo_user] + trailing_user``, where
+    ``trailing_user`` is the LAST message peeled off ``student_prompt``.
+    For ``sub_index == 0`` sub-units that message is the hoisted user task
+    instruction (the intended case). For continuation sub-units it may be
+    a tool result or an assistant turn; the teacher will still see it in
+    the correct chronological position, with the golden context sitting
+    just before it.
+    When ``golden_chat`` is empty the student prompt is returned unchanged
+    (no privileged signal → no need to splice).
+    """
+    if not golden_chat:
+        return list(student_prompt)
+    head = list(student_prompt)
+    trailing: list[dict] = []
+    if head:
+        trailing.insert(0, head.pop())
+    return head + list(golden_chat) + [{"role": "user", "content": redo_message}] + trailing
+
+
+def extract_opd_examples_v2(
+    sessions: list[dict],
+    renderer: Any | None = None,
+    pair_mode: str = "first_last",  # unused; accepted for API parity with v1
+    use_gt: bool = False,            # unused; accepted for API parity with v1
+    use_student: bool = False,       # unused; accepted for API parity with v1
+    *,
+    redo_message: str = OPD_REDO_MESSAGE,
+    skip_empty_golden: bool = True,  # unused; always True for legacy parity
+) -> list[dict[str, Any]]:
+    """One example per non-continuation task unit (legacy-parity extraction).
+
+    Matches the data-building semantics of the legacy
+    ``export_opd_data._session`` + ``tinker_formatter._opd_build_unit`` pipeline
+    exactly: one ``learning_unit`` per task's first assistant turn (continuation
+    sub-units within the same task are dropped), with ``golden_answer`` taken
+    from the cumulative ``follow_up`` actions (or an LLM-generated ``summary``
+    when present). Other human-action types (``file_edit``, ``brain_edit``,
+    ``edit_workflow``, ``edit_verifier``) are intentionally excluded from the
+    golden chat for legacy parity.
+
+    Args
+    ----
+    sessions: Weight-format session dicts.
+    renderer: Used only by :func:`_session_tools_prefix` to render the
+        system + tool-schemas prefix in the model's native chat-template
+        form (e.g. Qwen3 ``# Tools / <tools>``). Falls back to a plain
+        system message when ``None`` or unsupported.
+    redo_message: Wording of the synthetic user message appended after
+        ``golden_answer`` (see :data:`OPD_REDO_MESSAGE`).
+    skip_empty_golden: Retained for API back-compat; ignored. Empty-golden
+        units are always dropped to match legacy ``_opd_build_unit``
+        (``if not teacher_demo: return None``).
+    """
+    examples: list[dict[str, Any]] = []
+    for session in sessions:
+        system_prompt = session.get("system_prompt", "") or ""
+        tool_schemas = session.get("tool_schemas")
+        session_uuid = session.get("uuid")
+        # Match legacy ``export_opd_data._session``: ``prev_msgs`` starts empty.
+        # The renderer-rendered system+tools prefix is prepended per-unit at
+        # emit time below (legacy attaches ``[system]`` at unit-build time and
+        # ``tool_schemas`` via the downstream renderer; we inline both via
+        # ``_session_tools_prefix`` to produce equivalent tokens).
+        # The session-level ``initial_task_instruction`` is intentionally NOT
+        # injected: the first task's ``agent_trajectories[0].messages[0]`` is
+        # the leading user task message, which the splitter hoists into
+        # ``user_messages`` of the first sub-unit.
+        tools_prefix: list[dict] = list(_session_tools_prefix(
+            system_prompt, tool_schemas, renderer,
+        ))
+        prev_msgs: list[dict] = []
+        tasks = session.get("task_units") or []
+        per_task_humans = _normalized_humans_per_task(tasks)
+        cumulative_humans = _cumulative_humans_from(per_task_humans)
+        global_idx = 0
+        for task_idx, task in enumerate(tasks):
+            trajs = task.get("agent_trajectories") or []
+            if not trajs:
+                continue
+            task_intent = task.get("intent")
+            first_msgs = trajs[0].get("messages") or []
+            tail_humans = cumulative_humans[task_idx]
+            new_units, _ = _split_initial_trajectory_into_units(
+                first_msgs,
+                base_history=list(prev_msgs),
+                task_intent=task_intent,
+                task_index=task_idx,
+                followup_actions=tail_humans,
+                next_index=global_idx,
+            )
+            global_idx += len(new_units)
+            for unit in new_units:
+                # --- Legacy ``_opd_build_unit`` semantics (exact parity) ---
+                # 1) Drop continuation sub-units: their student prompt would
+                #    end with a tool result rather than a user request.
+                if unit.get("is_continuation"):
+                    continue
+                history = unit.get("history") or []
+                # 2) Truthiness-filter user_messages.
+                user_messages = [m for m in (unit.get("user_messages") or []) if m]
+                # 3) Drop if there's no user message to anchor the prompt
+                #    AND non-empty history (mid-task units without a user
+                #    anchor have no clean prediction position).
+                if not user_messages and history:
+                    continue
+                # 4) Build golden_answer: prefer LLM-generated ``summary``
+                #    (assistant turn), else cumulative ``follow_up`` actions
+                #    only (each becomes a user turn). Other human-action
+                #    types are intentionally excluded for legacy parity.
+                summary = unit.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    golden_chat: list[dict] = [
+                        {"role": "assistant", "content": summary.strip()}
+                    ]
+                else:
+                    followup_actions = unit.get("followup_actions") or []
+                    followup_texts = [
+                        a["prompt"].strip()
+                        for a in followup_actions
+                        if isinstance(a, dict)
+                        and a.get("type") == "follow_up"
+                        and isinstance(a.get("prompt"), str)
+                        and a["prompt"].strip()
+                    ]
+                    golden_chat = [
+                        {"role": "user", "content": text}
+                        for text in followup_texts
+                    ]
+                # 5) Drop if no teacher demo signal.
+                if not golden_chat:
+                    continue
+                # 6) Structural sanity: need at least a user anchor, non-empty
+                #    history, or an assistant turn in the demo.
+                if (
+                    not user_messages
+                    and not history
+                    and not any(m.get("role") == "assistant" for m in golden_chat)
+                ):
+                    continue
+                # 7) Build student_prompt = [system+tools] + history +
+                #    [user(um) for um in user_messages]. Matches legacy
+                #    ``[system] + history + user_messages`` with tools folded
+                #    into the system prefix (legacy attaches them via the
+                #    renderer downstream; tokens are equivalent).
+                student_prompt: list[dict] = list(tools_prefix)
+                student_prompt.extend(history)
+                student_prompt.extend(
+                    {"role": "user", "content": um} for um in user_messages
+                )
+                teacher_prompt = _build_teacher_prompt_chat(
+                    student_prompt, golden_chat, redo_message=redo_message,
+                )
+                completion = [dict(m) for m in unit["response_messages"]]
+                examples.append({
+                    "student_prompt": student_prompt,
+                    "teacher_prompt": teacher_prompt,
+                    "completion": completion,
+                    "is_agent": [True] * len(completion),
+                    "golden_answer": golden_chat,
+                    "meta": {
+                        "session_uuid": session_uuid,
+                        "task_intent": task_intent,
+                        "task_index": task_idx,
+                        "sub_index": unit["sub_index"],
+                        "is_continuation": unit["is_continuation"],
+                        "global_index": unit["index"],
+                        "uses_summary": isinstance(summary, str) and bool(summary.strip()),
+                    },
+                })
+            # Advance running history through every trajectory in this task
+            # (initial + corrections) before moving on to the next task.
+            for traj in trajs:
+                prev_msgs.extend(traj.get("messages") or [])
+    return examples
+
+
+# ---------------------------------------------------------------------------
 # REINFORCE extraction
 # ---------------------------------------------------------------------------
 # TODO (future): migrate to the file-centric approach used by DPO and OPD.

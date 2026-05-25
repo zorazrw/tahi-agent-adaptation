@@ -11,8 +11,8 @@ update_every_n_sessions: 6
 # -- Training (shared) --
 lora_rank: 64
 dry_run: false
-learning_rate: 5e-5
-num_epochs: 8
+learning_rate: 5.0e-5
+num_epochs: 6
 batch_size: 8
 lr_schedule: cosine
 max_steps: null
@@ -36,10 +36,15 @@ opd_use_student: true
 opd_rollout_attempts: 1
 opd_teacher_temperature: 1.0
 opd_log_rollout_samples: true
-opd_rollout_sample_log_chars: 4000
+opd_rollout_sample_log_chars: 16384
+opd_log_teacher_prompts: true
 # Set true only for a prompt-control upper-bound experiment. Default false keeps
 # train-time rollout prompts matched to normal inference prompts.
 opd_artifact_only_rollout_instruction: false
+opd_extract_version: v2  # "v1" (file-centric, needs per-round output_files)
+                         # "v2" (per-assistant-message)
+opd_strip_thinking_from_history: false
+opd_rollout_pipeline: current
 
 # -- REINFORCE-specific --
 reward_alpha: 0.05

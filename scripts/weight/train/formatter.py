@@ -35,12 +35,14 @@ try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts
     from weight.data.extract import (  # type: ignore[import-not-found]  # noqa: E402
         extract_dpo_pairs,
         extract_opd_examples,
+        extract_opd_examples_v2,
         extract_reinforce_examples,
     )
 except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
     from ..data.extract import (  # noqa: E402
         extract_dpo_pairs,
         extract_opd_examples,
+        extract_opd_examples_v2,
         extract_reinforce_examples,
     )
 
@@ -326,9 +328,14 @@ class OfflineOPDDataset:
         pair_mode: str = "first_last",
         use_gt: bool = True,
         use_student: bool = True,
+        extract_version: str = "v2",
     ) -> "OfflineOPDDataset":
         sessions = _load_sessions(path)
-        examples = extract_opd_examples(
+        extract_fn = (
+            extract_opd_examples_v2 if extract_version == "v2"
+            else extract_opd_examples
+        )
+        examples = extract_fn(
             sessions,
             renderer=renderer,
             pair_mode=pair_mode,
@@ -336,8 +343,9 @@ class OfflineOPDDataset:
             use_student=use_student,
         )
         logger.info(
-            "Loaded %d OPD examples from %s (pair_mode=%s, use_gt=%s, use_student=%s)",
-            len(examples), path, pair_mode, use_gt, use_student,
+            "Loaded %d OPD examples from %s "
+            "(extract=%s, pair_mode=%s, use_gt=%s, use_student=%s)",
+            len(examples), path, extract_version, pair_mode, use_gt, use_student,
         )
 
         student_datums: list[tinker.Datum] = []

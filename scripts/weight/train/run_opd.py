@@ -41,15 +41,24 @@ import torch
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.renderers import TrainOnWhat
+from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
+from tinker_cookbook.rl.rollouts import do_group_rollout_and_filter_constant_reward
+from tinker_cookbook.rl.types import EnvGroupBuilder, StepResult
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.format_colorized import format_colorized
 from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_multiplier
 
 try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts.weight...`.
-    from weight.data.extract import extract_opd_examples  # type: ignore[import-not-found]
+    from weight.data.extract import (  # type: ignore[import-not-found]
+        extract_opd_examples,
+        extract_opd_examples_v2,
+    )
 except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
-    from ..data.extract import extract_opd_examples
+    from ..data.extract import (
+        extract_opd_examples,
+        extract_opd_examples_v2,
+    )
 
 from .formatter import OfflineOPDDataset, _hydrate_tool_calls, _load_sessions
 
@@ -152,6 +161,7 @@ class Config:
     pair_mode: str = "first_last"   # "first_last" | "adjacent" (file-centric)
     use_gt: bool = True             # append last-version artifact to teacher prompt
     use_student: bool = True        # append student artifact to teacher prompt
+    extract_version: str = "v2"
 
     # Top-K distillation (Tinker only; ignored when use_skyrl=True).
     # topk > 0 → forward KL distillation with K teacher vocabulary candidates
@@ -175,7 +185,23 @@ class Config:
     rollout_attempts: int = 1
     log_rollout_samples: bool = True
     rollout_sample_log_chars: int = 4000
+    log_teacher_prompts: bool = True
     artifact_only_rollout_instruction: bool = False
+    strip_thinking_from_history: bool = False
+
+    # Rollout pipeline selection.  "current" (default) runs
+    # ``sampling_client.sample_async`` directly per row and constructs a
+    # supervised datum from the canonical assistant message produced by the
+    # renderer (parse-filter + canonicalization in the loop).  "legacy"
+    # routes through the cookbook ``do_group_rollout_and_filter_constant_reward``
+    # + ``assemble_training_data`` path used by the legacy ``tinker_opd``
+    # recipe: builds a ``_PromptOnlyEnv`` per row, runs the standard cookbook
+    # rollout loop with group_size=1 and zero reward, and trains on the
+    # raw sampled tokens (no parse-filter, no canonicalization, no retry).
+    # Pick "legacy" to reproduce the original training dynamics.
+    rollout_pipeline: str = "current"
+
+    span_chart_every: int = 0
 
 def _extract_completion_info(
     datum: tinker.Datum,
@@ -920,18 +946,90 @@ def _sample_is_valid_artifact_write(
     return ok, reason
 
 
+def _parse_v2_message(
+    renderer: renderers.Renderer,
+    tokens: list[int],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """v2 (per-assistant-message) on-policy filter.
+
+    Unlike :func:`_parse_valid_artifact_write_message` (v1, artifact-only),
+    v2 trains on the verbatim assistant turn — which can be free-form text,
+    any tool call (bash/edit/read/grep/...), or multiple tool calls. The
+    only contract is that the renderer can successfully parse the sampled
+    tokens back into a well-formed assistant message.
+
+    Returns the parsed message with every tool call normalised into the
+    plain-dict shape :func:`weight.train.formatter._hydrate_tool_calls`
+    expects — ``{"type": "function", "id": ..., "function": {"name":
+    ..., "arguments": ...}}`` — because ``renderer.parse_response``
+    returns ``tool_calls`` as pydantic ``ToolCall`` objects that the
+    hydrator (designed for on-disk dict-form session JSON) does not know
+    how to read. No write canonicalisation, no bash heredoc salvage, no
+    tool-call count check. An assistant turn that contains neither prose
+    nor any tool_calls is rejected because it carries no learning signal.
+    """
+    try:
+        message, parse_success = renderer.parse_response(tokens)
+    except Exception as e:  # noqa: BLE001
+        return False, f"parse_exception:{type(e).__name__}", None
+    if not parse_success:
+        return False, "parse_failed", None
+    content = message.get("content")
+    raw_tool_calls = message.get("tool_calls") or []
+    has_text = isinstance(content, str) and content.strip() != ""
+    if not has_text and not raw_tool_calls:
+        return False, "empty_message", None
+
+    normalized_tool_calls: list[dict[str, Any]] = []
+    for tc in raw_tool_calls:
+        name, args_text = _tool_call_name_and_args(tc)
+        if name is None or not isinstance(args_text, str):
+            return False, "tool_call_malformed", None
+        tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+        normalized_tool_calls.append({
+            "type": "function",
+            "id": tc_id,
+            "function": {"name": name, "arguments": args_text},
+        })
+
+    normalized: dict[str, Any] = {
+        "role": message.get("role", "assistant"),
+        "content": content if isinstance(content, str) else "",
+    }
+    if normalized_tool_calls:
+        normalized["tool_calls"] = normalized_tool_calls
+    return True, "valid", normalized
+
+
 def _summarize_sample(
     renderer: renderers.Renderer,
     tokens: list[int],
-    expected_path: str,
+    expected_path: str | None,
     ok: bool,
     reason: str,
     row_index: int,
     attempt_index: int,
     step: int,
     max_chars: int,
+    extract_version: str = "v1",
+    teacher_prompt_input: tinker.ModelInput | None = None,
 ) -> dict[str, Any]:
-    """Build a JSONL-safe diagnostic record for one online rollout sample."""
+    """Build a JSONL-safe diagnostic record for one online rollout sample.
+
+    Under ``extract_version="v1"`` the returned record is bit-identical to
+    the original (no ``extract_version`` key; ``expected_path`` is the
+    v1 artifact path string). Under ``"v2"`` the record adds an
+    ``extract_version`` field and ``expected_path`` is ``None`` because
+    v2 does not derive an artifact path from the historical completion.
+
+    When ``teacher_prompt_input`` is provided, the record additionally
+    carries ``teacher_prompt_preview`` (decoded, truncated to
+    ``max_chars``) and ``teacher_prompt_token_count`` so the prompt that
+    was scored against this student rollout is recoverable for offline
+    analysis. The teacher prompt is logged only when the caller opts in
+    (default off) because it can run up to the model's full context
+    length.
+    """
     raw_text = str(renderer.tokenizer.decode(tokens))
     parsed_tool_names: list[str] = []
     parsed_path: str | None = None
@@ -958,7 +1056,7 @@ def _summarize_sample(
     except Exception as e:  # noqa: BLE001
         parsed_tool_names.append(f"parse_exception:{type(e).__name__}")
 
-    return {
+    record: dict[str, Any] = {
         "step": step,
         "row_index": row_index,
         "attempt_index": attempt_index,
@@ -972,6 +1070,19 @@ def _summarize_sample(
         "raw_text_preview": raw_text[:max_chars],
         "raw_token_count": len(tokens),
     }
+    if extract_version != "v1":
+        record["extract_version"] = extract_version
+    if teacher_prompt_input is not None:
+        try:
+            teacher_tokens = list(teacher_prompt_input.to_ints())
+            teacher_text = str(renderer.tokenizer.decode(teacher_tokens))
+            record["teacher_prompt_preview"] = teacher_text[:max_chars]
+            record["teacher_prompt_token_count"] = len(teacher_tokens)
+        except Exception as e:  # noqa: BLE001
+            record["teacher_prompt_preview"] = None
+            record["teacher_prompt_token_count"] = None
+            record["teacher_prompt_error"] = f"{type(e).__name__}: {e}"
+    return record
 
 
 def _datum_from_prompt_and_sample_tokens(
@@ -1062,14 +1173,31 @@ class OnlineOPDRolloutDataset:
         max_length: int | None,
         batch_size: int,
         artifact_only_instruction: bool = False,
+        extract_version: str = "v1",
     ):
+        if extract_version == "v2" and artifact_only_instruction:
+            logger.warning(
+                "artifact_only_instruction=True is v1-only (it instructs the "
+                "model to emit exactly one write() call) and is incompatible "
+                "with extract_version='v2'. Forcing artifact_only_instruction "
+                "to False for this dataset.",
+            )
+            artifact_only_instruction = False
+
         rows: list[dict[str, Any]] = []
         for ex in examples:
-            expected_path = _completion_expected_path(ex.get("completion", []))
-            if expected_path is None:
-                continue
+            if extract_version == "v2":
+                # v2 trains on the verbatim assistant turn; the historical
+                # completion is not necessarily an artifact write, so we don't
+                # derive an expected path or filter rows on it.
+                expected_path = None
+            else:
+                expected_path = _completion_expected_path(ex.get("completion", []))
+                if expected_path is None:
+                    continue
             student_prompt = ex["student_prompt"]
             if artifact_only_instruction:
+                assert expected_path is not None  # guarded above for v2
                 student_prompt = _with_artifact_only_instruction(
                     student_prompt, expected_path,
                 )
@@ -1090,6 +1218,7 @@ class OnlineOPDRolloutDataset:
         self._renderer = renderer
         self._max_length = max_length
         self._batch_size = batch_size
+        self._extract_version = extract_version
         self._indices = list(range(len(rows)))
 
     @classmethod
@@ -1103,8 +1232,13 @@ class OnlineOPDRolloutDataset:
         use_gt: bool = True,
         use_student: bool = True,
         artifact_only_instruction: bool = False,
+        extract_version: str = "v2",
     ) -> "OnlineOPDRolloutDataset":
-        examples = extract_opd_examples(
+        extract_fn = (
+            extract_opd_examples_v2 if extract_version == "v2"
+            else extract_opd_examples
+        )
+        examples = extract_fn(
             _load_sessions(path),
             renderer=renderer,
             pair_mode=pair_mode,
@@ -1117,11 +1251,13 @@ class OnlineOPDRolloutDataset:
             max_length,
             batch_size,
             artifact_only_instruction=artifact_only_instruction,
+            extract_version=extract_version,
         )
         logger.info(
             "Loaded %d online OPD rollout examples from %s "
-            "(raw=%d, pair_mode=%s, use_gt=%s, use_student=%s)",
-            len(dataset._rows), path, len(examples), pair_mode, use_gt, use_student,
+            "(extract=%s, raw=%d, pair_mode=%s, use_gt=%s, use_student=%s)",
+            len(dataset._rows), path, extract_version, len(examples),
+            pair_mode, use_gt, use_student,
         )
         return dataset
 
@@ -1143,6 +1279,260 @@ class OnlineOPDRolloutDataset:
         return [self._rows[self._indices[i]] for i in range(start, end)]
 
 
+# ---------------------------------------------------------------------------
+# Legacy-pipeline rollout adapters
+# ---------------------------------------------------------------------------
+#
+# These adapters route v2 rollout requests through the cookbook's standard
+# group-rollout machinery (``do_group_rollout_and_filter_constant_reward`` +
+# ``assemble_training_data``).  This is the same pipeline the legacy
+# ``tinker_opd`` recipe uses via ``_OPDEnvGroupBuilder`` + ``_PromptOnlyEnv``
+# (see ``scripts/tinker_formatter.py`` in the legacy tree).  The point is to
+# train on the *raw* sampled tokens (no parse-filter, no canonicalization, no
+# retry) so the policy-gradient/distillation signal sees exactly what the
+# student emitted, matching legacy training dynamics bit-for-bit.
+
+
+class _OPDV2PromptOnlyEnv:
+    """Minimal single-turn, zero-reward env that emits ``prompt_input``.
+
+    Mirrors the legacy ``_PromptOnlyEnv`` so the cookbook rollout loop can
+    drive it without any RL-specific reward / multi-turn logic.
+    """
+
+    def __init__(
+        self, prompt_input: tinker.ModelInput, stop_condition: list[str] | list[int],
+    ):
+        self._prompt = prompt_input
+        self._stop_condition = stop_condition
+
+    async def initial_observation(self) -> tuple[tinker.ModelInput, list[str] | list[int]]:
+        return self._prompt, self._stop_condition
+
+    async def step(self, action: Any, *, extra: Any | None = None) -> StepResult:
+        return StepResult(
+            reward=0.0,
+            episode_done=True,
+            next_observation=self._prompt,  # unused after terminal transition
+            next_stop_condition=self._stop_condition,
+            metrics={},
+            logs={},
+        )
+
+
+class _OPDV2EnvGroupBuilder(EnvGroupBuilder):
+    """One-env-per-builder wrapper around a single v2 dataset row.
+
+    We always use ``group_size=1`` because SDFT does not need GRPO-style
+    grouped trajectories — each row is an independent supervised example.
+    """
+
+    def __init__(
+        self,
+        prompt_input: tinker.ModelInput,
+        stop_condition: list[str] | list[int],
+    ):
+        self._prompt_input = prompt_input
+        self._stop_condition = stop_condition
+
+    async def make_envs(self):
+        return [_OPDV2PromptOnlyEnv(self._prompt_input, self._stop_condition)]
+
+    def logging_tags(self) -> list[str]:
+        return ["opd_v2"]
+
+
+def _legacy_datum_to_weights_datum(datum: tinker.Datum) -> tinker.Datum:
+    """Translate a cookbook ``assemble_training_data`` datum to the local schema.
+
+    Cookbook's ``trajectory_to_data`` emits
+    ``loss_fn_inputs = {target_tokens, logprobs, advantages, mask}``.  The
+    downstream OPD code (``_build_offline_topk_datums_async`` and friends)
+    reads ``weights`` + ``target_tokens``.  This shim copies ``mask`` into
+    ``weights`` so the rest of the pipeline stays untouched.  ``logprobs``
+    and ``advantages`` are dropped because top-K CE distillation does not
+    consume them.
+    """
+    mask = datum.loss_fn_inputs["mask"]
+    target_tokens = datum.loss_fn_inputs["target_tokens"]
+    return tinker.Datum(
+        model_input=datum.model_input,
+        loss_fn_inputs={
+            "weights": mask,
+            "target_tokens": target_tokens,
+        },
+    )
+
+
+async def _sample_legacy_pipeline_datums_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    max_tokens: int,
+    temperature: float,
+    max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+    sample_log_chars: int = 4000,
+    extract_version: str = "v2",
+    log_teacher_prompts: bool = False,
+) -> tuple[list[tinker.Datum], list[tinker.ModelInput], dict[str, float]]:
+    """Legacy-pipeline rollout: cookbook ``do_group_rollout_*`` + ``assemble_training_data``.
+
+    For each row we build a single-env ``_OPDV2EnvGroupBuilder``, dispatch
+    ``do_group_rollout_and_filter_constant_reward(..., do_remove_constant_reward_groups=False)``,
+    then convert the resulting trajectory groups to datums via
+    ``assemble_training_data``.  No parse-filter, no canonicalization, no
+    retry — the trained tokens are the raw sampled tokens.  Each row maps
+    1-to-1 to a trajectory group, so ``metadata_D[i]["group_idx"]`` directly
+    selects the originating row's teacher prompt.
+
+    The ``opd_online/*`` metric keys are kept identical to the current
+    pipeline so dashboards do not break.  ``opd_online/filter_reason/*``
+    keys are emitted with ``legacy_pipeline_*`` reasons to make it obvious
+    in the logs which branch produced the data.
+    """
+    stop_condition = renderer.get_stop_sequences()
+
+    valid_rows: list[tuple[int, dict[str, Any]]] = []
+    skipped_rows: list[tuple[int, dict[str, Any], str]] = []
+
+    rollout_tasks: list[Any] = []
+    indexed_rows = list(enumerate(rows))
+    for _row_idx, row in indexed_rows:
+        prompt_input = row.get("student_prompt_input")
+        if prompt_input is None:
+            continue
+        builder = _OPDV2EnvGroupBuilder(prompt_input, stop_condition)
+        rollout_tasks.append(
+            do_group_rollout_and_filter_constant_reward(
+                sampling_client=sampling_client,
+                env_group_builder=builder,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                do_remove_constant_reward_groups=False,
+                enable_logging=False,
+            )
+        )
+
+    rollout_results = await asyncio.gather(*rollout_tasks, return_exceptions=True)
+
+    trajectory_groups: list[Any] = []
+    row_for_group: list[dict[str, Any]] = []
+    row_idx_for_group: list[int] = []
+    error_counts: dict[str, int] = {}
+
+    for (row_idx, row), result in zip(indexed_rows, rollout_results, strict=True):
+        if isinstance(result, BaseException):
+            err_name = type(result).__name__
+            error_counts[err_name] = error_counts.get(err_name, 0) + 1
+            skipped_rows.append((row_idx, row, f"legacy_pipeline_exception:{err_name}"))
+            continue
+        if result is None:
+            skipped_rows.append((row_idx, row, "legacy_pipeline_skipped"))
+            continue
+        if not result.trajectories_G:
+            skipped_rows.append((row_idx, row, "legacy_pipeline_empty_group"))
+            continue
+        trajectory_groups.append(result)
+        row_for_group.append(row)
+        row_idx_for_group.append(row_idx)
+
+    advantages_P = compute_advantages(trajectory_groups) if trajectory_groups else []
+    data_D, metadata_D = (
+        assemble_training_data(trajectory_groups, advantages_P)
+        if trajectory_groups else ([], [])
+    )
+
+    valid_datums: list[tinker.Datum] = []
+    valid_teacher_prompts: list[tinker.ModelInput] = []
+    too_long_or_empty = 0
+
+    for datum, meta in zip(data_D, metadata_D, strict=True):
+        group_idx = int(meta["group_idx"])
+        row = row_for_group[group_idx]
+        translated = _legacy_datum_to_weights_datum(datum)
+        if max_length is not None and translated.model_input.length + 1 > max_length:
+            too_long_or_empty += 1
+            continue
+        valid_datums.append(translated)
+        valid_teacher_prompts.append(row["teacher_prompt_input"])
+        valid_rows.append((row_idx_for_group[group_idx], row))
+
+    sample_log_f = None
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_log_f = sample_log_path.open("a", encoding="utf-8")
+    try:
+        if sample_log_f is not None:
+            for group, row, row_idx in zip(
+                trajectory_groups, row_for_group, row_idx_for_group, strict=True,
+            ):
+                traj = group.trajectories_G[0]
+                tokens = list(traj.transitions[0].ac.tokens) if traj.transitions else []
+                rec = _summarize_sample(
+                    renderer,
+                    tokens,
+                    row.get("expected_path"),
+                    True,
+                    "legacy_pipeline_ok",
+                    row_idx,
+                    0,
+                    step,
+                    sample_log_chars,
+                    extract_version=extract_version,
+                    teacher_prompt_input=(
+                        row.get("teacher_prompt_input")
+                        if log_teacher_prompts else None
+                    ),
+                )
+                sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            for row_idx, row, reason in skipped_rows:
+                rec = _summarize_sample(
+                    renderer,
+                    [],
+                    row.get("expected_path"),
+                    False,
+                    reason,
+                    row_idx,
+                    0,
+                    step,
+                    sample_log_chars,
+                    extract_version=extract_version,
+                    teacher_prompt_input=(
+                        row.get("teacher_prompt_input")
+                        if log_teacher_prompts else None
+                    ),
+                )
+                sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            sample_log_f.flush()
+    finally:
+        if sample_log_f is not None:
+            sample_log_f.close()
+
+    n_rows = float(len(rows))
+    n_valid = float(len(valid_datums))
+    metrics: dict[str, float] = {
+        "opd_online/batch_examples": n_rows,
+        "opd_online/valid_examples": n_valid,
+        "opd_online/filtered_examples": n_rows - n_valid,
+        "opd_online/filter_rate": (n_rows - n_valid) / max(n_rows, 1.0),
+        # Each row gets exactly one rollout attempt in the legacy pipeline
+        # (no retry loop).  Skipped/exception rows still count as "attempted".
+        "opd_online/attempts": n_rows,
+    }
+    metrics["opd_online/filter_reason/legacy_pipeline_ok"] = float(len(valid_datums))
+    if too_long_or_empty:
+        metrics["opd_online/filter_reason/legacy_pipeline_too_long"] = float(too_long_or_empty)
+    skipped_counts: dict[str, int] = {}
+    for _row_idx, _row, reason in skipped_rows:
+        skipped_counts[reason] = skipped_counts.get(reason, 0) + 1
+    for reason, count in skipped_counts.items():
+        safe_reason = reason.replace("/", "_").replace(":", "_")
+        metrics[f"opd_online/filter_reason/{safe_reason}"] = float(count)
+    return valid_datums, valid_teacher_prompts, metrics
+
+
 async def _sample_online_artifact_datums_async(
     rows: list[dict[str, Any]],
     renderer: renderers.Renderer,
@@ -1154,8 +1544,48 @@ async def _sample_online_artifact_datums_async(
     step: int,
     sample_log_path: Path | None = None,
     sample_log_chars: int = 4000,
+    extract_version: str = "v1",
+    log_teacher_prompts: bool = False,
+    rollout_pipeline: str = "current",
 ) -> tuple[list[tinker.Datum], list[tinker.ModelInput], dict[str, float]]:
-    """Sample student completions and keep only valid artifact write calls."""
+    """Sample student completions and keep only valid responses.
+
+    Filter semantics depend on ``extract_version``:
+
+    * ``"v1"`` (default; legacy artifact-only): the sampled response must
+      parse as exactly one ``write(path, non-empty content)`` tool call
+      (or a narrow ``bash`` heredoc that we salvage into one). The trained
+      message is a canonicalised single-write call.
+    * ``"v2"`` (per-assistant-message): the sampled response only needs to
+      parse into a well-formed assistant message with non-empty
+      content or any tool calls. The trained message is the parsed
+      assistant turn, verbatim.
+
+    ``rollout_pipeline`` selects the dispatch path:
+
+    * ``"current"`` (default): in-house ``sample_async`` loop with
+      parse-filter + canonicalization + optional retry per row.
+    * ``"legacy"``: cookbook ``do_group_rollout_and_filter_constant_reward``
+      + ``assemble_training_data`` path used by the legacy ``tinker_opd``
+      recipe.  Trains on raw sampled tokens (no parse-filter, no
+      canonicalization, no retry).  ``attempts`` is ignored in this mode
+      because the legacy pipeline does not retry per row.
+    """
+    if rollout_pipeline == "legacy":
+        return await _sample_legacy_pipeline_datums_async(
+            rows=rows,
+            renderer=renderer,
+            sampling_client=sampling_client,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_length=max_length,
+            step=step,
+            sample_log_path=sample_log_path,
+            sample_log_chars=sample_log_chars,
+            extract_version=extract_version,
+            log_teacher_prompts=log_teacher_prompts,
+        )
+
     valid_datums: list[tinker.Datum] = []
     valid_teacher_prompts: list[tinker.ModelInput] = []
     reason_counts: dict[str, int] = {}
@@ -1189,9 +1619,14 @@ async def _sample_online_artifact_datums_async(
             for (row_idx, row), result in zip(pending, results, strict=True):
                 expected_path = row["expected_path"]
                 tokens = list(result.sequences[0].tokens)
-                ok, reason, canonical_message = _parse_valid_artifact_write_message(
-                    renderer, tokens, expected_path,
-                )
+                if extract_version == "v2":
+                    ok, reason, canonical_message = _parse_v2_message(
+                        renderer, tokens,
+                    )
+                else:
+                    ok, reason, canonical_message = _parse_valid_artifact_write_message(
+                        renderer, tokens, expected_path,
+                    )
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 if sample_log_f is not None:
                     rec = _summarize_sample(
@@ -1204,6 +1639,11 @@ async def _sample_online_artifact_datums_async(
                         attempt_idx,
                         step,
                         sample_log_chars,
+                        extract_version=extract_version,
+                        teacher_prompt_input=(
+                            row.get("teacher_prompt_input")
+                            if log_teacher_prompts else None
+                        ),
                     )
                     sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                     sample_log_f.flush()
@@ -1267,6 +1707,9 @@ def sample_online_artifact_datums(
             if config.log_rollout_samples else None
         ),
         sample_log_chars=config.rollout_sample_log_chars,
+        extract_version=config.extract_version,
+        log_teacher_prompts=config.log_teacher_prompts,
+        rollout_pipeline=config.rollout_pipeline,
     ))
 
 
@@ -1800,6 +2243,15 @@ if __name__ == "__main__":
         help="Max characters of raw/parsed online rollout text to store per sample.",
     )
     parser.add_argument(
+        "--log-teacher-prompts", action="store_true",
+        help=(
+            "Augment online_rollout_samples.jsonl records with the decoded "
+            "teacher prompt (truncated to --rollout-sample-log-chars) and its "
+            "token count. Off by default because teacher prompts can run up "
+            "to the model's full context length."
+        ),
+    )
+    parser.add_argument(
         "--artifact-only-rollout-instruction", action="store_true",
         help=(
             "Append a rollout-only instruction to the last user turn requiring "
@@ -1807,10 +2259,49 @@ if __name__ == "__main__":
             "the rollout prompt matched to inference."
         ),
     )
+    parser.add_argument(
+        "--extract-version", choices=["v1", "v2"], default="v2",
+        help=(
+            "OPD extractor selection. "
+        ),
+    )
+    parser.add_argument(
+        "--rollout-pipeline",
+        choices=["current", "legacy"],
+        default="current",
+        help=(
+            "Rollout dispatch path. 'current' (default): in-house "
+            "sample_async + parse-filter + canonicalization + retry. "
+            "'legacy': cookbook do_group_rollout_and_filter_constant_reward "
+            "+ assemble_training_data, training on raw sampled tokens (no "
+            "parse-filter, no canonicalization, no retry) — matches the "
+            "legacy tinker_opd recipe's training dynamics."
+        ),
+    )
+    parser.add_argument(
+        "--strip-thinking-from-history",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Reasoning renderers (Qwen3/Kimi K2/DeepSeek thinking) strip "
+            "<think>...</think> blocks from non-last assistant turns by "
+            "default. SDFT teacher prompts always end with a redo user "
+            "message, so every assistant turn (including the golden demo) "
+            "sits in non-last position. Default --no-strip-thinking-from-history "
+            "preserves the golden chain-of-thought so the teacher can attend "
+            "to it (matches legacy tinker_opd.Config)."
+        ),
+    )
     args = parser.parse_args()
 
     tokenizer = get_tokenizer(args.model_name)
     renderer = renderers.get_renderer(args.renderer_name, tokenizer=tokenizer)
+    if hasattr(renderer, "strip_thinking_from_history"):
+        renderer.strip_thinking_from_history = args.strip_thinking_from_history
+        logger.info(
+            "Renderer %s: strip_thinking_from_history=%s",
+            type(renderer).__name__, args.strip_thinking_from_history,
+        )
 
     cfg = Config(
         log_path=args.log_path,
@@ -1838,7 +2329,11 @@ if __name__ == "__main__":
         rollout_attempts=args.rollout_attempts,
         log_rollout_samples=not args.no_log_rollout_samples,
         rollout_sample_log_chars=args.rollout_sample_log_chars,
+        log_teacher_prompts=args.log_teacher_prompts,
         artifact_only_rollout_instruction=args.artifact_only_rollout_instruction,
+        extract_version=args.extract_version,
+        strip_thinking_from_history=args.strip_thinking_from_history,
+        rollout_pipeline=args.rollout_pipeline,
     )
 
     if args.online_rollout:
@@ -1851,6 +2346,7 @@ if __name__ == "__main__":
             use_gt=args.use_gt,
             use_student=args.use_student,
             artifact_only_instruction=args.artifact_only_rollout_instruction,
+            extract_version=args.extract_version,
         )
         main_online(cfg, online_dataset, renderer, tokenizer)
     else:
@@ -1862,5 +2358,6 @@ if __name__ == "__main__":
             pair_mode=args.pair_mode,
             use_gt=args.use_gt,
             use_student=args.use_student,
+            extract_version=args.extract_version,
         )
         main(cfg, dataset)
