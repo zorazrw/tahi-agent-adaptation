@@ -551,7 +551,7 @@ async function main(): Promise<void> {
     "- Each case hides one real user action and predicts it from only the prior trajectory prefix.",
     "- Baseline uses the same model/context with an empty user profile.",
     "- Personalized uses the same model/context plus the local USER_PROFILE.md.",
-    "- When baseline is enabled, judging is a direct pairwise LLM ranking between the empty-profile and user-profile predictions.",
+    "- When baseline is enabled, judging is an anonymized pairwise LLM ranking; prediction order is randomized before mapping the judge result back to baseline/personalized.",
     "- When baseline is skipped, judging falls back to the legacy single-prediction LLM score.",
     "",
     "## Cases",

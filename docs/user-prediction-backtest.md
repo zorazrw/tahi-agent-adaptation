@@ -10,7 +10,7 @@ The backtest replays historical Agent Cowork sessions. For each selected user tu
 2. builds the same transcript and workflow summary used by the app
 3. asks the predictor for the next user action
 4. optionally runs a baseline with an empty user profile
-5. when the baseline is enabled, asks an LLM judge to directly rank the with-profile prediction against the empty-profile prediction
+5. when the baseline is enabled, asks an LLM judge to rank the two predictions after anonymizing and randomizing their order
 6. when the baseline is skipped, falls back to the legacy single-prediction judge score
 
 The script writes both a Markdown summary and a JSON report. The JSON report powers the interactive report viewer.

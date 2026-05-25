@@ -153,6 +153,9 @@ function normalizeJudgeVerdict(value: unknown): UserPredictionJudgeResult["verdi
   return "inaccurate";
 }
 
+type PairwisePredictionArm = Exclude<UserPredictionPairwiseJudgeResult["winner"], "tie">;
+type PairwisePromptWinner = "prediction_a" | "prediction_b" | "tie";
+
 function normalizePairwiseWinner(value: unknown): UserPredictionPairwiseJudgeResult["winner"] {
   const raw = asString(value).trim().toLowerCase();
   if (raw === "personalized" || raw === "with_profile" || raw === "with profile") {
@@ -161,6 +164,17 @@ function normalizePairwiseWinner(value: unknown): UserPredictionPairwiseJudgeRes
   if (raw === "baseline" || raw === "without_profile" || raw === "without profile" || raw === "no_profile") {
     return "baseline";
   }
+  return "tie";
+}
+
+function normalizePairwisePromptWinner(value: unknown): PairwisePromptWinner {
+  const raw = asString(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (raw === "prediction_a" || raw === "a") return "prediction_a";
+  if (raw === "prediction_b" || raw === "b") return "prediction_b";
   return "tie";
 }
 
@@ -491,14 +505,33 @@ function buildPairwiseJudgePrompt(args: {
   personalizedPredictionError?: string;
   actualActionType: string;
   actualActionText: string;
-}): string {
-  return [
+}): {
+  prompt: string;
+  predictionA: PairwisePredictionArm;
+  predictionB: PairwisePredictionArm;
+} {
+  const baselineFirst = Math.random() < 0.5;
+  const predictionA: PairwisePredictionArm = baselineFirst ? "baseline" : "personalized";
+  const predictionB: PairwisePredictionArm = baselineFirst ? "personalized" : "baseline";
+  const predictions = {
+    baseline: {
+      prediction: args.baselinePrediction,
+      error: args.baselinePredictionError,
+    },
+    personalized: {
+      prediction: args.personalizedPrediction,
+      error: args.personalizedPredictionError,
+    },
+  };
+
+  const prompt = [
     "You are comparing two predicted next user actions against the actual next user step.",
     "Return ONLY JSON.",
-    'Schema: {"winner":"personalized|baseline|tie","rationale":"string"}',
+    'Schema: {"winner":"prediction_a|prediction_b|tie","rationale":"string"}',
     "Rank the two predictions by which one would have been more useful for anticipating the user's actual next action.",
     "Judge underlying intent more than exact UI action label.",
     "Use winner='tie' when both predictions are similarly useful, similarly wrong, or impossible to distinguish.",
+    "Do not infer how either prediction was generated. Compare only the prediction content shown below.",
     "",
     "RECENT CONTEXT:",
     args.transcript || "(none)",
@@ -507,25 +540,27 @@ function buildPairwiseJudgePrompt(args: {
       ? ["WORKFLOW / VERIFIER SUMMARY:", args.workflowSummary, ""].join("\n")
       : "",
     predictionForPairwisePrompt(
-      "PREDICTION A - WITHOUT USER PROFILE",
-      args.baselinePrediction,
-      args.baselinePredictionError
+      "PREDICTION A",
+      predictions[predictionA].prediction,
+      predictions[predictionA].error
     ),
     "",
     predictionForPairwisePrompt(
-      "PREDICTION B - WITH USER PROFILE",
-      args.personalizedPrediction,
-      args.personalizedPredictionError
+      "PREDICTION B",
+      predictions[predictionB].prediction,
+      predictions[predictionB].error
     ),
     "",
     "ACTUAL NEXT USER STEP:",
     `actionType: ${args.actualActionType}`,
     `actionText: ${args.actualActionText || "(empty)"}`,
     "",
-    "Which prediction should rank higher: personalized, baseline, or tie?",
+    "Which prediction should rank higher: prediction_a, prediction_b, or tie?",
   ]
     .filter(Boolean)
     .join("\n");
+
+  return { prompt, predictionA, predictionB };
 }
 
 export async function judgePredictedAction(args: {
@@ -570,9 +605,10 @@ export async function judgePredictionPair(args: {
   actualActionType: string;
   actualActionText: string;
 }): Promise<UserPredictionPairwiseJudgeResult> {
+  const promptBuild = buildPairwiseJudgePrompt(args);
   const rawResponse = await runPiTextPrompt({
     cwd: args.cwd,
-    prompt: buildPairwiseJudgePrompt(args),
+    prompt: promptBuild.prompt,
   });
 
   const parsed = extractJsonObject(rawResponse);
@@ -584,8 +620,16 @@ export async function judgePredictionPair(args: {
     };
   }
 
+  const promptWinner = normalizePairwisePromptWinner(parsed.winner);
+  const winner =
+    promptWinner === "prediction_a"
+      ? promptBuild.predictionA
+      : promptWinner === "prediction_b"
+        ? promptBuild.predictionB
+        : normalizePairwiseWinner(parsed.winner);
+
   return {
-    winner: normalizePairwiseWinner(parsed.winner),
+    winner,
     rationale: asString(parsed.rationale).trim(),
     rawResponse,
   };
