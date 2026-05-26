@@ -19,13 +19,13 @@ python scripts/prediction_stats.py --json
 
 **Usage:**
 ```bash
-python scripts/export_task_sessions.py -o out.json
+python scripts/tasks/export_task_sessions.py -o out.json
 
 # Single session
-python scripts/export_task_sessions.py --session-id <uuid> -o session.json
+python scripts/tasks/export_task_sessions.py --session-id <uuid> -o session.json
 
 # Weight-based export (for training; see Formats table above)
-python scripts/export_task_sessions.py --format weight -o out_weight.json
+python scripts/tasks/export_task_sessions.py --format weight -o out_weight.json
 ```
 
 **Exported Data Structure:**
@@ -99,7 +99,7 @@ to run tinker training, use the following commands:
 
 ```bash
 cd scripts
-python export_task_sessions.py -o out.json
+python tasks/export_task_sessions.py --format weight -o out.json
 
 # DPO
 python export_dpo_data.py out.json -o out_dpo.json

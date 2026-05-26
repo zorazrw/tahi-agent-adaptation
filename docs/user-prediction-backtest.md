@@ -37,13 +37,13 @@ To create `USER_PROFILE.md`, open Agent Cowork settings, go to the **Profile** t
 
 ## 1. Export session data
 
-The backtest expects the default export format from `scripts/export_task_sessions.py`.
+The backtest expects the default export format from `scripts/tasks/export_task_sessions.py`.
 
 Export the most recent sessions:
 
 ```bash
 mkdir -p docs/backtests
-python3 scripts/export_task_sessions.py \
+python3 scripts/tasks/export_task_sessions.py \
   --limit 40 \
   --output docs/backtests/sessions-last-40.json
 ```
@@ -51,7 +51,7 @@ python3 scripts/export_task_sessions.py \
 Export one session by id:
 
 ```bash
-python3 scripts/export_task_sessions.py \
+python3 scripts/tasks/export_task_sessions.py \
   --session-id SESSION_UUID \
   --output docs/backtests/session-SESSION_UUID.json
 ```
@@ -62,7 +62,7 @@ Use a non-default database path:
 
 ```bash
 AGENT_COWORK_DB="/path/to/sessions.db" \
-python3 scripts/export_task_sessions.py \
+python3 scripts/tasks/export_task_sessions.py \
   --limit 40 \
   --output docs/backtests/sessions-last-40.json
 ```
@@ -70,7 +70,7 @@ python3 scripts/export_task_sessions.py \
 Equivalent explicit database flag:
 
 ```bash
-python3 scripts/export_task_sessions.py \
+python3 scripts/tasks/export_task_sessions.py \
   --db "/path/to/sessions.db" \
   --limit 40 \
   --output docs/backtests/sessions-last-40.json

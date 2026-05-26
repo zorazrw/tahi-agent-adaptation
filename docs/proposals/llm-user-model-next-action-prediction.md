@@ -507,7 +507,7 @@ Do not train on raw strings like `message("...")`. Convert trajectory events int
 
 ### 3. Expand beyond the initial seed export
 
-Use `scripts/export_task_sessions.py` across the local session database and retain:
+Use `scripts/tasks/export_task_sessions.py` across the local session database and retain:
 
 - real user corrections
 - workflow edits
