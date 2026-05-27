@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { SaveIcon, Loader2Icon } from "lucide-react";
 import type { PreviewSaveChrome } from "./index";
 
@@ -36,6 +36,15 @@ export function EditableTextPanel({
   const [baseline, setBaseline] = useState(content);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const skipBlurSaveRef = useRef(false);
+
+  useEffect(() => {
+    const onDiscard = () => {
+      skipBlurSaveRef.current = true;
+    };
+    window.addEventListener("preview-reload-discard", onDiscard);
+    return () => window.removeEventListener("preview-reload-discard", onDiscard);
+  }, []);
 
   useEffect(() => {
     setLocal(content);
@@ -117,7 +126,15 @@ export function EditableTextPanel({
           setLocal(next);
           onContentChange?.(next);
         }}
-        onBlur={() => void handleSave()}
+        onBlur={(e) => {
+          if (skipBlurSaveRef.current) {
+            skipBlurSaveRef.current = false;
+            return;
+          }
+          const next = e.relatedTarget;
+          if (next instanceof Element && next.closest("[data-preview-toolbar]")) return;
+          void handleSave();
+        }}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
             e.preventDefault();
