@@ -119,6 +119,15 @@ type ResolveTinkerCheckpointResult =
     | { ok: true; base_model: string }
     | { ok: false; error: string };
 
+type TinkerModelUpdateEvent = {
+    slug: string;
+    model_path: string;
+    base_model: string | null;
+    renderer_name: string | null;
+    mode: string;
+    updated_at: number;
+}
+
 type EventPayloadMapping = {
     statistics: Statistics;
     getStaticData: StaticData;
@@ -204,5 +213,6 @@ interface Window {
             | { success: true; path: string }
             | { success: false; canceled?: boolean; error?: string }
         >;
+        onTinkerModelUpdated: (callback: (event: TinkerModelUpdateEvent) => void) => UnsubscribeFunction;
     }
 }

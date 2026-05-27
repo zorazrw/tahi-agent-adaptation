@@ -284,6 +284,30 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       });
   }, []);
 
+  // Auto-sync the UI when the training proxy finishes a model update.
+  //
+  // By the time this fires, the Electron main process has already rewritten
+  // the OpenAI-compatible provider config (and, if applicable, updated the
+  // agent's default model) to point at the new slug. We just pull the fresh
+  // state so the selected model in the dropdown matches what's on disk – we
+  // do NOT force a provider switch.
+  useEffect(() => {
+    const unsubscribe = window.electron.onTinkerModelUpdated(async (event) => {
+      try {
+        const [settings, availableModels] = await Promise.all([
+          window.electron.getAgentSettings(),
+          window.electron.listAvailableModels(),
+          loadOpenAICompatibleProvider(),
+          loadTinkerProvider(),
+        ]);
+        await syncModelState(availableModels, { model: event.slug }, settings);
+      } catch (err) {
+        console.error("Failed to apply tinker model update in UI:", err);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   // Sync authMethod when provider or statuses change.
   useEffect(() => {
     const status = providerStatuses[provider];
