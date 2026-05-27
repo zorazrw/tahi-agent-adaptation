@@ -43,6 +43,18 @@ import {
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint, shutdownTinkerBridge } from "./libs/tinker-provider.js";
 import { defaultRecordingsZipName, exportRecordingsBundleToZip } from "./libs/recording-bundle.js";
+import {
+    buildTranscriptFromStreamMessages,
+    buildWorkflowSummaryFromTree,
+    resolveAppUserProfileMarkdown,
+    predictNextUserAction,
+    isFakeUserPredictEnabled,
+} from "./libs/user-predict.js";
+import {
+    generateUserProfileMarkdown,
+    readUserProfile,
+    writeUserProfile,
+} from "./libs/user-profile-generator.js";
 
 type SaveMemoryParseResult =
     | { ok: true; sections: { fileName: string; content: string }[]; deletedFileNames: string[] | undefined }
@@ -254,6 +266,144 @@ app.on("ready", () => {
     ipcMainHandle("generate-session-title", async (_: any, userInput: string | null) => {
         return await generateSessionTitle(userInput);
     });
+
+    ipcMainHandle("predict-next-user-action", async (_: any, sessionId: string) => {
+        try {
+            const history = sessions.getSessionHistory(sessionId);
+            if (!history) {
+                return null;
+            }
+            const cwd = history.session.cwd ?? process.cwd();
+            const { profileMarkdown, profilePath } = resolveAppUserProfileMarkdown();
+            if (!profileMarkdown.trim() && !isFakeUserPredictEnabled()) {
+                return null;
+            }
+
+            const suggestion = await predictNextUserAction({
+                cwd,
+                userProfileMarkdown: profileMarkdown,
+                transcript: buildTranscriptFromStreamMessages(history.messages),
+                workflowTree: history.session.workflowTree,
+                workflowSummary: buildWorkflowSummaryFromTree(history.session.workflowTree),
+                sessionTitle: history.session.title,
+            });
+            if (!suggestion) {
+                return null;
+            }
+
+            return {
+                ...suggestion,
+                profilePath,
+            };
+        } catch (error) {
+            console.error("Failed to predict next user action:", error);
+            return null;
+        }
+    });
+
+    ipcMainHandle("get-prediction-stats", (_: any, sinceMs?: number | null) => {
+        const since = typeof sinceMs === "number" && Number.isFinite(sinceMs) ? sinceMs : undefined;
+        return sessions.getPredictionStats(since);
+    });
+
+    ipcMainHandle("get-prediction-log", (_: any, limit?: number | null) => {
+        return sessions.getPredictionLog(typeof limit === "number" && Number.isFinite(limit) ? limit : undefined);
+    });
+
+    ipcMainHandle("record-prediction-event", (_: any, payload: unknown) => {
+        try {
+            const e = payload as {
+                predictionId?: unknown;
+                sessionId?: unknown;
+                event?: unknown;
+                actionType?: unknown;
+                confidence?: unknown;
+                draftText?: unknown;
+                rationale?: unknown;
+                metadata?: unknown;
+            };
+            const predictionId = typeof e.predictionId === "string" ? e.predictionId : "";
+            const sessionId = typeof e.sessionId === "string" ? e.sessionId : "";
+            const eventName = typeof e.event === "string" ? e.event : "";
+            const actionType = typeof e.actionType === "string" ? e.actionType : "";
+            if (!predictionId || !sessionId || !eventName || !actionType) {
+                return { success: false };
+            }
+            if (!["shown", "accepted", "dismissed", "ignored"].includes(eventName)) {
+                return { success: false };
+            }
+            sessions.recordPredictionEvent({
+                predictionId,
+                sessionId,
+                event: eventName as "shown" | "accepted" | "dismissed" | "ignored",
+                actionType,
+                confidence: typeof e.confidence === "number" ? e.confidence : null,
+                draftText: typeof e.draftText === "string" ? e.draftText : null,
+                rationale: typeof e.rationale === "string" ? e.rationale : null,
+                metadata:
+                    e.metadata && typeof e.metadata === "object"
+                        ? (e.metadata as Record<string, unknown>)
+                        : null,
+            });
+            return { success: true };
+        } catch (error) {
+            console.error("Failed to record prediction event:", error);
+            return { success: false };
+        }
+    });
+
+    ipcMainHandle("get-user-profile", () => {
+        try {
+            return readUserProfile();
+        } catch (error) {
+            return {
+                markdown: "",
+                profilePath: "",
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
+    });
+
+    ipcMainHandle(
+        "save-user-profile",
+        async (_: any, payload: { markdown?: unknown; cwd?: unknown } | null) => {
+            try {
+                const markdown =
+                    typeof payload?.markdown === "string" ? payload.markdown : "";
+                const { profilePath } = await writeUserProfile({
+                    markdown,
+                });
+                return { success: true, profilePath };
+            } catch (error) {
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                };
+            }
+        }
+    );
+
+    ipcMainHandle(
+        "generate-user-profile",
+        async (_: any, payload: { lastN?: unknown; cwd?: unknown; writeToDisk?: unknown } | null) => {
+            try {
+                const lastNRaw = payload?.lastN;
+                const lastN =
+                    typeof lastNRaw === "number" ? lastNRaw : Number(lastNRaw ?? 10);
+                const writeToDisk = payload?.writeToDisk !== false;
+                return await generateUserProfileMarkdown({
+                    lastN: Number.isFinite(lastN) ? lastN : 10,
+                    sessionStore: sessions,
+                    writeToDisk,
+                });
+            } catch (error) {
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                };
+            }
+        }
+    );
 
     // Handle recent cwds request
     ipcMainHandle("get-recent-cwds", (_: any, limit?: number) => {

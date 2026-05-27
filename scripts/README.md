@@ -1,18 +1,31 @@
 # Data Export and Agent Update
 
+## Prediction-tab telemetry
+
+`prediction_stats.py` aggregates the `prediction_events` table (rows written
+by the renderer for each user-prediction surface: `shown`, `accepted`,
+`dismissed`, `ignored`).
+
+```bash
+python scripts/prediction_stats.py                    # overall accept / dismiss / ignore rates
+python scripts/prediction_stats.py --since-days 7
+python scripts/prediction_stats.py --session-id <uuid>
+python scripts/prediction_stats.py --json
+```
+
 ## Data Export
 
 `export_task_sessions.py` is a standalone Python 3 script (stdlib only) to export task sessions from the Agent Cowork SQLite database to JSON.
 
 **Usage:**
 ```bash
-python scripts/export_task_sessions.py -o out.json
+python scripts/tasks/export_task_sessions.py -o out.json
 
 # Single session
-python scripts/export_task_sessions.py --session-id <uuid> -o session.json
+python scripts/tasks/export_task_sessions.py --session-id <uuid> -o session.json
 
 # Weight-based export (for training; see Formats table above)
-python scripts/export_task_sessions.py --format weight -o out_weight.json
+python scripts/tasks/export_task_sessions.py --format weight -o out_weight.json
 ```
 
 **Exported Data Structure:**
@@ -86,7 +99,7 @@ to run tinker training, use the following commands:
 
 ```bash
 cd scripts
-python export_task_sessions.py -o out.json
+python tasks/export_task_sessions.py --format weight -o out.json
 
 # DPO
 python export_dpo_data.py out.json -o out_dpo.json

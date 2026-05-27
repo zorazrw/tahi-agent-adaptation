@@ -319,6 +319,47 @@ export type ProviderAuthStatus = {
   oauthName?: string;
 };
 
+export type PredictedUserActionType =
+  | "message"
+  | "edit_workflow"
+  | "edit_verifier"
+  | "file_edit"
+  | "brain_edit"
+  | "stop"
+  | "unknown";
+
+export type PredictedUserActionSuggestion = {
+  actionType: PredictedUserActionType;
+  draftText: string;
+  confidence: number;
+  rationale: string;
+  rawResponse?: string;
+  profilePath?: string;
+  /**
+   * Validated executable payload parsed from the model's response.
+   * `null` when actionType is `unknown` or when the LLM omitted/malformed the
+   * payload. Pass to `executeAction` from `src/lib/executable-actions.ts`.
+   */
+  executable?: import("./executable-actions.js").ExecutableAction | null;
+};
+
+export type PredictionJudgeVerdict = "accurate" | "partially_accurate" | "inaccurate";
+
+export type UserPredictionJudgeResult = {
+  verdict: PredictionJudgeVerdict;
+  score: number;
+  rationale: string;
+  rawResponse?: string;
+};
+
+export type UserPredictionPairwiseWinner = "personalized" | "baseline" | "tie";
+
+export type UserPredictionPairwiseJudgeResult = {
+  winner: UserPredictionPairwiseWinner;
+  rationale: string;
+  rawResponse?: string;
+};
+
 export type ServerEvent =
   | { type: "stream.message"; payload: { sessionId: string; message: StreamMessage } }
   | { type: "stream.user_prompt"; payload: { sessionId: string; prompt: string } }

@@ -2668,8 +2668,13 @@ def build_weight_based_session(
     return result
 
 
-def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> List[dict]:
-    rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
+def extract_all_sessions_weight_based(cursor: sqlite3.Cursor, limit: Optional[int] = None) -> List[dict]:
+    query = "SELECT id FROM sessions ORDER BY updated_at DESC"
+    params: Tuple[Any, ...] = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        params = (limit,)
+    rows = cursor.execute(query, params).fetchall()
     sessions = []
     for (session_id,) in rows:
         sess = build_weight_based_session(cursor, session_id)
@@ -2678,8 +2683,13 @@ def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> List[dict]:
     return sessions
 
 
-def extract_all_sessions(cursor: sqlite3.Cursor) -> List[dict]:
-    rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
+def extract_all_sessions(cursor: sqlite3.Cursor, limit: Optional[int] = None) -> List[dict]:
+    query = "SELECT id FROM sessions ORDER BY updated_at DESC"
+    params: Tuple[Any, ...] = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        params = (limit,)
+    rows = cursor.execute(query, params).fetchall()
     out = []
     for (session_id,) in rows:
         sess = extract_session(cursor, session_id)
@@ -2693,6 +2703,7 @@ def main() -> int:
     parser.add_argument("--db", type=Path, help="Path to sessions.db (default: Electron userData location)")
     parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout)")
     parser.add_argument("--session-id", type=str, help="Export only this session ID")
+    parser.add_argument("--limit", type=int, help="Export at most this many most-recent sessions")
     parser.add_argument(
         "--format",
         type=str,
@@ -2701,6 +2712,10 @@ def main() -> int:
         help='Export format: "default" (human-readable trajectory) or "weight" (OAI messages + human_trajectories for training).',
     )
     args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be a positive integer")
+    if args.session_id and args.limit is not None:
+        parser.error("--limit cannot be combined with --session-id")
 
     db_path = args.db or get_default_db_path()
     if not db_path or not db_path.exists():
@@ -2724,7 +2739,7 @@ def main() -> int:
                     return 1
                 payload = [sess]
             else:
-                payload = extract_all_sessions_weight_based(cursor)
+                payload = extract_all_sessions_weight_based(cursor, args.limit)
             json_str = json.dumps(payload, indent=2, ensure_ascii=False)
             if args.output:
                 args.output.write_text(json_str + "\n", encoding="utf-8")
@@ -2740,7 +2755,7 @@ def main() -> int:
                 print(f"Error: session not found: {args.session_id}", file=sys.stderr)
                 return 1
         else:
-            payload = extract_all_sessions(cursor)
+            payload = extract_all_sessions(cursor, args.limit)
 
         json_str = json.dumps(payload, indent=2, ensure_ascii=False)
         if args.output:

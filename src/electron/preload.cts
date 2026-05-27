@@ -25,7 +25,21 @@ electron.contextBridge.exposeInMainWorld("electron", {
     },
     generateSessionTitle: (userInput: string | null) => 
         ipcInvoke("generate-session-title", userInput),
-    getRecentCwds: (limit?: number) => 
+    predictNextUserAction: (sessionId: string) =>
+        ipcInvoke("predict-next-user-action", sessionId),
+    recordPredictionEvent: (event: PredictionEventInput) =>
+        ipcInvoke("record-prediction-event", event),
+    getPredictionStats: (sinceMs?: number | null) =>
+        ipcInvoke("get-prediction-stats", sinceMs ?? null),
+    getPredictionLog: (limit?: number | null) =>
+        ipcInvoke("get-prediction-log", limit ?? null),
+    getUserProfile: (cwd?: string | null) =>
+        ipcInvoke("get-user-profile", cwd ?? null),
+    saveUserProfile: (payload: { markdown: string; cwd?: string | null }) =>
+        ipcInvoke("save-user-profile", payload),
+    generateUserProfile: (payload: { lastN?: number; cwd?: string | null; writeToDisk?: boolean }) =>
+        ipcInvoke("generate-user-profile", payload),
+    getRecentCwds: (limit?: number) =>
         ipcInvoke("get-recent-cwds", limit),
     selectDirectory: () => 
         ipcInvoke("select-directory"),

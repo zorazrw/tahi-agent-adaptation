@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
-import type { AppPermissionResult, ServerEvent } from "./types";
+import type { AppPermissionResult, ClientEvent, PredictedUserActionSuggestion, ServerEvent } from "./types";
+import { findNextRunnableWorkflowNodeId, isWorkflowUntouched } from "./lib/workflow-run";
 import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
 import { MemoryModal } from "./components/MemoryModal";
 import { PromptInput } from "./components/PromptInput";
+import { PredictionDebugPanel } from "./components/PredictionDebugPanel";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
@@ -74,7 +76,58 @@ function App() {
   const scrollHeightBeforeLoadRef = useRef(0);
   const shouldRestoreScrollRef = useRef(false);
   const [showPromptInspector, setShowPromptInspector] = useState(false);
+  const [showPredictionDebugPanel, setShowPredictionDebugPanel] = useState(false);
   const [showMemoryModal, setShowMemoryModal] = useState(false);
+  const [predictedSuggestion, setPredictedSuggestion] = useState<PredictedUserActionSuggestion | null>(null);
+  const [isDebugPredictionSuggestion, setIsDebugPredictionSuggestion] = useState(false);
+  const [isPredictingSuggestion, setIsPredictingSuggestion] = useState(false);
+  const [lastAutofillKey, setLastAutofillKey] = useState<string | null>(null);
+  const explicitlyStoppedSessionIdsRef = useRef(new Set<string>());
+  const currentPredictionRef = useRef<{
+    predictionId: string;
+    sessionId: string;
+    suggestion: PredictedUserActionSuggestion;
+    resolved: boolean;
+  } | null>(null);
+
+  const sendPredictionEvent = useCallback(
+    (
+      entry: { predictionId: string; sessionId: string; suggestion: PredictedUserActionSuggestion },
+      kind: "shown" | "accepted" | "dismissed" | "ignored",
+      metadata?: Record<string, unknown>,
+    ) => {
+      window.electron
+        .recordPredictionEvent({
+          predictionId: entry.predictionId,
+          sessionId: entry.sessionId,
+          event: kind,
+          actionType: entry.suggestion.actionType,
+          confidence: entry.suggestion.confidence,
+          draftText: entry.suggestion.draftText || null,
+          rationale: entry.suggestion.rationale || null,
+          metadata: metadata ?? null,
+        })
+        .catch((err) => console.error("Failed to record prediction event:", err));
+    },
+    [],
+  );
+
+  const flushIgnoredIfUnresolved = useCallback(() => {
+    const current = currentPredictionRef.current;
+    if (!current || current.resolved) return;
+    current.resolved = true;
+    sendPredictionEvent(current, "ignored");
+  }, [sendPredictionEvent]);
+
+  const resolveCurrentPrediction = useCallback(
+    (kind: "accepted" | "dismissed", metadata?: Record<string, unknown>) => {
+      const current = currentPredictionRef.current;
+      if (!current || current.resolved) return;
+      current.resolved = true;
+      sendPredictionEvent(current, kind, metadata);
+    },
+    [sendPredictionEvent],
+  );
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -93,6 +146,7 @@ function App() {
   const previewPanelOpen = useAppStore((s) => s.previewPanelOpen);
   const setPreviewPanelOpen = useAppStore((s) => s.setPreviewPanelOpen);
   const contextInductionDepth = useAppStore((s) => s.contextInductionDepth);
+  const predictionAssistMode = useAppStore((s) => s.predictionAssistMode);
 
   // Helper function to extract partial message content
   const getPartialMessageContent = (eventMessage: any) => {
@@ -145,10 +199,27 @@ function App() {
   }, [handleServerEvent, handlePartialMessages, activeSessionId]);
 
   const { connected, sendEvent } = useIPC(onEvent);
+  const sendClientEvent = useCallback((event: ClientEvent) => {
+    if (event.type === "session.stop") {
+      explicitlyStoppedSessionIdsRef.current.add(event.payload.sessionId);
+    } else if (
+      event.type === "session.continue" ||
+      event.type === "session.solveNode" ||
+      event.type === "session.regenerateWorkflow"
+    ) {
+      explicitlyStoppedSessionIdsRef.current.delete(event.payload.sessionId);
+    }
+    sendEvent(event);
+  }, [sendEvent]);
+
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
+  const hasNextRunnableWorkflowNode = Boolean(
+    activeSession?.workflowTree?.length &&
+    findNextRunnableWorkflowNodeId(activeSession.workflowTree, activeSession.verificationDepth ?? 0)
+  );
 
   const showChatPanel = previewPanelOpen;
 
@@ -260,10 +331,176 @@ function App() {
     setHasNewMessages(false);
     prevMessagesLengthRef.current = 0;
     animatedIndicesRef.current = new Set();
+    flushIgnoredIfUnresolved();
+    currentPredictionRef.current = null;
+    setPredictedSuggestion(null);
+    setIsDebugPredictionSuggestion(false);
+    setIsPredictingSuggestion(false);
+    setLastAutofillKey(null);
+    setShowPredictionDebugPanel(false);
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, 100);
-  }, [activeSessionId]);
+  }, [activeSessionId, flushIgnoredIfUnresolved]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "d") {
+        return;
+      }
+      event.preventDefault();
+      if (!activeSessionId) {
+        setGlobalError("Open a session before using the prediction debug panel.");
+        return;
+      }
+      setPreviewPanelOpen(true);
+      setShowPredictionDebugPanel((show) => !show);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeSessionId, setGlobalError, setPreviewPanelOpen]);
+
+  useEffect(() => {
+    if (predictionAssistMode === "off") {
+      flushIgnoredIfUnresolved();
+      currentPredictionRef.current = null;
+      setIsPredictingSuggestion(false);
+      setPredictedSuggestion(null);
+      setIsDebugPredictionSuggestion(false);
+      return;
+    }
+    const sessionNotRunning =
+      activeSessionId &&
+      activeSession &&
+      activeSession.status !== "running" &&
+      !explicitlyStoppedSessionIdsRef.current.has(activeSessionId);
+
+    // Two prediction-display moments:
+    //  (1) natural stop — agent finished a run cycle (status `completed`, no runnable node).
+    //      The original gate; required for autofill below.
+    //  (2) post-initial-planning — workflow was just generated, no node started yet
+    //      (status `idle`, every node `pending`). Surface prediction here so the
+    //      user gets a suggested next move right after planning.
+    const isNaturalStop =
+      sessionNotRunning &&
+      activeSession?.status === "completed" &&
+      !hasNextRunnableWorkflowNode;
+    const isPostInitialPlanning =
+      sessionNotRunning &&
+      activeSession?.status === "idle" &&
+      isWorkflowUntouched(activeSession?.workflowTree ?? []);
+    const shouldPredict = isNaturalStop || isPostInitialPlanning;
+
+    if (!shouldPredict || messages.length === 0) {
+      flushIgnoredIfUnresolved();
+      currentPredictionRef.current = null;
+      setIsPredictingSuggestion(false);
+      setPredictedSuggestion(null);
+      setIsDebugPredictionSuggestion(false);
+      return;
+    }
+    const sessionId = activeSessionId;
+
+    const lastMessage = messages[messages.length - 1];
+    // Block `user_prompt` as the last message only for the natural-stop case.
+    // For post-initial-planning the user_prompt IS the relevant context (the
+    // agent emits no assistant message between the prompt and the plan), so
+    // letting it through is exactly what we want.
+    const blocksUserPromptAsLast = !isPostInitialPlanning;
+    if (
+      !lastMessage ||
+      (blocksUserPromptAsLast && lastMessage.type === "user_prompt") ||
+      (lastMessage.type === "run_result" && lastMessage.status !== "success")
+    ) {
+      flushIgnoredIfUnresolved();
+      currentPredictionRef.current = null;
+      setIsPredictingSuggestion(false);
+      setPredictedSuggestion(null);
+      setIsDebugPredictionSuggestion(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsPredictingSuggestion(true);
+
+    window.electron.predictNextUserAction(sessionId)
+      .then((suggestion) => {
+        if (cancelled) return;
+        if (suggestion) {
+          flushIgnoredIfUnresolved();
+          const entry = {
+            predictionId: crypto.randomUUID(),
+            sessionId,
+            suggestion,
+            resolved: false,
+          };
+          currentPredictionRef.current = entry;
+          sendPredictionEvent(entry, "shown");
+          setIsDebugPredictionSuggestion(false);
+        } else {
+          flushIgnoredIfUnresolved();
+          currentPredictionRef.current = null;
+          setIsDebugPredictionSuggestion(false);
+        }
+        setPredictedSuggestion(suggestion);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Failed to predict next user action:", error);
+        flushIgnoredIfUnresolved();
+        currentPredictionRef.current = null;
+        setPredictedSuggestion(null);
+        setIsDebugPredictionSuggestion(false);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsPredictingSuggestion(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSession, activeSessionId, predictionAssistMode, hasNextRunnableWorkflowNode, messages, flushIgnoredIfUnresolved, sendPredictionEvent]);
+
+  useEffect(() => {
+    if (predictionAssistMode !== "autofill") return;
+    if (!predictedSuggestion || predictedSuggestion.actionType !== "message") return;
+    if (!predictedSuggestion.draftText.trim()) return;
+    if (!activeSessionId || !activeSession || activeSession.status !== "completed") return;
+    if (hasNextRunnableWorkflowNode || explicitlyStoppedSessionIdsRef.current.has(activeSessionId)) return;
+    const sourceKey = `${activeSessionId}:${messages.length}:${predictedSuggestion.actionType}:${predictedSuggestion.draftText}`;
+    if (lastAutofillKey === sourceKey) return;
+
+    setLastAutofillKey(sourceKey);
+    resolveCurrentPrediction("accepted", { auto: true });
+    currentPredictionRef.current = null;
+    setPredictedSuggestion(null);
+    setShouldAutoScroll(true);
+    setHasNewMessages(false);
+    resetToLatest();
+    sendClientEvent({
+      type: "session.continue",
+      payload: {
+        sessionId: activeSessionId,
+        prompt: predictedSuggestion.draftText.trim(),
+        ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
+      },
+    });
+  }, [
+    activeSession,
+    activeSessionId,
+    lastAutofillKey,
+    messages.length,
+    predictedSuggestion,
+    predictionAssistMode,
+    hasNextRunnableWorkflowNode,
+    resetToLatest,
+    selectedNodeId,
+    sendClientEvent,
+    resolveCurrentPrediction,
+  ]);
 
   // Track new finalized messages for badge / auto-scroll
   useEffect(() => {
@@ -311,6 +548,8 @@ function App() {
   const handleSendMessage = useCallback(() => {
     setShouldAutoScroll(true);
     setHasNewMessages(false);
+    setPredictedSuggestion(null);
+    setIsDebugPredictionSuggestion(false);
     resetToLatest();
   }, [resetToLatest]);
 
@@ -346,7 +585,7 @@ function App() {
     <div className="flex h-screen bg-surface">
       <Sidebar
         connected={connected}
-        sendEvent={sendEvent}
+        sendEvent={sendClientEvent}
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
       />
@@ -407,7 +646,7 @@ function App() {
             <p className="text-3xl sm:text-4xl font-semibold text-ink-900 tracking-tight max-w-2xl leading-snug">
               What&apos;s on your mind?
             </p>
-            <HomePromptInput sendEvent={sendEvent} />
+            <HomePromptInput sendEvent={sendClientEvent} />
           </div>
         ) : (
         <>
@@ -468,14 +707,27 @@ function App() {
             <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
               <div className="flex items-center justify-between px-4 pt-3 pb-1 border-b border-ink-900/10">
                 <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Conversation</span>
-                <button
-                  type="button"
-                  onClick={() => setShowPromptInspector((v) => !v)}
-                  className="text-[11px] px-2 py-1 rounded-md border border-ink-900/10 bg-white/70 text-ink-500 hover:text-ink-800 hover:border-ink-900/30 hover:bg-white transition-colors"
-                >
-                  {showPromptInspector ? "Hide LM input" : "Show LM input"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPromptInspector((v) => !v)}
+                    className="text-[11px] px-2 py-1 rounded-md border border-ink-900/10 bg-white/70 text-ink-500 hover:text-ink-800 hover:border-ink-900/30 hover:bg-white transition-colors"
+                  >
+                    {showPromptInspector ? "Hide LM input" : "Show LM input"}
+                  </button>
+                </div>
               </div>
+              {showPredictionDebugPanel && (
+                <PredictionDebugPanel
+                  onStageSuggestion={(suggestion) => {
+                    flushIgnoredIfUnresolved();
+                    currentPredictionRef.current = null;
+                    setPredictedSuggestion(suggestion);
+                    setIsDebugPredictionSuggestion(true);
+                  }}
+                  onClose={() => setShowPredictionDebugPanel(false)}
+                />
+              )}
               {showPromptInspector && (
                 <div className="px-4 pt-2 pb-1 border-b border-ink-900/10 bg-surface">
                   <div className="text-[11px] font-medium text-ink-600 mb-1">Last LM input</div>
@@ -581,10 +833,22 @@ function App() {
         </div>
 
         <PromptInput
-          sendEvent={sendEvent}
+          sendEvent={sendClientEvent}
           onSendMessage={handleSendMessage}
           disabled={visibleMessages.length === 0}
           rightOffset={undefined}
+          predictedSuggestion={predictionAssistMode === "off" && !isDebugPredictionSuggestion ? null : predictedSuggestion}
+          isPredictingSuggestion={isPredictingSuggestion}
+          onAcceptPredictedSuggestion={() => {
+            resolveCurrentPrediction("accepted");
+            setIsDebugPredictionSuggestion(false);
+          }}
+          onClearPredictedSuggestion={() => {
+            resolveCurrentPrediction("dismissed");
+            currentPredictionRef.current = null;
+            setPredictedSuggestion(null);
+            setIsDebugPredictionSuggestion(false);
+          }}
         />
         </>
         )}

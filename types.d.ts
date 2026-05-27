@@ -115,6 +115,100 @@ type ProviderAuthStatus = {
     oauthName?: string;
 }
 
+type PredictedUserActionType =
+    | "message"
+    | "edit_workflow"
+    | "edit_verifier"
+    | "file_edit"
+    | "brain_edit"
+    | "stop"
+    | "unknown";
+
+type PredictedUserActionSuggestion = {
+    actionType: PredictedUserActionType;
+    draftText: string;
+    confidence: number;
+    rationale: string;
+    rawResponse?: string;
+    profilePath?: string;
+}
+
+type PredictionEventKind = "shown" | "accepted" | "dismissed" | "ignored";
+
+type PredictionEventInput = {
+    predictionId: string;
+    sessionId: string;
+    event: PredictionEventKind;
+    actionType: PredictedUserActionType;
+    confidence?: number | null;
+    draftText?: string | null;
+    rationale?: string | null;
+    metadata?: Record<string, unknown> | null;
+}
+
+type PredictionStatsBucket = {
+    shown: number;
+    accepted: number;
+    dismissed: number;
+    ignored: number;
+    unresolved: number;
+    autoAccepted: number;
+}
+
+type PredictionStats = {
+    totals: PredictionStatsBucket;
+    byActionType: Array<{ actionType: string } & PredictionStatsBucket>;
+    rawEventCount: number;
+    predictionCount: number;
+    firstEventAt: number | null;
+    lastEventAt: number | null;
+    medianLatencyMs: number | null;
+    p90LatencyMs: number | null;
+}
+
+type PredictionLogEntry = {
+    predictionId: string;
+    sessionId: string;
+    actionType: string;
+    confidence: number | null;
+    draftText: string | null;
+    rationale: string | null;
+    shownAt: number | null;
+    updatedAt: number;
+    outcome: "accepted" | "dismissed" | "ignored" | "unresolved";
+    autoAccepted: boolean;
+}
+
+type UserProfileLoadResult = {
+    markdown: string;
+    profilePath: string;
+    error?: string;
+}
+
+type UserProfileSaveInput = {
+    markdown: string;
+    cwd?: string | null;
+}
+
+type UserProfileSaveResult =
+    | { success: true; profilePath: string }
+    | { success: false; error: string };
+
+type UserProfileGenerationInput = {
+    lastN?: number;
+    cwd?: string | null;
+    writeToDisk?: boolean;
+}
+
+type UserProfileGenerationResult = {
+    success: boolean;
+    profilePath?: string;
+    markdown?: string;
+    chatCount?: number;
+    promptCount?: number;
+    error?: string;
+}
+
 type ResolveTinkerCheckpointResult =
     | { ok: true; base_model: string }
     | { ok: false; error: string };
@@ -123,6 +217,13 @@ type EventPayloadMapping = {
     statistics: Statistics;
     getStaticData: StaticData;
     "generate-session-title": string;
+    "predict-next-user-action": PredictedUserActionSuggestion | null;
+    "record-prediction-event": { success: boolean };
+    "get-prediction-stats": PredictionStats;
+    "get-prediction-log": PredictionLogEntry[];
+    "get-user-profile": UserProfileLoadResult;
+    "save-user-profile": UserProfileSaveResult;
+    "generate-user-profile": UserProfileGenerationResult;
     "get-recent-cwds": string[];
     "select-directory": string | null;
     "get-agent-settings": AgentSettings;
@@ -165,6 +266,13 @@ interface Window {
         sendClientEvent: (event: any) => void;
         onServerEvent: (callback: (event: any) => void) => UnsubscribeFunction;
         generateSessionTitle: (userInput: string | null) => Promise<string>;
+        predictNextUserAction: (sessionId: string) => Promise<PredictedUserActionSuggestion | null>;
+        recordPredictionEvent: (event: PredictionEventInput) => Promise<{ success: boolean }>;
+        getPredictionStats: (sinceMs?: number | null) => Promise<PredictionStats>;
+        getPredictionLog: (limit?: number | null) => Promise<PredictionLogEntry[]>;
+        getUserProfile: (cwd?: string | null) => Promise<UserProfileLoadResult>;
+        saveUserProfile: (payload: UserProfileSaveInput) => Promise<UserProfileSaveResult>;
+        generateUserProfile: (payload: UserProfileGenerationInput) => Promise<UserProfileGenerationResult>;
         getRecentCwds: (limit?: number) => Promise<string[]>;
         selectDirectory: () => Promise<string | null>;
         getAgentSettings: () => Promise<AgentSettings>;
