@@ -21,7 +21,10 @@ import { useAppStore } from "../store/useAppStore";
 import type { PermissionRequest } from "../store/useAppStore";
 import { DecisionPanel } from "./DecisionPanel";
 import { WorkflowCard } from "./WorkflowCard";
-import { isWorkflowPlanToolName, parseWorkflowPlanPayload } from "../../lib/workflow-plan-parse";
+import {
+  isWorkflowPlanToolName,
+  parseWorkflowPlanPayloadNormalized,
+} from "../../lib/workflow-plan-parse";
 import { NodeOutputSnippet } from "./StepOutputSnippet";
 
 // ai-elements
@@ -515,7 +518,7 @@ const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AnyAssist
   const setToolMeta = useAppStore((s) => s.setToolMeta);
   const storeSetToolStatus = useAppStore((s) => s.setToolStatus);
 
-  const tasks = parseWorkflowPlanPayload(messageContent.input) ?? [];
+  const tasks = parseWorkflowPlanPayloadNormalized(messageContent.input) ?? [];
 
   useEffect(() => {
     if (messageContent.id) {
@@ -790,7 +793,7 @@ export function MessageCard({
             return <ThinkingBlock key={idx} text={content.thinking} isStreaming={isLastContent && showIndicator} />;
           }
           if (content.type === "text") {
-            const planFromText = parseWorkflowPlanPayload(content.text);
+            const planFromText = parseWorkflowPlanPayloadNormalized(content.text);
             if (planFromText && planFromText.length > 0) {
               return (
                 <div key={idx} className="mt-4">
@@ -835,7 +838,7 @@ export function MessageCard({
             return <ThinkingBlock key={idx} text={content.thinking} isStreaming={isLastContent && showIndicator} />;
           }
           if (content.type === "text") {
-            const planFromText = parseWorkflowPlanPayload(content.text);
+            const planFromText = parseWorkflowPlanPayloadNormalized(content.text);
             if (planFromText && planFromText.length > 0) {
               return (
                 <div key={idx} className="mt-4">

@@ -137,6 +137,8 @@ export function HtmlRenderer({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const iframeViewportRef = useRef<HTMLDivElement>(null);
   const previewCleanupRef = useRef<(() => void) | null>(null);
+  /** ResizeObserver / timers on the iframe document so fit-to-view updates after async layout (e.g. Chart.js). */
+  const previewLayoutFitCleanupRef = useRef<(() => void) | null>(null);
   const editContentRef = useRef(data.content);
   const fitRafRef = useRef<number | null>(null);
 
@@ -370,6 +372,13 @@ export function HtmlRenderer({
   }, [runPreviewCleanup]);
 
   useEffect(() => {
+    return () => {
+      previewLayoutFitCleanupRef.current?.();
+      previewLayoutFitCleanupRef.current = null;
+    };
+  }, [mode, displayContent]);
+
+  useEffect(() => {
     if (mode !== "preview") return;
     const viewport = iframeViewportRef.current;
     if (!viewport) return;
@@ -409,7 +418,28 @@ export function HtmlRenderer({
   }, [mode, visualTool, canEdit, attachPreviewTool, runPreviewCleanup]);
 
   const handleIframeLoad = useCallback(() => {
+    previewLayoutFitCleanupRef.current?.();
+    previewLayoutFitCleanupRef.current = null;
+
     schedulePreviewFitScale();
+
+    const doc = iframeRef.current?.contentDocument;
+    if (doc?.documentElement && mode === "preview") {
+      const ro = new ResizeObserver(() => schedulePreviewFitScale());
+      ro.observe(doc.documentElement);
+      if (doc.body) ro.observe(doc.body);
+      const bump = () => schedulePreviewFitScale();
+      const t1 = window.setTimeout(bump, 0);
+      const t2 = window.setTimeout(bump, 120);
+      const t3 = window.setTimeout(bump, 400);
+      previewLayoutFitCleanupRef.current = () => {
+        ro.disconnect();
+        window.clearTimeout(t1);
+        window.clearTimeout(t2);
+        window.clearTimeout(t3);
+      };
+    }
+
     if (mode !== "preview" || visualTool === "none" || !canEdit) {
       runPreviewCleanup();
       setVisualDirty(false);
@@ -502,8 +532,12 @@ export function HtmlRenderer({
     handleSaveVisual,
   ]);
 
-  /** `allow-same-origin` must apply from the first paint when the file is saveable; otherwise the iframe document is opaque and parent JS never gets a usable `contentDocument`, so Text / Shape never attach. */
-  const previewSandbox = canEdit ? "allow-scripts allow-same-origin" : "allow-scripts";
+  /**
+   * ``allow-same-origin`` is required for (a) saveable files so Text/Shape can attach, and (b) all previews so the host
+   * can read ``contentDocument`` for fit-to-view and observe layout after async scripts (Chart.js, etc.). ``allow-scripts``
+   * alone makes the iframe opaque in Chromium, breaking scale math and inner ``ResizeObserver``s.
+   */
+  const previewSandbox = "allow-scripts allow-same-origin";
 
   const toolBtn = (id: HtmlVisualTool, label: string) => (
     <button
