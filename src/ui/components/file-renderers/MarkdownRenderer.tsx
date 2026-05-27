@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -27,10 +27,47 @@ export function MarkdownRenderer({
   const [mode, setMode] = useViewToggle("preview");
   /** Single draft shared by preview + source so toggling modes stays in sync before save. */
   const [draft, setDraft] = useState(data.content);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const isDirty = canEdit && draft !== data.content;
 
   useEffect(() => {
     setDraft(data.content);
   }, [data.content]);
+
+  const saveDraft = useCallback(async (content: string) => {
+    if (!canEdit || !filePath) return { success: false, error: "File is not editable" };
+    setSaveError(null);
+    setSaving(true);
+    try {
+      const res = await window.electron.writeFile(filePath, cwd ?? undefined, content, sessionId ?? undefined);
+      if (res.success) {
+        onReload?.();
+      } else {
+        setSaveError(res.error ?? "Failed to save");
+      }
+      return res;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSaveError(msg);
+      return { success: false, error: msg };
+    } finally {
+      setSaving(false);
+    }
+  }, [canEdit, filePath, cwd, sessionId, onReload]);
+
+  useEffect(() => {
+    if (!onTextSaveChromeChange || !canEdit) return;
+    onTextSaveChromeChange({
+      save: () => {
+        void saveDraft(draft);
+      },
+      disabled: saving || !isDirty,
+      saving,
+      error: saveError,
+    });
+    return () => onTextSaveChromeChange(null);
+  }, [onTextSaveChromeChange, canEdit, saveDraft, draft, saving, isDirty, saveError]);
 
   const toolbar = <ViewToggle mode={mode} onChange={setMode} />;
 
@@ -51,11 +88,7 @@ export function MarkdownRenderer({
           monospace={false}
           variant="document"
           onContentChange={setDraft}
-          onSave={async (content) =>
-            window.electron.writeFile(filePath!, cwd ?? undefined, content, sessionId ?? undefined)
-          }
-          onSaved={onReload}
-          onSaveChromeChange={onTextSaveChromeChange}
+          onSave={saveDraft}
         />
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">

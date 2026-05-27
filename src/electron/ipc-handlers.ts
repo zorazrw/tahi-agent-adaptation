@@ -1179,6 +1179,38 @@ export function recordFileEditAfterPreviewSave(
   }
 }
 
+/** Best-effort fallback when renderer omits ``sessionId`` for preview writes. */
+export function inferSessionIdForPreviewWrite(
+  editedAbsPath: string,
+  cwdHint?: string | null
+): string | null {
+  const store = initializeSessions();
+  const abs = editedAbsPath.replace(/\\/g, "/");
+  const cwdTrim = typeof cwdHint === "string" ? cwdHint.trim() : "";
+  const recent = store.listSessions();
+
+  for (const row of recent) {
+    const sid = String(row.id ?? "").trim();
+    if (!sid) continue;
+    const sess = store.getSession(sid);
+    if (!sess) continue;
+    const sessCwd = sess.cwd?.trim();
+    if (!sessCwd) continue;
+
+    try {
+      const root = resolve(sessCwd).replace(/\\/g, "/");
+      const file = resolve(abs).replace(/\\/g, "/");
+      const inCwd = file === root || file.startsWith(`${root}/`);
+      if (!inCwd) continue;
+      if (cwdTrim && resolve(cwdTrim).replace(/\\/g, "/") !== root) continue;
+      return sid;
+    } catch {
+      // ignore malformed paths and keep searching
+    }
+  }
+  return null;
+}
+
 export function cleanupAllSessions(): void {
   for (const [, handle] of runnerHandles) {
     handle.abort();
