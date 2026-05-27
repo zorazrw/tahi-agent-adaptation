@@ -26,12 +26,18 @@ import {
   registerWorkflowPlanFromTasks,
   tryRecoverWorkflowPlanFromMessages,
 } from "./workflow-plan-recovery.js";
+import {
+  EXECUTION_CONTEXT_MAX_ACTIONS,
+  trimSessionToLastAgentActions,
+} from "./session-context-trim.js";
 
 export type RunnerOptions = {
   prompt: string;
   session: Session;
   regenerateWorkflow?: boolean;
   branchEntryId?: string;
+  /** When set, compact Pi session context to the last N agent tool actions before prompting. */
+  trimExecutionContextToLastActions?: number;
   onEvent: (event: ServerEvent) => void;
   onSessionUpdate?: (updates: Partial<Session>) => void;
 };
@@ -398,7 +404,15 @@ function createAskUserQuestionTool(session: Session, onEvent: (event: ServerEven
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
-  const { prompt, session, regenerateWorkflow, branchEntryId, onEvent, onSessionUpdate } = options;
+  const {
+    prompt,
+    session,
+    regenerateWorkflow,
+    branchEntryId,
+    trimExecutionContextToLastActions,
+    onEvent,
+    onSessionUpdate,
+  } = options;
   let disposed = false;
   let piSessionAbort: (() => Promise<void>) | undefined;
 
@@ -407,6 +421,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     const sessionManager = createPiSessionManager(session.id, cwd, session.piSessionFile);
     if (branchEntryId) {
       sessionManager.branch(branchEntryId);
+    }
+    if (trimExecutionContextToLastActions != null && trimExecutionContextToLastActions > 0) {
+      trimSessionToLastAgentActions(sessionManager, trimExecutionContextToLastActions);
     }
 
     const { agentDir, authStorage, modelRegistry, settingsManager } = createPiManagers(cwd);

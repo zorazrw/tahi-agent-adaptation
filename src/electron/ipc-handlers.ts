@@ -1,6 +1,7 @@
 import { BrowserWindow } from "electron";
 import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
 import { runClaude, buildPromptForNode, buildRegenerateWorkflowPrompt, type RunnerHandle } from "./libs/runner.js";
+import { EXECUTION_CONTEXT_MAX_ACTIONS } from "./libs/session-context-trim.js";
 import { SessionStore, type Session } from "./libs/session-store.js";
 import {
   findNodeById,
@@ -693,6 +694,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
     prompt: nodePrompt,
     session,
     branchEntryId,
+    trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS,
     onEvent: emit,
     onSessionUpdate: (updates) => {
       store.updateSession(session.id, updates);
@@ -918,6 +920,9 @@ export function handleClientEvent(event: ClientEvent) {
     runClaude({
       prompt: event.payload.prompt,
       session,
+      ...(session.workflowTree?.length
+        ? { trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS }
+        : {}),
       onEvent: emit,
       onSessionUpdate: (updates) => {
         sessions.updateSession(session.id, updates);
