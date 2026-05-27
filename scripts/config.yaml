@@ -66,4 +66,3 @@ state_path: scripts/state.json
 # When true, /v1/chat/completions requests are rejected with HTTP 503
 # while a training round (or checkpoint swap) is in progress.
 block_during_training: true
-preload_model: Qwen/Qwen3.5-4B
