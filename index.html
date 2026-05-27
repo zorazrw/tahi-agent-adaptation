@@ -6,13 +6,16 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent Cowork</title>
+    <!-- file preview uses <iframe srcDoc>; child documents inherit this CSP, so scripts/styles/CDN assets in HTML previews must be allowed here. -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self';
-    style-src 'self' 'unsafe-inline';
-    script-src 'self' blob:;
-    worker-src 'self' blob:;
-    img-src 'self' data:;
-    frame-src 'self' blob: data:;
-    media-src 'self' data:;">
+    style-src 'self' 'unsafe-inline' https:;
+    script-src 'self' blob: 'unsafe-inline' https:;
+    worker-src 'self' blob: https:;
+    img-src 'self' data: https: blob:;
+    font-src 'self' data: https:;
+    connect-src 'self' https:;
+    frame-src 'self' blob: data: about:;
+    media-src 'self' data: https:;">
 </head>
 
 <body>
