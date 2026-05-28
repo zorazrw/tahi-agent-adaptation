@@ -46,9 +46,21 @@ function slugifySessionName(name: string, fallback = "session"): string {
 type ExportedTaskUnit = { actor?: unknown; trajectory?: Array<{ action?: unknown }> };
 type ExportedSessionBlob = {
   name?: unknown;
+  expertise_task?: unknown;
   task_units?: ExportedTaskUnit[];
   trajectory?: Array<{ action?: unknown; actor?: unknown }>;
 };
+
+const TASK_STEM_RE = /^[a-z0-9][a-z0-9_-]{0,99}$/i;
+
+function stemFromSessionBlob(blob: ExportedSessionBlob | null): string {
+  const et = blob?.expertise_task;
+  if (typeof et === "string") {
+    const s = et.trim().toLowerCase();
+    if (TASK_STEM_RE.test(s)) return s;
+  }
+  return slugifySessionName(typeof blob?.name === "string" ? blob.name : "");
+}
 
 function readSessionBlobForFallback(fullJsonPath: string): ExportedSessionBlob | null {
   try {
@@ -133,7 +145,7 @@ function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): 
   const actions = collectAgentActions(blob);
   if (actions.length === 0) return;
 
-  const stem = slugifySessionName(typeof blob?.name === "string" ? blob.name : "");
+  const stem = stemFromSessionBlob(blob);
   const targetMem = join(memDir, `${stem}.md`);
   const targetSkill = join(skillsDir, `${stem}.md`);
 

@@ -90,6 +90,8 @@ export type Session = {
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
   autoContextInduction: boolean;
+  /** Expertise picker slug (e.g. data-viz-html) for task-keyed memory/skill induction. */
+  expertiseTask?: string;
   pendingPermissions: Map<string, PendingPermission>;
   abortController?: AbortController;
 };
@@ -107,6 +109,7 @@ export type StoredSession = {
   workflowTree?: WorkflowNode[];
   verificationDepth?: number;
   autoContextInduction: boolean;
+  expertiseTask?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -133,6 +136,7 @@ export class SessionStore {
     title: string;
     engine?: SessionEngine;
     autoContextInduction?: boolean;
+    expertiseTask?: string;
   }): Session {
     const id = crypto.randomUUID();
     const now = Date.now();
@@ -147,14 +151,15 @@ export class SessionStore {
       workflowTree: [],
       verificationDepth: 0,
       autoContextInduction: options.autoContextInduction !== false,
+      expertiseTask: options.expertiseTask?.trim() || undefined,
       pendingPermissions: new Map()
     };
     this.sessions.set(id, session);
     this.db
       .prepare(
         `insert into sessions
-          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, auto_context_induction, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, auto_context_induction, expertise_task, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -169,6 +174,7 @@ export class SessionStore {
         serializeWorkflowTree(session.workflowTree),
         session.verificationDepth ?? 0,
         session.autoContextInduction ? 1 : 0,
+        session.expertiseTask ?? null,
         now,
         now
       );
@@ -449,7 +455,8 @@ export class SessionStore {
       workflowTree: "workflow_tree",
       verificationDepth: "verification_depth"
       ,
-      autoContextInduction: "auto_context_induction"
+      autoContextInduction: "auto_context_induction",
+      expertiseTask: "expertise_task",
     } as const;
 
     const jsonKeys = new Set<string>(["workflowTree"]);
@@ -511,6 +518,7 @@ export class SessionStore {
     try { this.db.exec(`alter table sessions add column verification_depth integer default 0`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column pi_session_file text`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column auto_context_induction integer default 1`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column expertise_task text`); } catch { /* exists */ }
     try { this.db.exec(`update sessions set engine = 'legacy-claude' where engine is null or trim(engine) = ''`); } catch { /* ignore */ }
 
     this.db.exec(
@@ -534,7 +542,7 @@ export class SessionStore {
     const rows = this.db
       .prepare(
         `select id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt,
-                workflow_tree, verification_depth, auto_context_induction, steps, verification_criteria, output_files,
+                workflow_tree, verification_depth, auto_context_induction, expertise_task, steps, verification_criteria, output_files,
                 verifier_marks, completed_step_indices
          from sessions`
       )
@@ -567,6 +575,7 @@ export class SessionStore {
         workflowTree: tree ?? [],
         verificationDepth: row.verification_depth != null ? Number(row.verification_depth) : 0,
         autoContextInduction: row.auto_context_induction == null ? true : Number(row.auto_context_induction) !== 0,
+        expertiseTask: row.expertise_task ? String(row.expertise_task) : undefined,
         pendingPermissions: new Map()
       };
       this.sessions.set(session.id, session);

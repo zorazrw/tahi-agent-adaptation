@@ -350,6 +350,8 @@ export type ClientEvent =
         cwd?: string;
         allowedTools?: string;
         autoContextInduction?: boolean;
+        /** Expertise picker category slug, e.g. data-viz-html → memories/skills/<slug>.md */
+        expertiseTask?: string;
       };
     }
   | { type: "session.continue"; payload: { sessionId: string; prompt: string; verificationNodeId?: string } }
@@ -372,4 +374,8 @@ export type ClientEvent =
   | {
       type: "session.setAutoContextInduction";
       payload: { sessionId: string; autoContextInduction: boolean };
+    }
+  | {
+      type: "session.setExpertiseTask";
+      payload: { sessionId: string; expertiseTask: string | null };
     };

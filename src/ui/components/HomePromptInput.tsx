@@ -30,6 +30,8 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
   const setAttachedFiles = useAppStore((s) => s.setAttachedFiles);
   const tempCwd = useAppStore((s) => s.tempCwd);
   const setTempCwd = useAppStore((s) => s.setTempCwd);
+  const expertiseTaskCategory = useAppStore((s) => s.expertiseTaskCategory);
+  const setExpertiseTaskCategory = useAppStore((s) => s.setExpertiseTaskCategory);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -129,12 +131,14 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
         cwd: sessionCwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         autoContextInduction: readStoredAutoInduction(),
+        ...(expertiseTaskCategory ? { expertiseTask: expertiseTaskCategory } : {}),
       },
     });
     setPrompt("");
     setAttachedFiles([]);
     setTempCwd(null);
-  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd]);
+    setExpertiseTaskCategory(null);
+  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, expertiseTaskCategory, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd, setExpertiseTaskCategory]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;
