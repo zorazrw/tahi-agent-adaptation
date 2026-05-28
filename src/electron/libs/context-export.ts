@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
 import { startTinkerAutoUpdateWatcher } from "./tinker-auto-update.js";
@@ -36,21 +36,11 @@ function logLine(message: string): void {
 
 const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions.py");
 const INDUCE_SCRIPT_REL = "induce.py";
-const MD_FILE_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.md$/;
 
 function slugifySessionName(name: string, fallback = "session"): string {
   const raw = String(name ?? "").trim().toLowerCase();
   const slug = raw.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return (slug || fallback).slice(0, 100);
-}
-
-function listTopLevelMdFiles(dir: string): string[] {
-  if (!existsSync(dir)) return [];
-  try {
-    return readdirSync(dir).filter((n) => MD_FILE_RE.test(n));
-  } catch {
-    return [];
-  }
 }
 
 type ExportedTaskUnit = { actor?: unknown; trajectory?: Array<{ action?: unknown }> };
@@ -110,14 +100,35 @@ function collectAgentActions(blob: ExportedSessionBlob | null): string[] {
   return out;
 }
 
+const FALLBACK_MEMORY_MARKER = "## Auto memory (fallback)";
+const FALLBACK_SKILL_TITLE = "Auto-induction fallback skill";
+
+function readMdFile(path: string): string {
+  if (!existsSync(path)) return "";
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/** True when induce.py (or a prior run) left non-empty, non-fallback content. */
+function hasInducedMemoryContent(text: string): boolean {
+  const body = text.trim();
+  return body.length > 0 && !body.includes(FALLBACK_MEMORY_MARKER);
+}
+
+function hasInducedSkillContent(text: string): boolean {
+  const body = text.trim();
+  return body.length > 0 && !body.startsWith(FALLBACK_SKILL_TITLE);
+}
+
 function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): void {
   const memDir = join(userData, "memories");
   const skillsDir = join(userData, "skills");
   mkdirSync(memDir, { recursive: true });
   mkdirSync(skillsDir, { recursive: true });
 
-  const beforeMem = listTopLevelMdFiles(memDir);
-  const beforeSkills = listTopLevelMdFiles(skillsDir);
   const blob = readSessionBlobForFallback(fullJsonPath);
   const actions = collectAgentActions(blob);
   if (actions.length === 0) return;
@@ -125,6 +136,13 @@ function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): 
   const stem = slugifySessionName(typeof blob?.name === "string" ? blob.name : "");
   const targetMem = join(memDir, `${stem}.md`);
   const targetSkill = join(skillsDir, `${stem}.md`);
+
+  const needMemoryFallback = !hasInducedMemoryContent(readMdFile(targetMem));
+  const needSkillFallback = !hasInducedSkillContent(readMdFile(targetSkill));
+  if (!needMemoryFallback && !needSkillFallback) {
+    logLine(`Skip fallback: induce.py wrote memory/skill for ${stem}`);
+    return;
+  }
 
   const memoryBody = [
     "## Auto memory (fallback)",
@@ -146,13 +164,17 @@ function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): 
     "",
   ].join("\n");
 
-  writeFileSync(targetMem, memoryBody, "utf8");
-  writeFileSync(targetSkill, skillBody, "utf8");
-
-  const afterMem = listTopLevelMdFiles(memDir);
-  const afterSkills = listTopLevelMdFiles(skillsDir);
-  if (afterMem.length > beforeMem.length || afterSkills.length > beforeSkills.length) {
-    logLine(`Fallback induction wrote ${stem}.md memory + skill`);
+  const wrote: string[] = [];
+  if (needMemoryFallback) {
+    writeFileSync(targetMem, memoryBody, "utf8");
+    wrote.push("memory");
+  }
+  if (needSkillFallback) {
+    writeFileSync(targetSkill, skillBody, "utf8");
+    wrote.push("skill");
+  }
+  if (wrote.length > 0) {
+    logLine(`Fallback induction wrote ${stem}.md (${wrote.join(", ")})`);
   }
 }
 
