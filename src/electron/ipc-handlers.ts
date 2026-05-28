@@ -225,16 +225,6 @@ async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Pr
   }
 }
 
-function runPostSolverExport(sessionId: string): void {
-  const store = initializeSessions();
-  const session = store.getSession(sessionId);
-  if (!session) return;
-
-  if (session.autoContextInduction) {
-    runFullSessionExportAndExtract(sessionId);
-  }
-}
-
 async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: string) {
   await runVerifierLabelingForNode(sessionId, nodeId);
 
@@ -243,8 +233,6 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
   if (!session) return;
 
   broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
-
-  runPostSolverExport(sessionId);
 
   emit({
     type: "session.status",
@@ -260,7 +248,6 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
 /** After a free-form session.continue finishes: re-check verifiers + export; no nodeCompleted (runner already set status). */
 async function finalizeContinueWithVerification(sessionId: string, nodeId: string) {
   await runVerifierLabelingForNode(sessionId, nodeId);
-  runPostSolverExport(sessionId);
   const session = initializeSessions().getSession(sessionId);
   if (!session) return;
   emit({

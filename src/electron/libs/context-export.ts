@@ -280,7 +280,7 @@ export async function exportSessionJsonFile(sessionId: string): Promise<string |
 
 /**
  * Export the current session from SQLite and run induce.py (memories + flat skills).
- * Called after each completed workflow step when auto-induction is on.
+ * Triggered manually via session.runContextInduction (brain click in Context Update mode).
  */
 export function runFullSessionExportAndExtract(sessionId: string): void {
   const root = scriptsRootDir();
