@@ -53,7 +53,7 @@ const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
   "Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
   "You may add children to break a main step into detailed sub-steps when useful.",
   "Do NOT add separate validation/testing steps. Express checks inside each step's verifiers.",
-  "Keep descriptions short but complete. Each node needs description, outputFiles, verifiers, and optional children.",
+  "Keep each step description to 15 words or fewer. Each node needs description, outputFiles, verifiers, and optional children.",
   "Prefer .md for document-style outputs when markdown preview is useful.",
   "After calling workflow_plan, STOP. Do not execute any steps yourself.",
   "The human operator will trigger each step individually.",
