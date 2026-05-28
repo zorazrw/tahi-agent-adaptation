@@ -28,6 +28,7 @@ import {
 } from "./workflow-plan-recovery.js";
 import {
   EXECUTION_CONTEXT_MAX_ACTIONS,
+  promptWithExecutionContextRetry,
   trimSessionToLastAgentActions,
 } from "./session-context-trim.js";
 
@@ -647,7 +648,15 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           },
         },
         async () => {
-          await piSession.prompt(promptToSend);
+          if (trimExecutionContextToLastActions != null && trimExecutionContextToLastActions > 0) {
+            await promptWithExecutionContextRetry(
+              piSession,
+              promptToSend,
+              trimExecutionContextToLastActions
+            );
+          } else {
+            await piSession.prompt(promptToSend);
+          }
         },
       );
 

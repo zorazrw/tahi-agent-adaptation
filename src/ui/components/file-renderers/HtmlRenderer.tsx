@@ -35,6 +35,19 @@ type HtmlVisualTool = "none" | "text" | "layout";
 
 type ContentSize = { w: number; h: number };
 
+/** Cheap fingerprint so iframe remounts when disk content changes (srcDoc-only updates are unreliable in Electron). */
+function hashPreviewContent(content: string): number {
+  let h = 0;
+  for (let i = 0; i < content.length; i++) {
+    h = (Math.imul(31, h) + content.charCodeAt(i)) | 0;
+  }
+  return h;
+}
+
+function previewIframeKey(reloadKey: number | undefined, content: string): string {
+  return `${reloadKey ?? 0}:${content.length}:${hashPreviewContent(content)}`;
+}
+
 function readIframeContentSize(doc: Document): ContentSize {
   const root = doc.documentElement;
   const body = doc.body;
@@ -178,9 +191,26 @@ export function HtmlRenderer({
   visualSavingRef.current = visualSaving;
 
   const displayContent = canEdit ? editContent : data.content;
+  const iframeKey = previewIframeKey(reloadKey, displayContent);
 
   useEffect(() => {
     setEditContent(data.content);
+    editContentRef.current = data.content;
+    visualDirtyRef.current = false;
+    setVisualDirty(false);
+    setVisualSaveError(null);
+  }, [data.content, reloadKey]);
+
+  useEffect(() => {
+    const onDiscard = () => {
+      setEditContent(data.content);
+      editContentRef.current = data.content;
+      visualDirtyRef.current = false;
+      setVisualDirty(false);
+      setVisualSaveError(null);
+    };
+    window.addEventListener("preview-reload-discard", onDiscard);
+    return () => window.removeEventListener("preview-reload-discard", onDiscard);
   }, [data.content]);
 
   useEffect(() => {
@@ -808,7 +838,7 @@ export function HtmlRenderer({
             }
           >
             <iframe
-              key={reloadKey ?? data.content.length}
+              key={iframeKey}
               ref={iframeRef}
               srcDoc={displayContent}
               sandbox={previewSandbox}
@@ -827,7 +857,7 @@ export function HtmlRenderer({
       ) : canEdit ? (
         <EditableTextPanel
           content={editContent}
-          contentKey={data.content}
+          contentKey={iframeKey}
           monospace
           onSave={async (content) => {
             setEditContent(content);
