@@ -63,6 +63,23 @@ Formats
     verifiers           : final verifier criteria + pass/fail status
   Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
 
+  Per-message ``environment`` (Pi engine sessions): every OAI message inside
+  ``agent_trajectories[].messages`` and every entry in ``human_trajectories`` carries an
+  ``environment`` of the same shape as the default exporter:
+      {workflow: [...nested nodes with verifier criterion+status...],
+       file:     [{path, content, content_source, content_encoding, error}, ...],
+       memory:   {<filename>: <content>, ...},
+       skill:    {<filename>: <content>, ...}}
+  The state is carried forward from each message's ``state_snapshot`` (workflow + file +
+  memory + skill); messages without their own snapshot inherit the previous snapshot's
+  state. The synthetic leading ``{role: user, content: prompt}`` message of each
+  trajectory carries the start-of-segment environment (state at the moment the human
+  posted that prompt). REINFORCE rewards read the final verifier statuses from the last
+  message's ``environment.workflow[*].verifiers[*].status``; memory/skill induction takes
+  diffs across successive ``environment.file`` snapshots within and between chunks.
+  ``output_files`` (Pi-only, change-only artifacts) is retained alongside the full
+  ``environment.file`` to preserve the existing "what was written this turn" signal.
+
 Usage:
   conda activate code   # optional: use "code" env
   python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
@@ -802,6 +819,70 @@ def _build_memory_skill_timeline(msgs: List[dict]) -> Tuple[List[dict], List[dic
     return mems_out, sks_out
 
 
+def _build_file_timeline(msgs: List[dict]) -> List[Optional[list]]:
+    """
+    Carry forward each snapshot's ``file`` list (path/content rows) across messages.
+
+    Rows from the most recent snapshot persist until a later snapshot replaces them. Used by the
+    weight-format exporter so messages without their own snapshot still see file content from the
+    nearest preceding snapshot (instead of falling back to a fresh on-disk read that may not match
+    the historical state).
+    """
+    current: Optional[list] = None
+    out: List[Optional[list]] = []
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if isinstance(snap, dict):
+            files = snap.get("file")
+            if isinstance(files, list):
+                current = copy.deepcopy(files)
+        out.append(copy.deepcopy(current) if current is not None else None)
+    return out
+
+
+def _build_message_environment(
+    norm: dict,
+    *,
+    cwd: Optional[str],
+    workflow_override: Optional[list],
+    file_override: Optional[list],
+    memory: dict,
+    skill: dict,
+) -> dict:
+    """Per-message canonical 4-key environment for the weight format.
+
+    Returns the genuine carried-forward snapshot state at this message — never the session's final
+    on-disk / final-workflow state. This mirrors the default exporter, which seeds ``env_carry`` with
+    :func:`empty_environment` and only advances it when a real ``state_snapshot`` is encountered, so
+    the env attached to early messages (e.g., before the workflow is planned, before any file is
+    written) accurately reflects "nothing exists yet" instead of leaking the post-completion state.
+
+    Behavior:
+    - ``workflow_override`` (carried-forward snapshot workflow) and ``file_override`` (carried-forward
+      snapshot ``file`` rows) drive the result. File rows are realigned to the workflow tree so paths
+      that no longer appear under the current tree drop out (matches :func:`_realign_env_to_workflow`).
+    - When both are ``None`` (no snapshot has been recorded yet at this point in the timeline),
+      returns an empty environment — *not* a fallback to session-level workflow_tree / on-disk reads.
+    - ``memory`` / ``skill`` are passed through as filename → content maps.
+    """
+    if isinstance(workflow_override, list):
+        files_in: List[dict] = file_override if isinstance(file_override, list) else []
+        realigned = _realign_env_to_workflow(
+            {"workflow": copy.deepcopy(workflow_override), "file": copy.deepcopy(files_in)},
+            workflow_override,
+            cwd,
+        )
+        realigned["memory"] = copy.deepcopy(memory) if isinstance(memory, dict) else {}
+        realigned["skill"] = copy.deepcopy(skill) if isinstance(skill, dict) else {}
+        return realigned
+    return {
+        "workflow": [],
+        "file": copy.deepcopy(file_override) if isinstance(file_override, list) else [],
+        "memory": copy.deepcopy(memory) if isinstance(memory, dict) else {},
+        "skill": copy.deepcopy(skill) if isinstance(skill, dict) else {},
+    }
+
+
 def _environment_for_norm_merge(norm: dict, default_env: dict) -> Tuple[dict, bool]:
     """Merge snapshot file list with workflow from snapshot or fallback."""
     snap = norm.get("state_snapshot")
@@ -1031,7 +1112,7 @@ def build_full_session_trajectory(
             idx += 1
             continue
 
-        if m.get("type") in ("edit_workflow", "edit_plan"):
+        if m.get("type") == "edit_workflow":
             wo_e = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_e = mem_timeline[idx] if idx < len(mem_timeline) else {}
             s_e = sk_timeline[idx] if idx < len(sk_timeline) else {}
@@ -1302,7 +1383,7 @@ def normalize_legacy_message(msg: dict) -> dict:
     """Normalize a stored StreamMessage for JSON output (agent turn vs user message)."""
     if msg.get("type") == "user_prompt":
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
-    if msg.get("type") in ("edit_workflow", "edit_plan"):
+    if msg.get("type") == "edit_workflow":
         return {"role": "user", "type": "edit_workflow"}
     if msg.get("type") == "edit_verifier":
         return {"role": "user", "type": "edit_verifier"}
@@ -1348,17 +1429,8 @@ def _is_export_noise_message(msg: dict) -> bool:
 
 def normalize_pi_message(msg: dict) -> dict:
     msg_type = msg.get("type")
-    role = msg.get("role")
     if msg_type == "user_prompt":
         return {"role": "user", "type": "user_prompt", "prompt": msg.get("prompt", "")}
-    if msg_type in ("edit_workflow", "edit_plan"):
-        return {"role": "user", "type": "edit_workflow"}
-    if msg_type == "edit_verifier":
-        return {"role": "user", "type": "edit_verifier"}
-    if msg_type == "file_edit":
-        return {"role": "user", "type": "file_edit", "path": msg.get("path", "")}
-    if msg_type == "brain_edit":
-        return {"role": "user", "type": "brain_edit"}
     if msg_type == "node_completed":
         return {"role": "agent", "type": "node_completed", "raw": msg}
     if msg_type == "verifier_label":
@@ -1370,9 +1442,7 @@ def normalize_pi_message(msg: dict) -> dict:
         }
     if msg_type in ("system_init", "assistant", "tool_result", "run_result"):
         return {"role": "agent", "type": msg_type, "raw": msg}
-    if role == "user":
-        return {"role": "user", "type": msg_type, "raw": msg}
-    return {"role": "agent", "type": msg_type, "raw": msg}
+    return {"role": "agent", "raw": msg}
 
 
 def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:
@@ -1744,6 +1814,37 @@ def _find_node_in_tree(tree: Any, node_id: str) -> Optional[dict]:
     return None
 
 
+def _verifiers_from_snapshot(snapshot_msg: Optional[dict], node_id: str) -> Optional[List[dict]]:
+    """Extract per-criterion verifier results for *node_id* from a snapshot message.
+
+    Returns a list like [{"criterion": "...", "status": True/False}, …], or None
+    if no snapshot / node is found.  The snapshot stores each criterion as
+    ``{"criterion": str, "status": "success" | "failure"}`` (``buildExportEnvironmentSnapshot``
+    collapses the in-memory ``verifierMarks`` ("check"/"cross"/undefined) into
+    these strings via ``verifierStatusForExport`` in message-state-snapshot.ts),
+    so we read ``status`` directly instead of looking up ``verifierMarks``.
+    """
+    if snapshot_msg is None:
+        return None
+    tree = _snapshot_workflow_tree(snapshot_msg)
+    if tree is None:
+        return None
+    node = _find_node_in_tree(tree, node_id)
+    if node is None:
+        return None
+    criteria = node.get("verifiers") or []
+    result = []
+    for c in criteria:
+        if isinstance(c, dict):
+            crit = str(c.get("criterion", ""))
+            status = c.get("status") == "success"
+        else:
+            crit = str(c)
+            status = False
+        result.append({"criterion": crit, "status": status})
+    return result if result else None
+
+
 def _flush_partial_group(partials: List[dict]) -> dict:
     """Merge a group of consecutive assistant partials into one entry."""
     if len(partials) == 1:
@@ -1900,15 +2001,22 @@ def _slim_raw_message(raw: dict) -> dict:
             sr = raw.get("stopReason")
             if sr is not None:
                 out["stopReason"] = sr
+            ts = raw.get("timestamp")
+            if ts is not None:
+                out["timestamp"] = ts
             return out
         if t == "tool_result":
-            return {
+            out: Dict[str, Any] = {
                 "type": "tool_result",
                 "toolUseId": raw.get("toolUseId", ""),
                 "toolName": raw.get("toolName", ""),
                 "content": raw.get("content", ""),
                 "isError": raw.get("isError", False),
             }
+            ts = raw.get("timestamp")
+            if ts is not None:
+                out["timestamp"] = ts
+            return out
         if t == "system_init":
             out = {"type": "system_init", "engine": "pi"}
             if raw.get("model"):
@@ -2000,9 +2108,22 @@ def _merge_parallel_tool_results(agent_traj: List[dict]) -> List[dict]:
 # ── Pi system prompt & tool schemas (hardcoded from Pi mono source) ───────────
 # These are code constants that never appear in DB; we splice them into exports.
 
-# TODO: retrieve this from the Pi mono source
 PI_SYSTEM_PROMPT_TEMPLATE = (
-    "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\nAvailable tools:\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n- grep: Search file contents for patterns (respects .gitignore)\n- find: Find files by glob pattern (respects .gitignore)\n- ls: List directory contents\n- workflow_plan: workflow_plan: register a hierarchical task plan before doing any work\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n\nGuidelines:\n- Prefer grep/find/ls tools over bash for file exploration (faster, respects .gitignore)\n- Use read to examine files instead of cat or sed.\n- Use edit for precise changes (edits[].oldText must match exactly)\n- When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls\n- Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.\n- Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /Users/aspen/Desktop/agent-cowork/node_modules/@mariozechner/pi-coding-agent/README.md\n- Additional docs: /Users/aspen/Desktop/agent-cowork/node_modules/@mariozechner/pi-coding-agent/docs\n- Examples: /Users/aspen/Desktop/agent-cowork/node_modules/@mariozechner/pi-coding-agent/examples (extensions, custom tools, SDK)\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md)\n- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)\n\nIMPORTANT: You MUST call the workflow_plan tool as your very first action to register a structured plan.\nDo NOT write out steps as text. Use the tool with structured JSON input.\nStructure: Provide 3-5 main steps at the top level. Do NOT add a single wrapper root that repeats the task.\nEach main step must have a visually verifiable output: use outputFiles or clear verifiers.\nYou may add children to break a main step into detailed sub-steps when useful.\nDo NOT add separate validation/testing steps. Express checks inside each step's verifiers.\nKeep descriptions short but complete. Each node needs description, outputFiles, verifiers, and optional children.\nPrefer .md for document-style outputs when markdown preview is useful.\nAfter calling workflow_plan, STOP. Do not execute any steps yourself.\nThe human operator will trigger each step individually."
+    "You are an expert coding assistant operating inside pi, a coding agent harness. "
+    "You help users by reading files, executing commands, editing code, and writing new files.\n\n"
+    "Available tools:\n"
+    "- read: Read file contents\n"
+    "- bash: Execute bash commands (ls, grep, find, etc.)\n"
+    "- edit: Edit a file using exact text replacement\n"
+    "- write: Write content to a file\n"
+    "- grep: Search file contents for patterns (respects .gitignore)\n"
+    "- find: Find files by glob pattern (respects .gitignore)\n"
+    "- ls: List directory contents\n\n"
+    "In addition to the tools above, you may have access to other custom tools depending on the project.\n\n"
+    "Guidelines:\n"
+    "- Prefer grep/find/ls tools over bash for file exploration (faster, respects .gitignore)\n"
+    "- Be concise in your responses\n"
+    "- Show file paths clearly when working with files"
 )
 
 
@@ -2015,272 +2136,163 @@ def _pi_system_prompt(cwd: Optional[str] = None) -> str:
         prompt += f"\nCurrent working directory: {cwd}"
     return prompt
 
-# TODO: retrieve this from the Pi mono source
+
 PI_TOOL_SCHEMAS: List[dict] = [
     {
         "type": "function",
         "function": {
             "name": "read",
-            "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+            "description": "Read the contents of a file.",
             "parameters": {
                 "type": "object",
-                "required": [
-                    "path"
-                ],
                 "properties": {
-                    "path": {
-                        "description": "Path to the file to read (relative or absolute)",
-                        "type": "string"
-                    },
-                    "offset": {
-                        "description": "Line number to start reading from (1-indexed)",
-                        "type": "number"
-                    },
-                    "limit": {
-                        "description": "Maximum number of lines to read",
-                        "type": "number"
-                    }
-                }
+                    "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
+                    "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
+                    "limit": {"type": "number", "description": "Maximum number of lines to read"},
+                },
+                "required": ["path"],
             },
-            "strict": False
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
-            "parameters": {
-                "type": "object",
-                "required": [
-                    "command"
-                ],
-                "properties": {
-                    "command": {
-                        "description": "Bash command to execute",
-                        "type": "string"
-                    },
-                    "timeout": {
-                        "description": "Timeout in seconds (optional, no default timeout)",
-                        "type": "number"
-                    }
-                }
-            },
-            "strict": False
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit",
-            "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
-            "parameters": {
-                "additionalProperties": False,
-                "type": "object",
-                "required": [
-                    "path",
-                    "edits"
-                ],
-                "properties": {
-                    "path": {
-                        "description": "Path to the file to edit (relative or absolute)",
-                        "type": "string"
-                    },
-                    "edits": {
-                        "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
-                        "type": "array",
-                        "items": {
-                            "additionalProperties": False,
-                            "type": "object",
-                            "required": [
-                                "oldText",
-                                "newText"
-                            ],
-                            "properties": {
-                                "oldText": {
-                                    "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
-                                    "type": "string"
-                                },
-                                "newText": {
-                                    "description": "Replacement text for this targeted edit.",
-                                    "type": "string"
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            "strict": False
-        }
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "write",
-            "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+            "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
             "parameters": {
                 "type": "object",
-                "required": [
-                    "path",
-                    "content"
-                ],
                 "properties": {
-                    "path": {
-                        "description": "Path to the file to write (relative or absolute)",
-                        "type": "string"
-                    },
-                    "content": {
-                        "description": "Content to write to the file",
-                        "type": "string"
-                    }
-                }
+                    "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
+                    "content": {"type": "string", "description": "Content to write to the file"},
+                },
+                "required": ["path", "content"],
             },
-            "strict": False
-        }
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit",
+            "description": "Edit a single file using exact text replacement.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
+                    "edits": {
+                        "type": "array",
+                        "description": "One or more targeted replacements.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": {"type": "string", "description": "Exact text to find."},
+                                "newText": {"type": "string", "description": "Replacement text."},
+                            },
+                            "required": ["oldText", "newText"],
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Execute a bash command in the current working directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Bash command to execute"},
+                    "timeout": {"type": "number", "description": "Timeout in seconds (optional)"},
+                },
+                "required": ["command"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars.",
+            "description": "Search file contents for a pattern. Respects .gitignore.",
             "parameters": {
                 "type": "object",
-                "required": [
-                    "pattern"
-                ],
                 "properties": {
-                    "pattern": {
-                        "description": "Search pattern (regex or literal string)",
-                        "type": "string"
-                    },
-                    "path": {
-                        "description": "Directory or file to search (default: current directory)",
-                        "type": "string"
-                    },
-                    "glob": {
-                        "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'",
-                        "type": "string"
-                    },
-                    "ignoreCase": {
-                        "description": "Case-insensitive search (default: false)",
-                        "type": "boolean"
-                    },
-                    "literal": {
-                        "description": "Treat pattern as literal string instead of regex (default: false)",
-                        "type": "boolean"
-                    },
-                    "context": {
-                        "description": "Number of lines to show before and after each match (default: 0)",
-                        "type": "number"
-                    },
-                    "limit": {
-                        "description": "Maximum number of matches to return (default: 100)",
-                        "type": "number"
-                    }
-                }
+                    "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
+                    "path": {"type": "string", "description": "Directory or file to search (default: current directory)"},
+                    "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. '*.ts'"},
+                    "ignoreCase": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
+                    "literal": {"type": "boolean", "description": "Treat pattern as literal string (default: false)"},
+                    "context": {"type": "number", "description": "Lines of context before and after each match"},
+                    "limit": {"type": "number", "description": "Maximum number of matches to return"},
+                },
+                "required": ["pattern"],
             },
-            "strict": False
-        }
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "find",
-            "description": "Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first).",
+            "description": "Search for files by glob pattern. Respects .gitignore.",
             "parameters": {
                 "type": "object",
-                "required": [
-                    "pattern"
-                ],
                 "properties": {
-                    "pattern": {
-                        "description": "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
-                        "type": "string"
-                    },
-                    "path": {
-                        "description": "Directory to search in (default: current directory)",
-                        "type": "string"
-                    },
-                    "limit": {
-                        "description": "Maximum number of results (default: 1000)",
-                        "type": "number"
-                    }
-                }
+                    "pattern": {"type": "string", "description": "Glob pattern to match files"},
+                    "path": {"type": "string", "description": "Directory to search in (default: current directory)"},
+                    "limit": {"type": "number", "description": "Maximum number of results"},
+                },
+                "required": ["pattern"],
             },
-            "strict": False
-        }
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "ls",
-            "description": "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).",
+            "description": "List directory contents.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "description": "Directory to list (default: current directory)",
-                        "type": "string"
-                    },
-                    "limit": {
-                        "description": "Maximum number of entries to return (default: 500)",
-                        "type": "number"
-                    }
-                }
+                    "path": {"type": "string", "description": "Directory to list (default: current directory)"},
+                    "limit": {"type": "number", "description": "Maximum number of entries to return"},
+                },
+                "required": [],
             },
-            "strict": False
-        }
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "workflow_plan",
-            "description": "Register a hierarchical workflow plan. Provide 3-5 main steps at the top level with description, outputFiles, verifiers, and optional children.",
+            "description": "Register a hierarchical workflow plan.",
             "parameters": {
                 "type": "object",
-                "required": [
-                    "tasks"
-                ],
                 "properties": {
                     "tasks": {
                         "type": "array",
+                        "description": "Top-level workflow steps",
                         "items": {
-                            "$id": "T5",
                             "type": "object",
-                            "required": [
-                                "description",
-                                "outputFiles",
-                                "verifiers"
-                            ],
                             "properties": {
-                                "description": {
-                                    "type": "string"
-                                },
-                                "outputFiles": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "string"
-                                    }
-                                },
+                                "description": {"type": "string"},
+                                "outputFiles": {"type": "array", "items": {"type": "string"}},
                                 "verifiers": {
                                     "type": "array",
                                     "items": {
-                                        "type": "string"
-                                    }
+                                        "type": "object",
+                                        "properties": {"criterion": {"type": "string"}},
+                                    },
                                 },
-                                "children": {
-                                    "type": "array",
-                                    "items": {
-                                        "$ref": "T5"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                                "children": {"type": "array", "items": {"type": "object"}},
+                            },
+                            "required": ["description"],
+                        },
+                    },
+                },
+                "required": ["tasks"],
             },
-            "strict": False
-        }
+        },
     },
     {
         "type": "function",
@@ -2289,60 +2301,25 @@ PI_TOOL_SCHEMAS: List[dict] = [
             "description": "Ask the operator a structured question and wait for the answer.",
             "parameters": {
                 "type": "object",
-                "required": [
-                    "questions"
-                ],
                 "properties": {
                     "questions": {
                         "type": "array",
                         "items": {
                             "type": "object",
-                            "required": [
-                                "question"
-                            ],
                             "properties": {
-                                "question": {
-                                    "type": "string"
-                                },
-                                "header": {
-                                    "type": "string"
-                                },
-                                "options": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "required": [
-                                            "label"
-                                        ],
-                                        "properties": {
-                                            "label": {
-                                                "type": "string"
-                                            },
-                                            "description": {
-                                                "type": "string"
-                                            }
-                                        }
-                                    }
-                                },
-                                "multiSelect": {
-                                    "type": "boolean"
-                                }
-                            }
-                        }
+                                "question": {"type": "string"},
+                                "header": {"type": "string"},
+                                "options": {"type": "array", "items": {"type": "string"}},
+                                "multiSelect": {"type": "boolean"},
+                            },
+                            "required": ["question"],
+                        },
                     },
-                    "answers": {
-                        "type": "object",
-                        "patternProperties": {
-                            "^(.*)$": {
-                                "type": "string"
-                            }
-                        }
-                    }
-                }
+                },
+                "required": ["questions"],
             },
-            "strict": False
-        }
-    }
+        },
+    },
 ]
 
 
@@ -2415,6 +2392,231 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
             continue
 
     return oai
+
+
+def pi_messages_to_openai_with_envs(
+    raw_env_pairs: List[Tuple[dict, dict]],
+) -> List[dict]:
+    """Like ``pi_messages_to_openai`` but each (raw, env) pair contributes ``env`` to its OAI message.
+
+    The mapping is one-to-one for ``assistant`` (non-error) / ``tool_result`` / ``user_prompt`` rows;
+    ``assistant`` rows with ``stopReason == "error"`` and ``system_init`` / ``run_result`` are still
+    skipped. ``env`` is attached as the canonical 4-key dict under the ``environment`` key on the
+    emitted OAI message, so REINFORCE can read final verifier statuses and memory/skill induction can
+    diff successive ``environment.file`` snapshots without consulting other arrays.
+    """
+    oai: List[dict] = []
+    for raw, env in raw_env_pairs:
+        t = raw.get("type")
+
+        if t == "user_prompt":
+            msg: Dict[str, Any] = {"role": "user", "content": raw.get("prompt", "")}
+            if isinstance(env, dict):
+                msg["environment"] = env
+            oai.append(msg)
+            continue
+
+        if t == "assistant":
+            if raw.get("stopReason") == "error":
+                continue
+            blocks = raw.get("blocks") or []
+            text_parts: List[str] = []
+            tool_calls: List[dict] = []
+            thinking_parts: List[str] = []
+            for b in blocks:
+                bt = b.get("type")
+                if bt == "text":
+                    text_parts.append(b.get("text", ""))
+                elif bt == "thinking":
+                    thinking_parts.append(b.get("thinking", ""))
+                elif bt == "tool_use":
+                    inp = b.get("input", {})
+                    tool_calls.append({
+                        "id": b.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": json.dumps(inp, ensure_ascii=False) if isinstance(inp, dict) else str(inp),
+                        },
+                    })
+            msg = {"role": "assistant"}
+            content_str = "\n".join(text_parts).strip()
+            msg["content"] = content_str if content_str else None
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            if thinking_parts:
+                msg["thinking"] = "\n".join(thinking_parts)
+            if isinstance(env, dict):
+                msg["environment"] = env
+            oai.append(msg)
+            continue
+
+        if t == "tool_result":
+            content = raw.get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(
+                    p.get("text", str(p)) if isinstance(p, dict) else str(p)
+                    for p in content
+                )
+            msg = {
+                "role": "tool",
+                "tool_call_id": raw.get("toolUseId", ""),
+                "name": raw.get("toolName", ""),
+                "content": str(content),
+            }
+            if isinstance(env, dict):
+                msg["environment"] = env
+            oai.append(msg)
+            continue
+
+    return oai
+
+
+def _collect_written_paths_from_segment(seg: List[dict]) -> set[str]:
+    """Return paths the agent **successfully** invoked ``write`` / ``edit`` on.
+
+    Two filters are applied:
+    1. Only ``write`` / ``edit`` tool_use calls (not ``read``, ``bash``, etc.).
+    2. Only calls whose corresponding ``tool_result`` did NOT have ``isError=true``.
+       If a ``write``/``edit`` failed (e.g. "Could not find the exact text"), the
+       path is excluded so a stale on-disk file is not mistakenly treated as a
+       produced artifact.
+
+    The ``toolUseId`` from the assistant block is matched against the nearest
+    ``tool_result`` message in the segment.
+    """
+    # Pass 1: collect (toolUseId → path) for write/edit calls
+    id_to_path: Dict[str, str] = {}
+    for e in seg:
+        raw = e.get("raw") if isinstance(e, dict) else None
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("type") != "assistant":
+            continue
+        blocks = raw.get("blocks") or (raw.get("message") or {}).get("content") or []
+        for b in blocks:
+            if not isinstance(b, dict) or b.get("type") != "tool_use":
+                continue
+            name = str(b.get("name") or "").lower()
+            if name not in ("write", "edit"):
+                continue
+            inp = b.get("input")
+            if inp is None:
+                inp = b.get("arguments")
+            if isinstance(inp, str):
+                try:
+                    inp = json.loads(inp)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(inp, dict):
+                continue
+            p = inp.get("path")
+            tid = b.get("id") or b.get("toolUseId")
+            if isinstance(p, str) and p.strip():
+                if isinstance(tid, str) and tid:
+                    id_to_path[tid] = p.strip()
+                else:
+                    # No id tracking possible; still collect but can't filter by error
+                    id_to_path[f"_noid_{p.strip()}"] = p.strip()
+
+    # Pass 2: remove paths whose tool_result has isError=true
+    failed_ids: set[str] = set()
+    for e in seg:
+        raw = e.get("raw") if isinstance(e, dict) else None
+        if not isinstance(raw, dict):
+            continue
+        # Pi format: standalone tool_result message
+        if raw.get("type") == "tool_result":
+            if raw.get("isError"):
+                tid = raw.get("toolUseId") or raw.get("tool_use_id") or ""
+                if tid:
+                    failed_ids.add(tid)
+        # Legacy format: user message wrapping tool_result blocks
+        elif raw.get("type") == "user":
+            for block in (raw.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                # Legacy tool_results mark errors via non-empty "is_error" or content prefix
+                if block.get("is_error"):
+                    tid = block.get("tool_use_id") or ""
+                    if tid:
+                        failed_ids.add(tid)
+
+    paths: set[str] = {
+        path for tid, path in id_to_path.items()
+        if tid not in failed_ids
+    }
+    return paths
+
+
+def _output_files_for_segment(
+    written_paths: set[str],
+    snap_start: Optional[dict],
+    snap_end: Optional[dict],
+) -> List[dict]:
+    """Filter ``snapshot.file`` rows to files that changed during this segment.
+
+    Two conditions must both hold:
+    1. The path is in ``written_paths`` (agent called write/edit on it successfully).
+    2. The file content at segment-end differs from content at segment-start.
+       This excludes corner cases where ``write`` succeeded but wrote the same bytes
+       (content unchanged). Segment-start snapshot is taken from the **previous**
+       segment's end, or None for the first segment.
+
+    Matches by exact path or basename to handle cwd-relative vs absolute mix.
+    Skips rows without text content.
+    """
+    if not written_paths or not isinstance(snap_end, dict):
+        return []
+    files_end = snap_end.get("file")
+    if not isinstance(files_end, list):
+        return []
+
+    # Build lookup for start-of-segment content; None means "file didn't exist before"
+    start_content: Dict[str, Optional[str]] = {}
+    if isinstance(snap_start, dict):
+        for f in (snap_start.get("file") or []):
+            if not isinstance(f, dict):
+                continue
+            fp = str(f.get("path", "")).strip()
+            if fp:
+                start_content[fp] = f.get("content") if isinstance(f.get("content"), str) else None
+
+    wanted_basenames = {os.path.basename(p.replace("\\", "/")) for p in written_paths}
+    out: List[dict] = []
+    for f in files_end:
+        if not isinstance(f, dict):
+            continue
+        fp = str(f.get("path", "")).strip()
+        if not fp:
+            continue
+        if fp not in written_paths and os.path.basename(fp.replace("\\", "/")) not in wanted_basenames:
+            continue
+        content = f.get("content")
+        if not isinstance(content, str):
+            continue
+        # Skip if content is identical to what it was at segment start
+        prev = start_content.get(fp)
+        if prev is not None and prev == content:
+            continue
+        entry: Dict[str, Any] = {"path": fp, "content": content}
+        cs = f.get("content_source")
+        if isinstance(cs, str):
+            entry["content_source"] = cs
+        out.append(entry)
+    return out
+
+
+def _last_snapshot_in_range(
+    snapshots: List[Optional[dict]], start: int, end: int
+) -> Optional[dict]:
+    """Return the latest non-null snapshot in ``snapshots[start:end]``."""
+    end = min(end, len(snapshots))
+    for i in range(end - 1, max(start, 0) - 1, -1):
+        snap = snapshots[i]
+        if isinstance(snap, dict):
+            return snap
+    return None
 
 
 WORKFLOW_PLAN_INSTRUCTION = "\n".join([
@@ -2497,6 +2699,34 @@ def build_weight_based_session(
 
     is_pi = _is_pi_engine(all_msgs)
 
+    # ── Per-message timelines (carry-forward state from snapshots) ──
+    # ``wf_timeline_all[i]`` / ``file_timeline_all[i]`` / ``mem_timeline_all[i]`` /
+    # ``sk_timeline_all[i]`` reflect the state right after applying message ``i``'s
+    # ``state_snapshot`` (or the previous carried-forward state when ``i`` has no snapshot).
+    # These power the per-OAI-message ``environment`` and per-human_trajectory ``environment``
+    # so REINFORCE rewards can read final verifier statuses and memory/skill induction can diff
+    # successive ``environment.file`` snapshots without consulting other arrays.
+    wf_timeline_all = _build_workflow_timeline(all_msgs)
+    file_timeline_all = _build_file_timeline(all_msgs)
+    mem_timeline_all, sk_timeline_all = _build_memory_skill_timeline(all_msgs)
+
+    def _env_at(idx: int) -> dict:
+        """Return the canonical {workflow, file, memory, skill} environment at ``all_msgs[idx]``.
+
+        ``idx < 0`` (e.g., before any message) yields an empty environment so the synthetic
+        leading user prompt of the very first segment still gets a well-typed shape.
+        """
+        if idx < 0 or idx >= len(all_msgs):
+            return {"workflow": [], "file": [], "memory": {}, "skill": {}}
+        return _build_message_environment(
+            all_msgs[idx],
+            cwd=export_cwd,
+            workflow_override=wf_timeline_all[idx],
+            file_override=file_timeline_all[idx],
+            memory=mem_timeline_all[idx],
+            skill=sk_timeline_all[idx],
+        )
+
     initial_task_instruction = ""
     for m in all_msgs:
         if m.get("type") == "user_prompt":
@@ -2532,13 +2762,18 @@ def build_weight_based_session(
     planning_msgs = all_msgs[:planning_end]
 
     planning_agent_traj_raw: List[dict] = []
+    # Absolute index in ``all_msgs`` for each entry pushed to ``planning_agent_traj_raw`` (Pi only;
+    # Legacy merging shifts indices, so the env-aware OAI mapping below is gated on ``is_pi``).
+    planning_msg_indices: List[int] = []
     planning_human_traj: List[dict] = []
     prev_workflow_snapshot: Optional[List[dict]] = None
 
-    for m in planning_msgs:
+    for local_i, m in enumerate(planning_msgs):
+        i_abs = local_i  # planning_msgs starts at all_msgs[0]
         t = m.get("type")
         if t in ALL_AGENT_MSG_TYPES:
             planning_agent_traj_raw.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
+            planning_msg_indices.append(i_abs)
 
         elif t == "edit_workflow":
             wf_after = _snapshot_workflow_tree(m)
@@ -2551,6 +2786,7 @@ def build_weight_based_session(
             if wf_after is not None:
                 entry["workflow_tree_after"] = wf_after
                 prev_workflow_snapshot = wf_after
+            entry["environment"] = _env_at(i_abs)
             planning_human_traj.append(entry)
 
         elif t == "edit_verifier":
@@ -2564,10 +2800,13 @@ def build_weight_based_session(
             if wf_after is not None:
                 entry["verifiers_after"] = _extract_verifier_criteria(wf_after)
                 prev_workflow_snapshot = wf_after
+            entry["environment"] = _env_at(i_abs)
             planning_human_traj.append(entry)
 
         elif t == "brain_edit":
-            planning_human_traj.append(_brain_edit_human_entry(m))
+            be_entry = _brain_edit_human_entry(m)
+            be_entry["environment"] = _env_at(i_abs)
+            planning_human_traj.append(be_entry)
 
     if is_pi:
         planning_agent_traj_merged = planning_agent_traj_raw
@@ -2593,15 +2832,28 @@ def build_weight_based_session(
     # WORKFLOW_PLAN_INSTRUCTION + user's initial task instruction
     # NOTE: memoryPrefix is not available from DB; will be accurate once
     # effective_prompt is persisted (TODO: modify src/electron).
-    # planning_prompt = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
-    planning_prompt = initial_task_instruction
-    
-    # Build planning trajectories (planning is always a single trajectory)
+    planning_prompt = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
+
+    # Build planning trajectories (planning is always a single trajectory).
+    # The synthetic leading user message gets the start-of-segment environment so memory/skill
+    # induction can compare it against the first assistant turn's post-state.
+    planning_user_env = _env_at(0) if planning_msgs else {"workflow": [], "file": [], "memory": {}, "skill": {}}
+    leading_user_msg: Dict[str, Any] = {"role": "user", "content": planning_prompt}
+    if isinstance(planning_user_env, dict):
+        leading_user_msg["environment"] = planning_user_env
     if is_pi:
-        pi_raw_msgs = [e["raw"] for e in planning_agent_traj if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
-        planning_messages = [{"role": "user", "content": planning_prompt}] + pi_messages_to_openai(pi_raw_msgs)
+        # Pi: no merging happens, so ``planning_agent_traj`` order matches ``planning_agent_traj_raw``
+        # one-for-one and ``planning_msg_indices`` aligns with each entry.
+        pi_pairs: List[Tuple[dict, dict]] = []
+        for k, e in enumerate(planning_agent_traj):
+            raw = e["raw"]
+            if raw.get("type") not in ("assistant", "tool_result", "user_prompt"):
+                continue
+            idx_abs = planning_msg_indices[k] if k < len(planning_msg_indices) else -1
+            pi_pairs.append((raw, _env_at(idx_abs)))
+        planning_messages = [leading_user_msg] + pi_messages_to_openai_with_envs(pi_pairs)
     else:
-        planning_messages = [{"role": "user", "content": planning_prompt}]
+        planning_messages = [leading_user_msg]
     planning_traj_entry: Dict[str, Any] = {
         "prompt": planning_prompt,
         "messages": planning_messages,
@@ -2627,16 +2879,28 @@ def build_weight_based_session(
         node_desc = node.get("description", "")
 
         agent_traj_raw: List[dict] = []
+        # Parallel to ``agent_traj_raw``: per-message ``state_snapshot`` (or None).
+        # Used to recover the segment-end on-disk file state for artifact-only
+        # completion construction. Pi: indices align with ``agent_traj`` since no
+        # merging happens; Legacy: indices may shift after merging — we therefore
+        # only emit ``output_files`` for Pi sessions (gated below).
+        agent_traj_snapshots: List[Optional[dict]] = []
+        # Absolute index in ``all_msgs`` for each entry pushed to ``agent_traj_raw`` (Pi only;
+        # Legacy merging shifts indices, so per-OAI-message env mapping below is gated on ``is_pi``).
+        agent_msg_indices: List[int] = []
         human_traj: List[dict] = []
         round_counter = 0
         node_prompt_consumed = False
         node_first_turn_prompt: Optional[str] = None
+        # Absolute index of the node's first-turn ``Proceed with: …`` prompt (start-of-segment).
+        node_first_turn_idx: Optional[int] = None
         last_snapshot_msg: Optional[dict] = None
         # Track where follow_up prompts split the trajectory.
-        # Each entry: (index into agent_traj_raw at time of split, prompt text)
-        follow_up_splits: List[Tuple[int, str]] = []
+        # Each entry: (index into agent_traj_raw at time of split, prompt text, abs idx of prompt msg)
+        follow_up_splits: List[Tuple[int, str, int]] = []
 
-        for m in node_msgs:
+        for local_i, m in enumerate(node_msgs):
+            i_abs = start_i + local_i
             t = m.get("type")
 
             if t == "user_prompt":
@@ -2645,37 +2909,46 @@ def build_weight_based_session(
                     if not node_prompt_consumed:
                         node_prompt_consumed = True
                         node_first_turn_prompt = p
+                        node_first_turn_idx = i_abs
                         continue
-                    follow_up_splits.append((len(agent_traj_raw), p))
+                    follow_up_splits.append((len(agent_traj_raw), p, i_abs))
                     human_traj.append({
                         "type": "follow_up",
                         # 0-based index of this follow-up (aligns with trajectories[1], [2], …)
                         "round_index": len(follow_up_splits) - 1,
                         "prompt": p,
+                        "environment": _env_at(i_abs),
                     })
                     continue
-                follow_up_splits.append((len(agent_traj_raw), p if isinstance(p, str) else ""))
+                follow_up_splits.append((len(agent_traj_raw), p if isinstance(p, str) else "", i_abs))
                 human_traj.append({
                     "type": "follow_up",
                     "round_index": len(follow_up_splits) - 1,
                     "prompt": p if isinstance(p, str) else "",
+                    "environment": _env_at(i_abs),
                 })
                 continue
 
             if t in ALL_AGENT_MSG_TYPES:
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
                 agent_traj_raw.append({"raw": raw_clean})
+                snap = m.get("state_snapshot")
+                agent_traj_snapshots.append(snap if isinstance(snap, dict) else None)
+                agent_msg_indices.append(i_abs)
                 if t == "system" and m.get("subtype") == "init":
                     round_counter += 1
                 if t == "system_init":
                     round_counter += 1
-                if m.get("state_snapshot"):
+                if isinstance(snap, dict):
                     last_snapshot_msg = m
 
             elif t == "verifier_label" or t == "update_verifiers":
                 raw_clean = {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}
                 agent_traj_raw.append({"raw": raw_clean})
-                if m.get("state_snapshot"):
+                snap = m.get("state_snapshot")
+                agent_traj_snapshots.append(snap if isinstance(snap, dict) else None)
+                agent_msg_indices.append(i_abs)
+                if isinstance(snap, dict):
                     last_snapshot_msg = m
 
             elif t == "file_edit":
@@ -2690,6 +2963,7 @@ def build_weight_based_session(
                     "path": fe_path,
                     "original": original_content,
                     "edited": edited_content,
+                    "environment": _env_at(i_abs),
                 })
 
             elif t == "edit_workflow":
@@ -2697,6 +2971,7 @@ def build_weight_based_session(
                 entry = {"type": "edit_workflow", "round_index": None}
                 if wf_after is not None:
                     entry["workflow_tree_after"] = wf_after
+                entry["environment"] = _env_at(i_abs)
                 human_traj.append(entry)
 
             elif t == "edit_verifier":
@@ -2713,10 +2988,13 @@ def build_weight_based_session(
                         entry["verifiers_after"] = after_node.get("verifiers", [])
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
+                entry["environment"] = _env_at(i_abs)
                 human_traj.append(entry)
 
             elif t == "brain_edit":
-                human_traj.append(_brain_edit_human_entry(m))
+                be_entry = _brain_edit_human_entry(m)
+                be_entry["environment"] = _env_at(i_abs)
+                human_traj.append(be_entry)
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
 
@@ -2743,28 +3021,158 @@ def build_weight_based_session(
 
         # ── Split agent_trajectory into per-trajectory segments ──
         # ``follow_up_splits`` was populated during the message loop:
-        # each entry is (index_in_agent_traj_raw, prompt_text).
+        # each entry is (index_in_agent_traj_raw, prompt_text, abs_msg_idx).
         # Since merging / slimming preserves ordering and count for Pi
         # (no merging) and approximately for Legacy, the indices still
         # align with agent_traj.
-        def _build_traj_entry(prompt: str, seg: List[dict]) -> Dict[str, Any]:
-            if is_pi:
-                pi_raw = [e["raw"] for e in seg
-                          if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
-                messages = [{"role": "user", "content": prompt}] + pi_messages_to_openai(pi_raw)
-            else:
-                messages = [{"role": "user", "content": prompt}]
-            return {"prompt": prompt, "messages": messages}
+        # verifier_label rows survive replaceMessages(); order matches trajectory order for this node
+        vl_snaps_for_node = [
+            m for m in all_msgs
+            if m.get("type") == "verifier_label"
+            and m.get("nodeId") == node_id
+            and m.get("state_snapshot")
+        ]
 
-        agent_trajectories: List[dict] = []
+        # Build raw (prompt, segment) pairs first so we can align vl → traj by
+        # time window before building entries. Track each segment's [start, end)
+        # range over ``agent_traj_raw`` so the parallel ``agent_traj_snapshots``
+        # array (Pi only) and tool_use scan can be sliced consistently.
+        # ``seg_prompt_indices[i]`` is the absolute ``all_msgs`` index of the user
+        # prompt that opened segment ``i`` (the node's first ``Proceed with: …`` row
+        # for segment 0, and each follow-up's user_prompt for later segments). This
+        # lets the synthetic leading user message in each ``messages`` list carry the
+        # carried-forward environment as it stood when the human typed that prompt.
+        raw_segments: List[Tuple[str, List[dict]]] = []
+        seg_ranges: List[Tuple[int, int]] = []
+        seg_prompt_indices: List[int] = []
         if not follow_up_splits:
-            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj))
+            raw_segments.append((node_first_turn_prompt or "", agent_traj))
+            seg_ranges.append((0, len(agent_traj)))
+            seg_prompt_indices.append(node_first_turn_idx if node_first_turn_idx is not None else start_i)
         else:
             first_end = follow_up_splits[0][0]
-            agent_trajectories.append(_build_traj_entry(node_first_turn_prompt or "", agent_traj[:first_end]))
-            for si, (split_idx, follow_prompt) in enumerate(follow_up_splits):
+            raw_segments.append((node_first_turn_prompt or "", agent_traj[:first_end]))
+            seg_ranges.append((0, first_end))
+            seg_prompt_indices.append(node_first_turn_idx if node_first_turn_idx is not None else start_i)
+            for si, (split_idx, follow_prompt, fu_abs_idx) in enumerate(follow_up_splits):
                 next_end = follow_up_splits[si + 1][0] if si + 1 < len(follow_up_splits) else len(agent_traj)
-                agent_trajectories.append(_build_traj_entry(follow_prompt, agent_traj[split_idx:next_end]))
+                raw_segments.append((follow_prompt, agent_traj[split_idx:next_end]))
+                seg_ranges.append((split_idx, next_end))
+                seg_prompt_indices.append(fu_abs_idx)
+
+        # For each segment, compute the max Pi ``timestamp`` among its
+        # assistant / tool_result entries.  This is the real LLM call time
+        # and survives replaceMessages() (unlike DB created_at, which is
+        # rewritten).  Used only for the precise alignment path below.
+        def _seg_end_ts(seg: List[dict]) -> Optional[int]:
+            best: Optional[int] = None
+            for e in seg:
+                raw = e.get("raw") or {}
+                if raw.get("type") not in ("assistant", "tool_result"):
+                    continue
+                ts = raw.get("timestamp")
+                if isinstance(ts, (int, float)):
+                    if best is None or ts > best:
+                        best = int(ts)
+            return best
+
+        seg_end_ts_list = [_seg_end_ts(seg) for (_, seg) in raw_segments]
+
+        # Align vl → segment.  New sessions: each vl carries
+        # ``runEndTimestamp`` (set right after labelVerifiers writes it).
+        # Old sessions: fall back to end-aligned mapping (last vl → last
+        # segment, second-last vl → second-last segment, …) which is what
+        # the user actually cares about for training.
+        vl_for_segment: List[Optional[dict]] = [None] * len(raw_segments)
+        use_timestamp_alignment = any(
+            isinstance(vl.get("runEndTimestamp"), (int, float)) for vl in vl_snaps_for_node
+        )
+        if use_timestamp_alignment:
+            for vl in vl_snaps_for_node:
+                run_end = vl.get("runEndTimestamp")
+                if not isinstance(run_end, (int, float)):
+                    continue
+                # Pick the last segment whose end_ts is < run_end; ignore
+                # segments that have no Pi timestamps (stuck trajectories).
+                chosen: Optional[int] = None
+                for k, end_ts in enumerate(seg_end_ts_list):
+                    if end_ts is None:
+                        continue
+                    if end_ts < run_end:
+                        chosen = k
+                if chosen is not None:
+                    vl_for_segment[chosen] = vl
+        else:
+            N = len(raw_segments)
+            M = len(vl_snaps_for_node)
+            shift = N - M
+            for k in range(N):
+                idx = k - shift
+                if 0 <= idx < M:
+                    vl_for_segment[k] = vl_snaps_for_node[idx]
+
+        def _build_traj_entry(
+            prompt: str,
+            seg: List[dict],
+            vl_snap: Optional[dict],
+            *,
+            seg_msg_indices: List[int],
+            prompt_msg_idx: int,
+        ) -> Dict[str, Any]:
+            # Synthetic leading user message: state at the moment the human posted ``prompt``.
+            leading_msg: Dict[str, Any] = {"role": "user", "content": prompt}
+            leading_env = _env_at(prompt_msg_idx)
+            if isinstance(leading_env, dict):
+                leading_msg["environment"] = leading_env
+            if is_pi:
+                # Pi: ``seg`` aligns with ``seg_msg_indices`` one-for-one (no merging upstream).
+                pi_pairs: List[Tuple[dict, dict]] = []
+                for k, e in enumerate(seg):
+                    raw = e["raw"]
+                    if raw.get("type") not in ("assistant", "tool_result", "user_prompt"):
+                        continue
+                    idx_abs = seg_msg_indices[k] if k < len(seg_msg_indices) else -1
+                    pi_pairs.append((raw, _env_at(idx_abs)))
+                messages = [leading_msg] + pi_messages_to_openai_with_envs(pi_pairs)
+            else:
+                messages = [leading_msg]
+            entry: Dict[str, Any] = {"prompt": prompt, "messages": messages}
+            v = _verifiers_from_snapshot(vl_snap, node_id)
+            if v is not None:
+                entry["verifiers"] = v
+            return entry
+
+        agent_trajectories: List[dict] = []
+        prev_seg_snap: Optional[dict] = None  # end-of-previous-segment snapshot for diff
+        for i, (prompt, seg) in enumerate(raw_segments):
+            s_start_i, s_end_i = seg_ranges[i]
+            seg_indices_slice = agent_msg_indices[s_start_i:s_end_i]
+            entry = _build_traj_entry(
+                prompt,
+                seg,
+                vl_for_segment[i],
+                seg_msg_indices=seg_indices_slice,
+                prompt_msg_idx=seg_prompt_indices[i],
+            )
+            # Artifact-only completion support (Pi only — Legacy merge shifts
+            # ``agent_traj`` indices relative to the snapshot array). For each
+            # segment:
+            #  - ``snap_start``: last snapshot from the *previous* segment (None for k=0)
+            #  - ``snap_end``: last snapshot within this segment
+            #  - ``written_paths``: only paths the agent called write/edit on **successfully**
+            #    (isError calls are excluded); combined with a content-diff vs snap_start
+            #    to avoid including files that didn't actually change.
+            if is_pi:
+                s_start, s_end = seg_ranges[i]
+                snap_end = _last_snapshot_in_range(agent_traj_snapshots, s_start, s_end)
+                written = _collect_written_paths_from_segment(agent_traj_raw[s_start:s_end])
+                output_files = _output_files_for_segment(written, prev_seg_snap, snap_end)
+                if output_files:
+                    entry["output_files"] = output_files
+                # Advance the "previous" snapshot so the next segment can diff against it
+                if snap_end is not None:
+                    prev_seg_snap = snap_end
+            agent_trajectories.append(entry)
 
         unit: Dict[str, Any] = {
             "intent": node_desc,
@@ -2830,7 +3238,14 @@ def main() -> int:
         type=str,
         choices=["default", "weight"],
         default="default",
-        help='Export format: "default" (human-readable trajectory) or "weight" (OAI messages + human_trajectories for training).',
+        help=(
+            'Export format: "default" (human-readable trajectory) or "weight" '
+            "(OAI messages + human_trajectories for training; every OAI message in "
+            "agent_trajectories[].messages and every human_trajectories entry carries "
+            "an `environment` dict of {workflow,file,memory,skill} so REINFORCE rewards "
+            "can read final verifier statuses and memory/skill induction can diff "
+            "successive environment.file snapshots)."
+        ),
     )
     args = parser.parse_args()
 

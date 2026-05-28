@@ -24,7 +24,12 @@ import {
   syncAppSkills,
   isValidFlatSkillMdFileName,
 } from "./libs/skill-store.js";
-import { runFullSessionExportAndExtract, setContextInductionNotifier } from "./libs/context-export.js";
+import {
+  runFullSessionExportAndExtract,
+  setContextInductionNotifier,
+  uploadSessionForTinkerTraining,
+} from "./libs/context-export.js";
+import { TRAINING_PROXY_START_HINT } from "./libs/training-proxy.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
 import {
   buildExportEnvironmentSnapshot,
@@ -134,6 +139,15 @@ setContextInductionNotifier((ev) => {
       type: "session.contextInduction",
       payload: { phase: "finished", sessionId: ev.sessionId, ok: ev.ok },
     });
+    if (!ev.ok && ev.trainingUpload) {
+      broadcast({
+        type: "runner.error",
+        payload: {
+          sessionId: ev.sessionId,
+          message: `Training upload failed. ${TRAINING_PROXY_START_HINT}`,
+        },
+      });
+    }
   }
 });
 
@@ -779,6 +793,22 @@ export function handleClientEvent(event: ClientEvent) {
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {
       runFullSessionExportAndExtract(sid);
+    }
+    return;
+  }
+
+  if (event.type === "session.uploadForTinkerTraining") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid && sessions.getSession(sid)) {
+      try {
+        uploadSessionForTinkerTraining(sid);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        broadcast({
+          type: "runner.error",
+          payload: { sessionId: sid, message },
+        });
+      }
     }
     return;
   }

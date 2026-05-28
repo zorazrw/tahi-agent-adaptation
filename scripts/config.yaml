@@ -1,0 +1,68 @@
+# -- Mode --
+mode: dpo  # "dpo", "opd", or "reinforce"
+
+# -- Inference --
+temperature: 0.3
+logprobs: false
+
+# -- Update --
+update_every_n_sessions: 1
+
+# -- Training (shared) --
+lora_rank: 64
+dry_run: false
+learning_rate: 5.0e-5
+num_epochs: 6
+batch_size: 8
+lr_schedule: cosine
+max_steps: null
+max_length: null
+save_every: 20
+
+# -- DPO-specific --
+dpo_beta: 0.1
+dpo_pair_mode: first_last
+dpo_rpo_alpha: 0.0
+dpo_use_ipo: false
+
+# -- OPD-specific --
+opd_max_tokens: 16384
+opd_temperature: 0.7
+opd_topk: 20
+opd_max_context_length: 32768
+opd_pair_mode: first_last
+opd_use_gt: true
+opd_use_student: true
+opd_rollout_attempts: 1
+opd_teacher_temperature: 1.0
+opd_log_rollout_samples: true
+opd_rollout_sample_log_chars: 16384
+opd_log_teacher_prompts: true
+# Set true only for a prompt-control upper-bound experiment. Default false keeps
+# train-time rollout prompts matched to normal inference prompts.
+opd_artifact_only_rollout_instruction: false
+opd_extract_version: v2  # "v1" (file-centric, needs per-round output_files)
+                         # "v2" (per-assistant-message)
+opd_strip_thinking_from_history: false
+opd_rollout_pipeline: current
+
+# -- REINFORCE-specific --
+reward_alpha: 0.05
+initial_baseline: 0.0
+
+# -- Logging --
+wandb_project: null
+wandb_name: null
+
+# -- Model lifecycle --
+# Base model (or registry slug) to use when training starts before any
+# /v1/chat/completions call has selected a model. Matches scripts/sessions/*.json.
+preload_model: Qwen/Qwen3.5-4B
+
+# -- Proxy Server --
+proxy_host: localhost
+proxy_port: 8000
+state_path: scripts/state.json
+# When true, /v1/chat/completions requests are rejected with HTTP 503
+# while a training round (or checkpoint swap) is in progress.
+block_during_training: true

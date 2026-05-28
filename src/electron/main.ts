@@ -48,6 +48,7 @@ import {
     saveTinkerProviderConfig,
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint, shutdownTinkerBridge } from "./libs/tinker-provider.js";
+import { startTinkerAutoUpdateWatcher, stopTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
 import { defaultRecordingsZipName, exportRecordingsBundleToZip } from "./libs/recording-bundle.js";
 
 type SaveMemoryParseResult =
@@ -189,6 +190,7 @@ function cleanup(): void {
 
     globalShortcut.unregisterAll();
     stopPolling();
+    stopTinkerAutoUpdateWatcher();
     cleanupAllSessions();
     shutdownTinkerBridge("app-shutdown");
     killViteDevServer();

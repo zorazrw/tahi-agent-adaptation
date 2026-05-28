@@ -8,24 +8,13 @@ import type {
   OpenAICompatibleApiFormat,
   ProviderAuthStatus,
 } from "../../lib/runtime-types";
+import { AUTO_INDUCTION_KEY, readStoredAutoInduction } from "../lib/auto-induction";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
 type Tab = "api" | "workflow" | "skills" | "data";
-const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
-
-function readStoredAutoInduction(): boolean {
-  try {
-    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
-    if (v === "false") return false;
-    if (v === "true") return true;
-  } catch {
-    /* ignore */
-  }
-  return true;
-}
 
 function WorkflowPanel() {
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
@@ -282,6 +271,36 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       .finally(() => {
         setLoading(false);
       });
+  }, []);
+
+  // After training completes, main persists the new sampler_path into the Tinker provider file.
+  useEffect(() => {
+    const unsubscribe = window.electron.onTinkerModelUpdated(async (event) => {
+      try {
+        if (event.model_path?.startsWith("tinker://")) {
+          setTinkerModelPath(event.model_path);
+          setTinkerResolveError(null);
+        }
+        if (event.base_model) {
+          setTinkerBaseModel(event.base_model);
+          setTinkerBaseModelResolved(Boolean(event.model_path?.startsWith("tinker://")));
+        }
+        if (event.renderer_name) {
+          setTinkerRendererName(event.renderer_name);
+        }
+
+        const [settings, availableModels] = await Promise.all([
+          window.electron.getAgentSettings(),
+          window.electron.listAvailableModels(),
+          loadOpenAICompatibleProvider(),
+          loadTinkerProvider(),
+        ]);
+        await syncModelState(availableModels, { model: event.slug }, settings);
+      } catch (err) {
+        console.error("Failed to apply tinker model update in UI:", err);
+      }
+    });
+    return unsubscribe;
   }, []);
 
   // Sync authMethod when provider or statuses change.
@@ -748,8 +767,15 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                       </div>
                     )}
                     {!tinkerResolving && tinkerBaseModelResolved && (
-                      <div>
-                        Resolved base model: <span className="font-medium text-ink-700">{tinkerBaseModel}</span>
+                      <div className="space-y-1">
+                        <div>
+                          Resolved base model: <span className="font-medium text-ink-700">{tinkerBaseModel}</span>
+                        </div>
+                        {tinkerModelPath.startsWith("tinker://") && (
+                          <div className="break-all font-mono text-[11px] text-ink-600">
+                            Active checkpoint: {tinkerModelPath}
+                          </div>
+                        )}
                       </div>
                     )}
                     {!tinkerResolving && tinkerResolveError && (
@@ -1146,8 +1172,10 @@ function SkillsPanel() {
             <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
               When enabled, the app exports the task session and runs context induction after each completed
               workflow step (and after follow-up verification turns), updating memory and skill markdown under
-              your app data folder. The Brain control shows activity while induction runs. When disabled, no
-              automatic generation runs during task sessions.
+              your app data folder. The Brain control shows activity while induction runs. A single Brain click
+              also runs that same context update. When disabled, automatic step induction is off and a single
+              Brain click uploads the session to the local training proxy instead. Double-click Brain anytime
+              to edit memory and skill files.
             </p>
           </div>
         </label>

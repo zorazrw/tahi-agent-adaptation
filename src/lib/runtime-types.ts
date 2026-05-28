@@ -368,6 +368,7 @@ export type ClientEvent =
   | { type: "skills.write"; payload: { requestId: string; sections: Array<{ fileName?: string; content?: string }>; deletedFileNames?: string[] } }
   | { type: "session.recordBrainEdit"; payload: { sessionId: string } }
   | { type: "session.runContextInduction"; payload: { sessionId: string } }
+  | { type: "session.uploadForTinkerTraining"; payload: { sessionId: string } }
   | {
       type: "session.setAutoContextInduction";
       payload: { sessionId: string; autoContextInduction: boolean };

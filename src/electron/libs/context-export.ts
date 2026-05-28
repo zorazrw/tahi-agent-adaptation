@@ -2,12 +2,18 @@ import { spawn, type ChildProcess } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
+import { startTinkerAutoUpdateWatcher } from "./tinker-auto-update.js";
+import {
+  getTrainingProxyBaseUrl,
+  isTrainingProxyDisabled,
+  TRAINING_PROXY_START_HINT,
+} from "./training-proxy.js";
 
 const LOG_BASENAME = "context-export.log";
 
 export type ContextInductionNotifierEvent =
   | { kind: "start"; sessionId: string }
-  | { kind: "end"; sessionId: string; ok: boolean };
+  | { kind: "end"; sessionId: string; ok: boolean; trainingUpload?: boolean };
 
 let inductionNotifier: ((ev: ContextInductionNotifierEvent) => void) | null = null;
 
@@ -188,16 +194,20 @@ function spawnClosed(proc: ChildProcess, label: string): Promise<void> {
   });
 }
 
-/** Serialize export+induction per session so auto-chained steps don't overlap SQLite / Python runs. */
+/** Serialize per-session export jobs so they do not overlap. */
 const sessionExportChains = new Map<string, Promise<void>>();
 
-function enqueueSessionExport(sessionId: string, run: () => Promise<void>): void {
+export function enqueueSessionJob(sessionId: string, run: () => Promise<void>): void {
   const prev = sessionExportChains.get(sessionId) ?? Promise.resolve();
   const next = prev.catch(() => {}).then(() => run());
   sessionExportChains.set(sessionId, next);
 }
 
-function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<void> {
+export function runWithInductionNotifier(
+  sessionId: string,
+  inner: () => Promise<void>,
+  options?: { trainingUpload?: boolean },
+): Promise<void> {
   inductionNotifier?.({ kind: "start", sessionId });
   let ok = false;
   return inner()
@@ -205,29 +215,24 @@ function inductionWrap(sessionId: string, inner: () => Promise<void>): Promise<v
       ok = true;
     })
     .catch((e) => {
-      logLine(`Induction failed (session ${sessionId}): ${e instanceof Error ? e.message : String(e)}`);
+      logLine(`Session job failed (${sessionId}): ${e instanceof Error ? e.message : String(e)}`);
     })
     .finally(() => {
-      inductionNotifier?.({ kind: "end", sessionId, ok });
+      inductionNotifier?.({ kind: "end", sessionId, ok, trainingUpload: options?.trainingUpload });
     });
 }
 
-/**
- * Export the current session from SQLite and run induce.py (memories + flat skills).
- * Called after each completed workflow step (or verification continue) when auto-induction is on;
- * jobs are queued per session so exports do not overlap.
- */
-export function runFullSessionExportAndExtract(sessionId: string): void {
+/** Export one session from SQLite to a JSON file; returns path or null on skip/failure. */
+export async function exportSessionJsonFile(sessionId: string): Promise<string | null> {
   const root = scriptsRootDir();
   if (!root) {
-    logLine("Skip (full session): scripts/ not found.");
-    return;
+    logLine("Skip export: scripts/ not found.");
+    return null;
   }
   const exportScript = join(root, EXPORT_SCRIPT_REL);
-  const induceScript = join(root, INDUCE_SCRIPT_REL);
-  if (!existsSync(exportScript) || !existsSync(induceScript)) {
-    logLine(`Skip (full session): missing export or induce script under ${root}`);
-    return;
+  if (!existsSync(exportScript)) {
+    logLine(`Skip export: missing script under ${root}`);
+    return null;
   }
 
   const userData = app.getPath("userData");
@@ -235,29 +240,45 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
   const tasksDir = join(userData, "tasks");
   const fullJsonPath = join(tasksDir, `${sessionId}-workflow-full.json`);
   if (!existsSync(dbPath)) {
-    logLine("Skip (full session): sessions.db missing.");
-    return;
+    logLine("Skip export: sessions.db missing.");
+    return null;
   }
   mkdirSync(tasksDir, { recursive: true });
 
   const py = pythonExecutable();
-  enqueueSessionExport(sessionId, () =>
-    inductionWrap(sessionId, async () => {
-      logLine(`export_task_sessions full session=${sessionId}`);
-      const exportProc = spawn(
-        py,
-        [
-          exportScript,
-          "--db",
-          dbPath,
-          "--session-id",
-          sessionId,
-          "--output",
-          fullJsonPath,
-        ],
-        { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
-      );
-      await spawnClosed(exportProc, "export_task_sessions (full)");
+  logLine(`export_task_sessions session=${sessionId}`);
+  const exportProc = spawn(
+    py,
+    [exportScript, "--db", dbPath, "--session-id", sessionId, "--output", fullJsonPath],
+    { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
+  );
+  await spawnClosed(exportProc, "export_task_sessions");
+  return fullJsonPath;
+}
+
+/**
+ * Export the current session from SQLite and run induce.py (memories + flat skills).
+ * Called after each completed workflow step when auto-induction is on.
+ */
+export function runFullSessionExportAndExtract(sessionId: string): void {
+  const root = scriptsRootDir();
+  if (!root) {
+    logLine("Skip (full session): scripts/ not found.");
+    return;
+  }
+  const induceScript = join(root, INDUCE_SCRIPT_REL);
+  if (!existsSync(induceScript)) {
+    logLine(`Skip (full session): missing induce script under ${root}`);
+    return;
+  }
+
+  const userData = app.getPath("userData");
+  enqueueSessionJob(sessionId, () =>
+    runWithInductionNotifier(sessionId, async () => {
+      const fullJsonPath = await exportSessionJsonFile(sessionId);
+      if (!fullJsonPath) return;
+
+      const py = pythonExecutable();
       logLine("induce.py starting (full session)");
       const induceProc = spawn(
         py,
@@ -267,6 +288,39 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
       await spawnClosed(induceProc, "induce.py");
       writeFallbackInductionOutputs(userData, fullJsonPath);
       logLine("induce.py finished OK (full session)");
-    })
+    }),
+  );
+}
+
+/** Brain click when auto-induction is off: export session and POST to the training proxy. */
+export function uploadSessionForTinkerTraining(sessionId: string): void {
+  if (isTrainingProxyDisabled()) {
+    throw new Error('Training proxy is disabled (set AGENT_COWORK_PROXY_URL, not "disabled").');
+  }
+  const baseUrl = getTrainingProxyBaseUrl();
+  if (!baseUrl) throw new Error(TRAINING_PROXY_START_HINT);
+
+  startTinkerAutoUpdateWatcher();
+  enqueueSessionJob(sessionId, () =>
+    runWithInductionNotifier(
+      sessionId,
+      async () => {
+        const fullJsonPath = await exportSessionJsonFile(sessionId);
+        if (!fullJsonPath) throw new Error("Session export failed");
+
+        const parsed = JSON.parse(readFileSync(fullJsonPath, "utf8")) as unknown;
+        const body = Array.isArray(parsed) ? parsed : [parsed];
+        const res = await fetch(`${baseUrl}/session`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(`Training proxy HTTP ${res.status}: ${text.slice(0, 500)}`);
+        }
+      },
+      { trainingUpload: true },
+    ),
   );
 }
