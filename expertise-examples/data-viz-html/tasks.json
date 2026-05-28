@@ -2,21 +2,21 @@
     {
         "id": 1,
         "type": "Data Visualization",
-        "instruction": "Visualize data in HTML based on the following instruction:\nPlot row (a) as a 1×3 grid of bar charts titled 'Similar-Quality Subset for Absolute Rating'. The three panels are titled LM Perplexities, Reward Model Scores, and LM Judge Scores. The y-axis label is Spearman's Correlation Coeff. (ρ), ranging from 0.0 to 0.4 with ticks at 0.0, 0.1, 0.2, 0.3, 0.4 and dashed horizontal gridlines. The x-axis has 7 bars with two-line tick labels (threshold value on top, sample size below): All/750, 3.0/745, 2.5/739, 2.0/731, 1.5/718, 1.0/695, 0.5/598. The first bar is tan (#C8B89A) and the remaining six are steel blue (#7B9EC8). Label each bar with its exact value centered just above the bar. Place a dashed arrow label reading 'More similar subset →' beneath all three panels. The bar values are: LM Perplexities: 0.361, 0.350, 0.341, 0.336, 0.331, 0.322, 0.262. Reward Model Scores: 0.330, 0.321, 0.308, 0.293, 0.275, 0.244, 0.213. LM Judge Scores: 0.322, 0.309, 0.299, 0.279, 0.256, 0.227, 0.176.",
+        "instruction": "Visualize data in HTML based on the following instructions:\nPlot row (a) as a 1×3 grid of bar charts titled 'Similar-Quality Subset for Absolute Rating'. The three panels are titled LM Perplexities, Reward Model Scores, and LM Judge Scores. The y-axis label is Spearman's Correlation Coeff. (ρ). The x-axis has 7 bars with two-line tick labels (threshold value on top, sample size below): All/750, 3.0/745, 2.5/739, 2.0/731, 1.5/718, 1.0/695, 0.5/598. Place a dashed arrow label reading 'More similar subset →' beneath all three panels.\nThe bar values are: \n- LM Perplexities: 0.361, 0.350, 0.341, 0.336, 0.331, 0.322, 0.262. \n- Reward Model Scores: 0.330, 0.321, 0.308, 0.293, 0.275, 0.244, 0.213. \n- LM Judge Scores: 0.322, 0.309, 0.299, 0.279, 0.256, 0.227, 0.176.",
         "title": "Artificial Hivemind: The Open-Ended Homogeneity of Language Models (and Beyond)",
         "figure": "Figure 10 (a)"
     },
     {
         "id": 2,
         "type": "Data Visualization",
-        "instruction": "Visualize in HTML the performance of 7 methods across 4 benchmark metrics: Hellaswag, MMLU, GSM8k, and C-eval. Methods (1)–(4) form one group and (5)–(7) form a second group. Method (1) is the baseline. The best value per metric is: Hellaswag=74.81 (method 4), MMLU=60.82, GSM8k=55.27, C-eval=62.20 (all method 2). The data values are: (1) Baseline: 73.07, 58.79, 52.92, 60.26. (2) SDPA Elementwise Gate: 74.64, 60.82, 55.27, 62.20. (3) v Elementwise Gate: 74.38, 59.17, 53.97, 61.00. (4) SDPA Additive Gate: 74.81, 60.06, 53.30, 60.98. (5) SDPA GroupNorm: 74.10, 60.15, 53.75, 61.14. (6) SDPA SiLU: 73.34, 59.55, 53.19, 60.90. (7) SDPA Additive Gate: 74.17, 59.20, 52.77, 59.86.",
+        "instruction": "Visualize in HTML the performance of 7 methods across 4 benchmark metrics: Hellaswag, MMLU, GSM8k, and C-eval. \nMethods (1)–(4) form one group and (5)–(7) form a second group. Method (1) is the baseline. The best value per metric is: Hellaswag=74.81 (method 4), MMLU=60.82, GSM8k=55.27, C-eval=62.20 (all method 2). \nThe data values are: (1) Baseline: 73.07, 58.79, 52.92, 60.26. (2) SDPA Elementwise Gate: 74.64, 60.82, 55.27, 62.20. (3) v Elementwise Gate: 74.38, 59.17, 53.97, 61.00. (4) SDPA Additive Gate: 74.81, 60.06, 53.30, 60.98. (5) SDPA GroupNorm: 74.10, 60.15, 53.75, 61.14. (6) SDPA SiLU: 73.34, 59.55, 53.19, 60.90. (7) SDPA Additive Gate: 74.17, 59.20, 52.77, 59.86.",
         "title": "Gated Attention for Large Language Models: Non-linearity, Sparsity, and Attention-Sink-Free",
         "figure": "Table 3"
     },
     {
         "id": 3,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML three heatmaps side by side titled Humanoid, Ant Big Maze, and Arm Push Easy. Each heatmap has Actor Depth on the x-axis and Critic Depth on the y-axis, both with values 4, 8, 16, 32, 64. Use a blue colormap where higher values are darker. The cell values are:\nHumanoid (rows = Critic Depth 64→4, cols = Actor Depth 4→64): 32 462 675 583 680 / 28 622 665 636 583 / 14 48 454 612 432 / 15 80 303 263 311 / 13 18 22 21 21.\nAnt Big Maze: 45 239 462 480 441 / 145 325 385 439 437 / 58 316 424 504 427 / 18 320 350 436 170 / 61 147 202 349 276.\nArm Push Easy: 286 809 666 815 762 / 807 909 875 848 921 / 839 818 805 740 887 / 583 669 675 682 469 / 308 256 407 345 338.",
+        "instruction": "Plot in HTML three heatmaps side-by-side titled Humanoid, Ant Big Maze, and Arm Push Easy. Each heatmap has Actor Depth on the x-axis and Critic Depth on the y-axis, both with values 4, 8, 16, 32, 64. Use a blue colormap where higher values are darker. The cell values are:\nHumanoid (rows = Critic Depth 64→4, cols = Actor Depth 4→64): 32 462 675 583 680 / 28 622 665 636 583 / 14 48 454 612 432 / 15 80 303 263 311 / 13 18 22 21 21.\nAnt Big Maze: 45 239 462 480 441 / 145 325 385 439 437 / 58 316 424 504 427 / 18 320 350 436 170 / 61 147 202 349 276.\nArm Push Easy: 286 809 666 815 762 / 807 909 875 848 921 / 839 818 805 740 887 / 583 669 675 682 469 / 308 256 407 345 338.",
         "title": "1000 Layer Networks for Self-Supervised RL: Scaling Depth Can Enable New Goal-Reaching Capabilities",
         "figure": "Figure 6"
     },
@@ -30,105 +30,105 @@
     {
         "id": 5,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a grouped bar chart showing harmfulness rate (%) for two models (Llama-2-7B and Gemma-7B), each with two variants (Aligned and Base), across 6 refusal prefix conditions: No Prefix, 'I cannot', 'I cannot fulfill', 'I apologize', 'I apologize, but I cannot', 'I am unable'. The y-axis is Harmfulness Rate (%). Add error bars using the ± values. The data are:\nLlama-2-7B Aligned: 0, 0±0, 0±0, 0±0, 0±0, 0±0. Llama-2-7B Base: 68.6±0.8, 16.4±1.4, 5.4±1.3, 14.4±0.6, 2.1±0.2, 8.1±0.4. Gemma-7B Aligned: 2.1±0.2, 0±0, 0±0, 0±0, 0±0, 0±0. Gemma-7B Base: 85.4±0.6, 8.7±1.2, 2.7±0.5, 14.1±0.4, 1.0±0.8, 3.9±0.4.\nThe best (lowest) harmfulness rate among prefixed conditions for each Base model is bold: Llama-2-7B Base best = 2.1±0.2 ('I apologize, but I cannot'), Gemma-7B Base best = 1.0±0.8 ('I apologize, but I cannot').",
+        "instruction": "Plot in HTML a grouped bar chart showing harmfulness rate (%) for two models (Llama-2-7B and Gemma-7B), each with two variants (Aligned and Base), across 6 refusal prefix conditions: No Prefix, 'I cannot', 'I cannot fulfill', 'I apologize', 'I apologize, but I cannot', 'I am unable'. The y-axis is Harmfulness Rate (%). Add error bars using the ± values. The data are:\nLlama-2-7B Aligned: 0, 0±0, 0±0, 0±0, 0±0, 0±0. \nLlama-2-7B Base: 68.6±0.8, 16.4±1.4, 5.4±1.3, 14.4±0.6, 2.1±0.2, 8.1±0.4. \nGemma-7B Aligned: 2.1±0.2, 0±0, 0±0, 0±0, 0±0, 0±0. \nGemma-7B Base: 85.4±0.6, 8.7±1.2, 2.7±0.5, 14.1±0.4, 1.0±0.8, 3.9±0.4.\nThe best (lowest) harmfulness rate among prefixed conditions for each Base model is bold: Llama-2-7B Base best = 2.1±0.2 ('I apologize, but I cannot'), Gemma-7B Base best = 1.0±0.8 ('I apologize, but I cannot').",
         "title": "Safety Alignment Should Be Made More Than Just a Few Tokens Deep",
         "figure": "Table 1"
     },
     {
         "id": 6,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a line chart showing win-rate against baseline for two judges (ChatGPT and Claude) across 4 DPO epochs (0, 2, 4, 6) on the x-axis. The y-axis is win-rate, ranging from 0 to 1. Add a horizontal dashed reference line at y=0.5 to indicate the baseline. The data are: ChatGPT: 0.4729, 0.6518, 0.6928, 0.6667. Claude: 0.4679, 0.5151, 0.6045, 0.5432.",
+        "instruction": "Plot in HTML a line chart showing win-rate against baseline for two judges (ChatGPT and Claude) across 4 DPO epochs (0, 2, 4, 6) on the x-axis. The y-axis is win-rate. Add a horizontal dashed reference line at y=0.5 to indicate the baseline. The data are: ChatGPT: 0.4729, 0.6518, 0.6928, 0.6667. Claude: 0.4679, 0.5151, 0.6045, 0.5432.",
         "title": "Learning Dynamics of LLM Finetuning",
         "figure": "Table 1"
     },
     {
         "id": 7,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a radial/polar bar chart with 10 metrics arranged around a circle: Generalization, Efficacy, SST, CoLA, RTE, Specificity*, Generalization*, Efficacy*, Consistency, Fluency, Specificity. For each metric, plot 5 grouped bars representing 5 methods: AlphaEdit (dark blue), RECT (green), PRUNE (light pink), MEMIT (light blue), ROME (brown). Bars radiate outward from the center. The data values (AlphaEdit, RECT, PRUNE, MEMIT, ROME) for each metric are:\n\nGeneralization: 94.2, 63.6, 64.8, 64.7, 61.4. Efficacy: 98.9, 66.0, 68.3, 65.7, 64.4. SST: 0.90, 0.55, 0, 0, 0. CoLA: 0.76, 0.56, 0, 0, 0. RTE: 0.32, 0.21, 0, 0, 0. Specificity*: 32.6, 3.17, 1.80, 1.80, 18.5. Generalization*: 91.1, 80.5, 31.3, 34.6, 2.01. Efficacy*: 94.5, 86.1, 3.31, 6.58, 5.90. Consistency: 32.4, 20.5, 3.31, 6.58, 5.90. Fluency: 622.5, 526.6, 499.1, 437.4, 418.0. Specificity: 67.9, 61.4, 49.4, 51.6, 49.8.",
+        "instruction": "Plot in HTML a radial/polar bar chart with 10 metrics arranged around a circle: Generalization, Efficacy, SST, CoLA, RTE, Specificity*, Generalization*, Efficacy*, Consistency, Fluency, Specificity. For each metric, plot 5 grouped bars representing 5 methods: AlphaEdit, RECT, PRUNE, MEMIT, ROME. The data values for each metric are:\n- Generalization: 94.2, 63.6, 64.8, 64.7, 61.4. \n- Efficacy: 98.9, 66.0, 68.3, 65.7, 64.4. \n- SST: 0.90, 0.55, 0, 0, 0. CoLA: 0.76, 0.56, 0, 0, 0. \n- RTE: 0.32, 0.21, 0, 0, 0. \n- Specificity*: 32.6, 3.17, 1.80, 1.80, 18.5. \n- Generalization*: 91.1, 80.5, 31.3, 34.6, 2.01. \n- Efficacy*: 94.5, 86.1, 3.31, 6.58, 5.90. \n- Consistency: 32.4, 20.5, 3.31, 6.58, 5.90. \n- Fluency: 622.5, 526.6, 499.1, 437.4, 418.0. \n- Specificity: 67.9, 61.4, 49.4, 51.6, 49.8.",
         "title": "AlphaEdit: Null-Space Constrained Knowledge Editing for Language Models",
         "figure": "Figure 2"
     },
     {
         "id": 8,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML three grouped bar charts side by side for metrics BLEU, #Token (k), and ITR. Each chart has 6 bars representing 6 methods: Helpfulness (blue), Extrinsic (green), Extrinsic+Intrinsic (light green), MR w=1 (yellow), MR w=2 (orange), MR w=3 (pink). Label each bar with its value. The data are:\n\nBLEU (y-axis range 0.360–0.375): 0.367, 0.365, 0.370, 0.373, 0.373, —. #Token k (y-axis range 1.8–2.2): 2.19, 2.11, 2.0, 2.0, 1.85, 1.84. ITR (y-axis range 0.5–0.7): 0.60, 0.54, 0.64, 0.70, 0.68, —.\n\nNote: MR w=3 has no BLEU or ITR value plotted.",
+        "instruction": "Plot in HTML three grouped bar charts side by side for metrics BLEU, #Token (k), and ITR. Each chart represents 6 methods: Helpfulness, Extrinsic, Extrinsic+Intrinsic, MR w=1, MR w=2, MR w=3. Label each bar with its value. The data are:\nBLEU (y-axis range 0.360–0.375): 0.367, 0.365, 0.370, 0.373, 0.373, —. \n#Token k (y-axis range 1.8–2.2): 2.19, 2.11, 2.0, 2.0, 1.85, 1.84. \nITR (y-axis range 0.5–0.7): 0.60, 0.54, 0.64, 0.70, 0.68, —.\nNote: MR w=3 has no BLEU or ITR value plotted.",
         "title": "CollabLLM: From Passive Responders to Active Collaborators",
         "figure": "Figure 4"
     },
     {
         "id": 9,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a horizontal bar chart comparing accuracy of 5 methods for solving Sudoku puzzles. The x-axis is accuracy (%), ranging from 0 to 100. The 5 methods are grouped into two model families: ARM (42M params): ARM w/o ordering = 9.73%, ARM with ordering = 87.18%; MDM (6M params): MDM vanilla = 6.88%, MDM Top probability = 18.51%, MDM Top prob. margin = 89.49%. Use a visual separator between the two groups. Annotate each bar with its exact accuracy value.",
+        "instruction": "Plot in HTML a chart comparing the accuracy of 5 methods for solving Sudoku puzzles. \nThe 5 methods are grouped into two model families: \n- ARM (42M params): ARM w/o ordering = 9.73%, ARM with ordering = 87.18%; \n- MDM (6M params): MDM vanilla = 6.88%, MDM Top probability = 18.51%, MDM Top prob. margin = 89.49%. \nUse a visual separator between the two groups. Annotate each bar with its exact accuracy value.",
         "title": "Train for the Worst, Plan for the Best: Understanding Token Ordering in Masked Diffusions",
         "figure": "Table 2"
     },
     {
         "id": 10,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a 2×4 grid of bar charts. The top row is titled 'Creativity' and the bottom row 'Memorization'. Each panel has 2 bars: Standard/Next-Token (blue) and Teacherless/Multi-Token (orange), with error bars. The 4 column tasks are: Sibling Discovery, Triangle Discovery, Circle Construction, Line Construction. The approximate values (blue, orange) are:\n\nCreativity: Sibling Discovery: 0.10, 0.40. Triangle Discovery: 0.10, 0.95. Circle Construction: 0.15, 0.40. Line Construction: 0.63, 0.78.\n\nMemorization: Sibling Discovery: 0.83, 0.30. Triangle Discovery: 0.85, 0.02. Circle Construction: 0.65, 0.07. Line Construction: 0.22, 0.09.\n\nEach panel has its own y-axis scale. Add error bars to each bar reflecting visible uncertainty in the figure.",
+        "instruction": "Plot in HTML a 2×4 grid of bar charts. The top row is titled 'Creativity' and the bottom row 'Memorization'. The 4 column tasks are: Sibling Discovery, Triangle Discovery, Circle Construction, Line Construction. \nEach panel has 2 bars: Standard/Next-Token and Teacherless/Multi-Token, with error bars. The approximate values are:\n- Creativity: Sibling Discovery: 0.10, 0.40. Triangle Discovery: 0.10, 0.95. Circle Construction: 0.15, 0.40. Line Construction: 0.63, 0.78.\n- Memorization: Sibling Discovery: 0.83, 0.30. Triangle Discovery: 0.85, 0.02. Circle Construction: 0.65, 0.07. Line Construction: 0.22, 0.09.",
         "title": "Roll the dice & look before you leap: Going beyond the creative limits of next-token prediction",
         "figure": "Figure 3"
     },
     {
         "id": 11,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a horizontal bar chart comparing the relative frequency (%) of exceeding the target risk threshold for 3 decision rules: CRC = 21.20% [95% CI: 20.40%, 22.01%], RCPS = 0.00% [95% CI: 0.00%, 0.04%], Ours (β=0.95) = 0.03% [95% CI: 0.01%, 0.09%]. The x-axis is relative frequency (%), add error bars using the 95% CI bounds. Add a vertical dashed reference line at the target risk threshold α to indicate the acceptable limit.",
+        "instruction": "Plot in HTML a chart comparing the relative frequency (%) of exceeding the target risk threshold for 3 decision rules: CRC = 21.20% [95% CI: 20.40%, 22.01%], RCPS = 0.00% [95% CI: 0.00%, 0.04%], Ours (β=0.95) = 0.03% [95% CI: 0.01%, 0.09%]. Add error bars using the 95% CI bounds. Add a dashed reference line at the target risk threshold α to indicate the acceptable limit.",
         "title": "Conformal Prediction as Bayesian Quadrature",
         "figure": "Table 1"
     },
     {
         "id": 12,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a line chart with x-axis as Sample Size (200, 400, 600, 800, 1000) and y-axis as Fisher Divergence. Plot 4 lines with error bars (95% CI): Marg-IW (green), Marg-Var (red), Zeroed (blue), EM (orange). Add a horizontal dashed red reference line at y=0. The approximate values are:\nMarg-IW: 1.75, 0.85, 0.58, 0.48, 0.40. Marg-Var: 3.15, 1.22, 1.00, 0.65, 0.55. Zeroed: 2.15, 1.25, 1.00, 0.88, 0.85. EM: 1.80, 0.85, 0.58, 0.48, 0.40.\nMarg-Var has the largest error bar at sample size 200. Marg-IW and EM overlap closely across all sample sizes.",
+        "instruction": "Plot in HTML a line chart with x-axis as Sample Size (200, 400, 600, 800, 1000) and y-axis as Fisher Divergence. Plot 4 methods: Marg-IW, Marg-Var, Zeroed, EM. Add a horizontal dashed red reference line at y=0. The approximate values are:\nMarg-IW: 1.75, 0.85, 0.58, 0.48, 0.40. \nMarg-Var: 3.15, 1.22, 1.00, 0.65, 0.55. \nZeroed: 2.15, 1.25, 1.00, 0.88, 0.85. \nEM: 1.80, 0.85, 0.58, 0.48, 0.40.\nMarg-IW and EM overlap closely across all sample sizes.",
         "title": "Score Matching With Missing Data",
         "figure": "Figure 1"
     },
     {
         "id": 13,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a horizontal timeline diagram with a shared x-axis from 2010 to 2018 and three rows labeled Training, Validation, and Test. Each row has a colored rectangle spanning its full period, with a smaller red dashed rectangle inside indicating the possible start dates. The data are:\nTraining (blue): full span 2010–2014, red dashed box 2010–2013. Validation (green): full span 2012–2014, red dashed box 2012–2013. Test (orange): full span 2015–2018, red dashed box 2015–2016.",
+        "instruction": "Plot in HTML a diagram with a shared x-axis from 2010 to 2018 and three rows labeled Training, Validation, and Test. Each row has a colored rectangle spanning its full period, with a smaller red dashed rectangle inside indicating the possible start dates. The data are:\nTraining: full span 2010–2014, dashed box 2010–2013. \nValidation: full span 2012–2014, dashed box 2012–2013.\nTest: full span 2015–2018, dashed box 2015–2016.",
         "title": "The Value of Prediction in Identifying the Worst-Off",
         "figure": "Figure 4"
     },
     {
         "id": 14,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a grouped horizontal bar chart comparing 10 datasets across 3 metrics: Original Size (TB), Indexing Time (CPU node-days), and Index Size (TB). Exclude Num. Shards. The x-axis is the numeric value and the y-axis lists the datasets. Add a visual separator between DCLM-baseline and CC-2025-05 to reflect the two groups. The data are:\n\nPile-validation: 0.0001345, 0.00057, 0.000602. Pile-train: 1.308, 1.31, 0.588. DCLM-baseline: 16.666, 12.6, 7.523. CC-2025-05: 9.079, 11.8, 3.972. CC-2025-08: 8.163, 10.6, 3.574. CC-2025-13: 10.393, 13.6, 4.563. CC-2025-18: 10.498, 13.7, 4.664. CC-2025-21: 9.221, 12.1, 4.302. CC-2025-26: 8.724, 11.4, 3.835. CC-2025-30: 9.006, 11.7, 3.952. Total: 83.059, 98.8, 36.884.\n\nNote: Pile-validation values are near zero and may need a log scale to be visible alongside the other datasets.",
+        "instruction": "Plot in HTML a grouped horizontal bar chart comparing 10 datasets across 3 metrics: Original Size (TB), Indexing Time (CPU node-days), and Index Size (TB). The x-axis is the numeric value and the y-axis lists the datasets. Add a visual separator between DCLM-baseline and CC-2025-05 to reflect the two groups. The data are:\n\nPile-validation: 0.0001345, 0.00057, 0.000602. Pile-train: 1.308, 1.31, 0.588. DCLM-baseline: 16.666, 12.6, 7.523. CC-2025-05: 9.079, 11.8, 3.972. CC-2025-08: 8.163, 10.6, 3.574. CC-2025-13: 10.393, 13.6, 4.563. CC-2025-18: 10.498, 13.7, 4.664. CC-2025-21: 9.221, 12.1, 4.302. CC-2025-26: 8.724, 11.4, 3.835. CC-2025-30: 9.006, 11.7, 3.952. Total: 83.059, 98.8, 36.884.\n\nNote: Pile-validation values are near zero and may need a log scale to be visible alongside the other datasets.",
         "title": "INFINI-GRAM MINI: Exact n-gram Search at the Internet Scale with FM-Index",
         "figure": "Table 1"
     },
     {
         "id": 15,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a grouped bar chart comparing Experts and Annotators across 4 metrics: Correct (Actions), Harmless (Actions), Sufficient (Attr), and Plausible (Exp). The y-axis is the score ranging from 0 to 1. The data are: Experts: 0.93, 0.96, 0.94, 1.00. Annotators: 0.88, 0.80, 0.89, 0.92.",
+        "instruction": "Plot in HTML a chart comparing Experts and Annotators across 4 metrics: Correct (Actions), Harmless (Actions), Sufficient (Attr), and Plausible (Exp). The data are: Experts: 0.93, 0.96, 0.94, 1.00. Annotators: 0.88, 0.80, 0.89, 0.92.",
         "title": "Mind the Value-Action Gap: Do LLMs Act in Alignment with Their Values?",
         "figure": "Table 2"
     },
     {
         "id": 16,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a grouped bar chart showing accuracy for 10 model variants across 4 difficulty/input settings: S, S+G, S+G+KP, S+G+KP+T. The x-axis is the input setting and the y-axis is accuracy (%). The 10 models are grouped by family: Qwen2.5 (7B, 32B), Gemma3 (4B, 12B, 27B), DeepSeek-R1 (7B, 32B), LLaMA3 (8B, 70B), GPT-4 (o4-mini). The data are:\nQwen2.5-7B: 33.04, 41.64, 56.08, 71.09. Qwen2.5-32B: 38.66, 46.75, 60.97, 78.29. Gemma3-4B: 32.74, 38.88, 49.76, 63.92. Gemma3-12B: 43.63, 47.03, 59.47, 73.97. Gemma3-27B: 41.48, 48.17, 61.83, 77.02. DeepSeek-R1-7B: 33.39, 35.24, 46.18, 54.39. DeepSeek-R1-32B: 39.62, 48.16, 65.50, 81.17. LLaMA3-8B: 29.62, 30.83, 39.44, 50.32. LLaMA3-70B: 34.46, 42.37, 59.64, 78.25. GPT-4-o4-mini: 41.74, 46.02, 57.28, 73.88.\nBold values indicate the best score per input setting: S=41.74 (GPT-4), S+G=48.17 (Gemma3-27B), S+G+KP=65.50 (DeepSeek-R1-32B), S+G+KP+T=81.17 (DeepSeek-R1-32B).",
+        "instruction": "Plot in HTML a grouped bar chart showing accuracy for 10 model variants across 4 difficulty/input settings: S, S+G, S+G+KP, S+G+KP+T. The x-axis is the input setting and the y-axis is accuracy (%). The 10 models are grouped by family: Qwen2.5 (7B, 32B), Gemma3 (4B, 12B, 27B), DeepSeek-R1 (7B, 32B), LLaMA3 (8B, 70B), GPT-4 (o4-mini). The data are:\nQwen2.5-7B: 33.04, 41.64, 56.08, 71.09. \nQwen2.5-32B: 38.66, 46.75, 60.97, 78.29. \nGemma3-4B: 32.74, 38.88, 49.76, 63.92. \nGemma3-12B: 43.63, 47.03, 59.47, 73.97. \nGemma3-27B: 41.48, 48.17, 61.83, 77.02. \nDeepSeek-R1-7B: 33.39, 35.24, 46.18, 54.39. \nDeepSeek-R1-32B: 39.62, 48.16, 65.50, 81.17. \nLLaMA3-8B: 29.62, 30.83, 39.44, 50.32. \nLLaMA3-70B: 34.46, 42.37, 59.64, 78.25. \nGPT-4-o4-mini: 41.74, 46.02, 57.28, 73.88.\nBold values indicate the best score per input setting: S=41.74 (GPT-4), S+G=48.17 (Gemma3-27B), S+G+KP=65.50 (DeepSeek-R1-32B), S+G+KP+T=81.17 (DeepSeek-R1-32B).",
         "title": "LINGGYM: How Far Are LLMs from Thinking Like Field Linguists?",
         "figure": "Table 3"
     },
     {
         "id": 17,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a heatmap table with 8 properties as rows and 5 methods (ENC, AR, AR(p), MLM, DIFF) as columns. Cell values are High, Medium, Low, or N/A. Color cells green for preferred values and yellow for less favorable ones, with uncolored cells for neutral. The data are:\nRequires significant data: High, Low(green), Medium, High, Low(green). Requires bigger model size: Low(green), High, High, High, High. Sample efficiency: Low, High(green), Medium, Low, High(green). Ordinality in scores: High(green), Low, Medium, High(green), Low. Unimodality in Scores: High(green), Low, Medium, High(green), Low. Well-calibrated scores: High(green), Low, Medium, High(green), N/A. Robustness to Noise: Medium, Low, Low, Low, High(green). Inference Speed: High(green), Medium, High(green), High(green), Low.",
+        "instruction": "Plot in HTML a heatmap table with 8 properties as rows and 5 methods (ENC, AR, AR(p), MLM, DIFF) as columns. Cell values are High, Medium, Low, or N/A. The data are:\n- Requires significant data: High, Low, Medium, High, Low. (low is preferred)\n- Requires bigger model size: Low, High, High, High, High.  (low is preferred)\n- Sample efficiency: Low, High, Medium, Low, High.  (high is preferred)\n- Ordinality in scores: High, Low, Medium, High, Low.  (high is preferred)\n- Unimodality in Scores: High, Low, Medium, High, Low.  (high is preferred)\n- Well-calibrated scores: High, Low, Medium, High, N/A.  (high is preferred)\n- Robustness to Noise: Medium, Low, Low, Low, High.  (high is preferred)\n- Inference Speed: High, Medium, High, High, Low.  (high is preferred)",
         "title": "Generative or Discriminative? Revisiting Text Classification in the Era of Transformers",
         "figure": "Table 1"
     },
     {
         "id": 18,
         "type": "Data Visualization",
-        "instruction": "Plot in HTML a heatmap table with 4 models as rows (LLaMA-8B, LLaMA-3B, Mistral-2, Phi-3) and 16 columns grouped by: Base Gen, then 5 benchmarks (ARC-Challenge, OpenbookQA, Sports, StrategyQA, TruthfulQA) each with 3 sub-columns (Eff, Spec, Gen). Apply a green colormap where higher Spec values are darker green; Eff and Gen columns are uncolored or lightly shaded. The data are:\n\nLLaMA-8B: Base=63.9 | ARC: 43.2, 98.3, 63.8 | Obook: 44.1, 97.7, 63.8 | Sports: 20.8, 98.1, 63.8 | StrategyQA: 48.3, 95.7, 63.8 | TruthfulQA: 39.6, 97.0, 63.8.\n\nLLaMA-3B: Base=60.4 | ARC: 30.7, 98.1, 60.2 | Obook: 36.6, 96.1, 60.2 | Sports: 29.3, 96.6, 60.3 | StrategyQA: 36.3, 96.9, 60.3 | TruthfulQA: 28.9, 95.9, 60.3.\n\nMistral-2: Base=59.0 | ARC: 71.5, 96.4, 58.9 | Obook: 72.1, 97.6, 58.8 | Sports: 50.6, 94.8, 59.0 | StrategyQA: 65.4, 96.3, 59.0 | TruthfulQA: 48.6, 95.0, 59.0.\n\nPhi-3: Base=69.9 | ARC: 40.8, 99.5, 69.6 | Obook: 44.2, 99.4, 69.6 | Sports: 31.1, 97.0, 69.9 | StrategyQA: 18.7, 98.2, 69.9 | TruthfulQA: 11.0, 97.4, 69.8.",
+        "instruction": "Plot in HTML a heatmap table with 4 models as rows (LLaMA-8B, LLaMA-3B, Mistral-2, Phi-3) and 16 columns grouped by: Base Gen, then 5 benchmarks (ARC-Challenge, OpenbookQA, Sports, StrategyQA, TruthfulQA) each with 3 sub-columns (Eff, Spec, Gen). The data are:\nLLaMA-8B: Base=63.9 | ARC: 43.2, 98.3, 63.8 | Obook: 44.1, 97.7, 63.8 | Sports: 20.8, 98.1, 63.8 | StrategyQA: 48.3, 95.7, 63.8 | TruthfulQA: 39.6, 97.0, 63.8.\nLLaMA-3B: Base=60.4 | ARC: 30.7, 98.1, 60.2 | Obook: 36.6, 96.1, 60.2 | Sports: 29.3, 96.6, 60.3 | StrategyQA: 36.3, 96.9, 60.3 | TruthfulQA: 28.9, 95.9, 60.3.\nMistral-2: Base=59.0 | ARC: 71.5, 96.4, 58.9 | Obook: 72.1, 97.6, 58.8 | Sports: 50.6, 94.8, 59.0 | StrategyQA: 65.4, 96.3, 59.0 | TruthfulQA: 48.6, 95.0, 59.0.\nPhi-3: Base=69.9 | ARC: 40.8, 99.5, 69.6 | Obook: 44.2, 99.4, 69.6 | Sports: 31.1, 97.0, 69.9 | StrategyQA: 18.7, 98.2, 69.9 | TruthfulQA: 11.0, 97.4, 69.8.",
         "title": "Measuring Chain of Thought Faithfulness by Unlearning Reasoning Steps",
         "figure": "Table 1"
     },
     {
         "id": 19,
         "type": "Data Visualization",
-        "instruction": "Create a bar chart in HTML with 4 bars showing weighted memory recall scores for the following conditions and approximate values:\n- Unedited Images: ~32\n- AI-Gen Videos of Unedited Imgs: ~25\n- AI-Edited Images: ~16\n- AI-Gen Videos of AI-Edited Imgs: ~3\n\nError bars (SEM) are approximately: ±2, ±3, ±3, ±4 respectively.\n\nAdd significance brackets between the following pairs (post hoc Tukey):\n- Unedited Images vs. AI-Edited Images: ** P=0.0030\n- Unedited Images vs. AI-Gen Videos of AI-Edited Imgs: *** P=0.0010\n- AI-Gen Videos of Unedited Imgs vs. AI-Gen Videos of AI-Edited Imgs: *** P=0.0010\n- AI-Edited Images vs. AI-Gen Videos of AI-Edited Imgs: * P=0.0301\n\nY-axis runs from 0 to 70. Title/caption: 'The weighted score of recalled memories based on number and confidence was analyzed using a one-way ANOVA and post hoc Tukey.'",
+        "instruction": "Create a bar chart in HTML with 4 bars showing weighted memory recall scores for the following conditions and approximate values:\n- Unedited Images: ~32\n- AI-Gen Videos of Unedited Imgs: ~25\n- AI-Edited Images: ~16\n- AI-Gen Videos of AI-Edited Imgs: ~3\n\nError bars (SEM) are approximately: ±2, ±3, ±3, ±4 respectively.\n\nAdd significance brackets between the following pairs (post hoc Tukey):\n- Unedited Images vs. AI-Edited Images: ** P=0.0030\n- Unedited Images vs. AI-Gen Videos of AI-Edited Imgs: *** P=0.0010\n- AI-Gen Videos of Unedited Imgs vs. AI-Gen Videos of AI-Edited Imgs: *** P=0.0010\n- AI-Edited Images vs. AI-Gen Videos of AI-Edited Imgs: * P=0.0301\n\nTitle/caption: 'The weighted score of recalled memories based on number and confidence was analyzed using a one-way ANOVA and post hoc Tukey.'",
         "title": "Synthetic Human Memories: AI-Edited Images and Videos Can Implant False Memories and Distort Recollection",
         "figure": "Figure 8"
     },

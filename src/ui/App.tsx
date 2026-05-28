@@ -319,22 +319,18 @@ function App() {
     resetToLatest();
   }, [resetToLatest]);
 
-  const triggerBrainSingleClickAction = useCallback(() => {
+  const triggerBrainContextUpdate = useCallback(() => {
     if (!activeSessionId) return;
     setBrainInductionPending(true);
     if (brainShineFallbackTimeoutRef.current !== null) {
       window.clearTimeout(brainShineFallbackTimeoutRef.current);
     }
+    // Fallback: if backend never emits start/finish events, avoid a stuck shine.
     brainShineFallbackTimeoutRef.current = window.setTimeout(() => {
       brainShineFallbackTimeoutRef.current = null;
       setBrainInductionPending(false);
     }, 15000);
-    // Same as main when auto-induction is on; Tinker upload only when it is off (aspen training stack).
-    if (readStoredAutoInduction()) {
-      sendEvent({ type: "session.runContextInduction", payload: { sessionId: activeSessionId } });
-    } else {
-      sendEvent({ type: "session.uploadForTinkerTraining", payload: { sessionId: activeSessionId } });
-    }
+    sendEvent({ type: "session.runContextInduction", payload: { sessionId: activeSessionId } });
   }, [activeSessionId, sendEvent]);
 
   const handleBrainSingleClick = useCallback(() => {
@@ -343,9 +339,9 @@ function App() {
     }
     brainSingleClickTimeoutRef.current = window.setTimeout(() => {
       brainSingleClickTimeoutRef.current = null;
-      triggerBrainSingleClickAction();
+      triggerBrainContextUpdate();
     }, 220);
-  }, [triggerBrainSingleClickAction]);
+  }, [triggerBrainContextUpdate]);
 
   const handleBrainDoubleClick = useCallback(() => {
     if (brainSingleClickTimeoutRef.current !== null) {
@@ -357,6 +353,7 @@ function App() {
 
   useEffect(() => {
     const prev = prevContextInductionDepthRef.current;
+    // Once an induction cycle finishes, clear any optimistic local shine.
     if (prev > 0 && contextInductionDepth === 0) {
       setBrainInductionPending(false);
       if (brainShineFallbackTimeoutRef.current !== null) {
@@ -379,16 +376,6 @@ function App() {
       }
     };
   }, []);
-
-  const autoInductionOn = readStoredAutoInduction();
-  const brainBusy = contextInductionDepth > 0 || brainInductionPending;
-  const brainTitle = brainBusy
-    ? autoInductionOn
-      ? "Updating memories and skills from the last completed step…"
-      : "Uploading session for model training…"
-    : autoInductionOn
-      ? "Brain — click to run context update, double-click to edit memory and skill .md files"
-      : "Brain — click to upload session for Tinker training, double-click to edit memory and skill files";
 
   // Horizontal drag handler for resizing chat / preview columns
   const handleSplitMouseDown = useCallback((e: React.MouseEvent) => {
@@ -444,12 +431,16 @@ function App() {
                 onClick={handleBrainSingleClick}
                 onDoubleClick={handleBrainDoubleClick}
                 className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-ink-800 px-2.5 py-1 rounded-md hover:bg-ink-900/5 transition-colors"
-                title={brainTitle}
+                title={
+                  contextInductionDepth > 0
+                    ? "Updating memories and skills from the last completed step…"
+                    : "Brain — click to run context update, double-click to edit memory and skill .md files"
+                }
                 aria-label="Brain: memories and skills"
                 aria-busy={brainBusy}
               >
                 <span
-                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-inherit ${brainBusy ? "brain-inducing" : ""}`}
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-inherit ${(contextInductionDepth > 0 || brainInductionPending) ? "brain-inducing" : ""}`}
                   aria-hidden
                 >
                   <IdeaBulbWithRays className="h-full w-full" />

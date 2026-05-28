@@ -84,6 +84,7 @@ function readSessionBlobForFallback(fullJsonPath: string): ExportedSessionBlob |
 function collectAgentActions(blob: ExportedSessionBlob | null): string[] {
   if (!blob) return [];
   const out: string[] = [];
+
   if (Array.isArray(blob.task_units)) {
     for (const unit of blob.task_units) {
       if (!unit || typeof unit !== "object") continue;
@@ -96,6 +97,7 @@ function collectAgentActions(blob: ExportedSessionBlob | null): string[] {
       }
     }
   }
+
   if (out.length === 0 && Array.isArray(blob.trajectory)) {
     for (const step of blob.trajectory) {
       if (!step || typeof step !== "object") continue;
@@ -104,10 +106,10 @@ function collectAgentActions(blob: ExportedSessionBlob | null): string[] {
       if (typeof action === "string" && action.trim()) out.push(action.trim());
     }
   }
+
   return out;
 }
 
-/** When induce.py produces no files, write minimal memory/skill stubs from the export (main parity). */
 function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): void {
   const memDir = join(userData, "memories");
   const skillsDir = join(userData, "skills");
@@ -121,6 +123,9 @@ function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): 
   if (actions.length === 0) return;
 
   const stem = slugifySessionName(typeof blob?.name === "string" ? blob.name : "");
+  const targetMem = join(memDir, `${stem}.md`);
+  const targetSkill = join(skillsDir, `${stem}.md`);
+
   const memoryBody = [
     "## Auto memory (fallback)",
     "",
@@ -141,8 +146,8 @@ function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): 
     "",
   ].join("\n");
 
-  writeFileSync(join(memDir, `${stem}.md`), memoryBody, "utf8");
-  writeFileSync(join(skillsDir, `${stem}.md`), skillBody, "utf8");
+  writeFileSync(targetMem, memoryBody, "utf8");
+  writeFileSync(targetSkill, skillBody, "utf8");
 
   const afterMem = listTopLevelMdFiles(memDir);
   const afterSkills = listTopLevelMdFiles(skillsDir);

@@ -1,6 +1,7 @@
 import { BrowserWindow } from "electron";
 import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
 import { runClaude, buildPromptForNode, buildRegenerateWorkflowPrompt, type RunnerHandle } from "./libs/runner.js";
+import { EXECUTION_CONTEXT_MAX_ACTIONS } from "./libs/session-context-trim.js";
 import { SessionStore, type Session } from "./libs/session-store.js";
 import {
   findNodeById,
@@ -707,6 +708,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
     prompt: nodePrompt,
     session,
     branchEntryId,
+    trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS,
     onEvent: emit,
     onSessionUpdate: (updates) => {
       store.updateSession(session.id, updates);
@@ -791,22 +793,6 @@ export function handleClientEvent(event: ClientEvent) {
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {
       runFullSessionExportAndExtract(sid);
-    }
-    return;
-  }
-
-  if (event.type === "session.uploadForTinkerTraining") {
-    const sid = String(event.payload.sessionId ?? "").trim();
-    if (sid && sessions.getSession(sid)) {
-      try {
-        uploadSessionForTinkerTraining(sid);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        broadcast({
-          type: "runner.error",
-          payload: { sessionId: sid, message },
-        });
-      }
     }
     return;
   }
@@ -956,6 +942,9 @@ export function handleClientEvent(event: ClientEvent) {
     runClaude({
       prompt: event.payload.prompt,
       session,
+      ...(session.workflowTree?.length
+        ? { trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS }
+        : {}),
       onEvent: emit,
       onSessionUpdate: (updates) => {
         sessions.updateSession(session.id, updates);
@@ -1210,6 +1199,38 @@ export function recordFileEditAfterPreviewSave(
   } else if (sess.workflowTree?.length) {
     void autoRefineVerifiersFromUserMessages(sessionId, flattenWorkflowNodeIds(sess.workflowTree));
   }
+}
+
+/** Best-effort fallback when renderer omits ``sessionId`` for preview writes. */
+export function inferSessionIdForPreviewWrite(
+  editedAbsPath: string,
+  cwdHint?: string | null
+): string | null {
+  const store = initializeSessions();
+  const abs = editedAbsPath.replace(/\\/g, "/");
+  const cwdTrim = typeof cwdHint === "string" ? cwdHint.trim() : "";
+  const recent = store.listSessions();
+
+  for (const row of recent) {
+    const sid = String(row.id ?? "").trim();
+    if (!sid) continue;
+    const sess = store.getSession(sid);
+    if (!sess) continue;
+    const sessCwd = sess.cwd?.trim();
+    if (!sessCwd) continue;
+
+    try {
+      const root = resolve(sessCwd).replace(/\\/g, "/");
+      const file = resolve(abs).replace(/\\/g, "/");
+      const inCwd = file === root || file.startsWith(`${root}/`);
+      if (!inCwd) continue;
+      if (cwdTrim && resolve(cwdTrim).replace(/\\/g, "/") !== root) continue;
+      return sid;
+    } catch {
+      // ignore malformed paths and keep searching
+    }
+  }
+  return null;
 }
 
 export function cleanupAllSessions(): void {

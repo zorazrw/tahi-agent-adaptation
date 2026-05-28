@@ -56,11 +56,11 @@ Tinker routes requests through a local Python bridge to a fine-tuned or custom m
 
 **Setup steps:**
 
-1. Install the Tinker bridge dependencies:
+1. Install dependencies (includes the Tinker bridge via `postinstall`):
    ```bash
-   cd tinker-bridge
-   uv sync
+   bun install
    ```
+   Or sync only the bridge: `bun run sync:tinker-bridge`
 2. Open Settings and select "Tinker" as the provider.
 3. Enter the base model (required) and optionally a checkpoint path.
 4. Adjust advanced settings if needed.

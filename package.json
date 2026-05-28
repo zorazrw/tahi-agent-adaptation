@@ -6,7 +6,8 @@
 	"main": "dist-electron/electron/main.js",
 	"scripts": {
 		"rebuild": "electron-rebuild -f -w better-sqlite3",
-		"postinstall": "electron-rebuild -f -w better-sqlite3",
+		"sync:tinker-bridge": "node scripts/sync-tinker-bridge.mjs",
+		"postinstall": "electron-rebuild -f -w better-sqlite3 && node scripts/sync-tinker-bridge.mjs",
 		"dev": "pkill -f vite 2>/dev/null || true; pkill -f electron 2>/dev/null || true; sleep 1; concurrently -k --names react,electron --prefix-colors blue,green \"bun run dev:react\" \"bun run dev:electron\"",
 		"dev:react": "vite",
 		"dev:electron": "bun run transpile:electron && cross-env NODE_ENV=development electron .",

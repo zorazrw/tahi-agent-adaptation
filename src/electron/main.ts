@@ -9,7 +9,13 @@ import * as XLSX from "xlsx";
 import { ipcMainHandle, isDev, DEV_PORT } from "./util.js";
 import { getPreloadPath, getUIPath, getIconPath } from "./pathResolver.js";
 import { getStaticData, pollResources, stopPolling } from "./test.js";
-import { handleClientEvent, sessions, cleanupAllSessions, recordFileEditAfterPreviewSave } from "./ipc-handlers.js";
+import {
+    handleClientEvent,
+    sessions,
+    cleanupAllSessions,
+    inferSessionIdForPreviewWrite,
+    recordFileEditAfterPreviewSave,
+} from "./ipc-handlers.js";
 import { generateSessionTitle } from "./libs/util.js";
 import type { ClientEvent } from "./types.js";
 import {
@@ -634,7 +640,8 @@ app.on("ready", () => {
                 const base = cwd && typeof cwd === "string" ? cwd : process.cwd();
                 const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
                 await writeFile(resolved, content, "utf8");
-                const sid = typeof sessionId === "string" ? sessionId.trim() : "";
+                const sidRaw = typeof sessionId === "string" ? sessionId.trim() : "";
+                const sid = sidRaw || inferSessionIdForPreviewWrite(resolved, cwd ?? undefined) || "";
                 if (sid) {
                     /** Always record resolved path so DB/export matches workflow ``outputFiles`` (often absolute). */
                     const pathForRecord = resolved.replace(/\\/g, "/");
