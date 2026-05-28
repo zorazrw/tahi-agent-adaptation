@@ -8,24 +8,13 @@ import type {
   OpenAICompatibleApiFormat,
   ProviderAuthStatus,
 } from "../../lib/runtime-types";
+import { AUTO_INDUCTION_KEY, readStoredAutoInduction } from "../lib/auto-induction";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
 type Tab = "api" | "workflow" | "skills" | "data";
-const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
-
-function readStoredAutoInduction(): boolean {
-  try {
-    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
-    if (v === "false") return false;
-    if (v === "true") return true;
-  } catch {
-    /* ignore */
-  }
-  return true;
-}
 
 function WorkflowPanel() {
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
@@ -1170,8 +1159,10 @@ function SkillsPanel() {
             <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
               When enabled, the app exports the task session and runs context induction after each completed
               workflow step (and after follow-up verification turns), updating memory and skill markdown under
-              your app data folder. The Brain control shows activity while induction runs. When disabled, no
-              automatic generation runs during task sessions.
+              your app data folder. The Brain control shows activity while induction runs. A single Brain click
+              also runs that same context update. When disabled, automatic step induction is off and a single
+              Brain click uploads the session to the local training proxy for Tinker weight updates instead.
+              Double-click Brain anytime to edit memory and skill files.
             </p>
           </div>
         </label>

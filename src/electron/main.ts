@@ -242,7 +242,6 @@ app.on("ready", () => {
     });
 
     pollResources(mainWindow);
-    startTinkerAutoUpdateWatcher();
 
     ipcMainHandle("getStaticData", () => {
         return getStaticData();

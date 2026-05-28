@@ -6,7 +6,7 @@ temperature: 0.3
 logprobs: false
 
 # -- Update --
-update_every_n_sessions: 6
+update_every_n_sessions: 1
 
 # -- Training (shared) --
 lora_rank: 64
