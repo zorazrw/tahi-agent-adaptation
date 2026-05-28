@@ -1,6 +1,6 @@
 export const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
 
-/** Settings → Skills: auto-run induce.py after each workflow step when true. */
+/** Settings → Mode → Context Update: auto-run induce.py after each workflow step when true. */
 export function readStoredAutoInduction(): boolean {
   try {
     const v = localStorage.getItem(AUTO_INDUCTION_KEY);
