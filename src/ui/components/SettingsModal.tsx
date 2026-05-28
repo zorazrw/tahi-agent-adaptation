@@ -273,16 +273,22 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       });
   }, []);
 
-  // Auto-sync the UI when the training proxy finishes a model update.
-  //
-  // By the time this fires, the Electron main process has already rewritten
-  // the OpenAI-compatible provider config (and, if applicable, updated the
-  // agent's default model) to point at the new slug. We just pull the fresh
-  // state so the selected model in the dropdown matches what's on disk – we
-  // do NOT force a provider switch.
+  // After training completes, main persists the new sampler_path into the Tinker provider file.
   useEffect(() => {
     const unsubscribe = window.electron.onTinkerModelUpdated(async (event) => {
       try {
+        if (event.model_path?.startsWith("tinker://")) {
+          setTinkerModelPath(event.model_path);
+          setTinkerResolveError(null);
+        }
+        if (event.base_model) {
+          setTinkerBaseModel(event.base_model);
+          setTinkerBaseModelResolved(Boolean(event.model_path?.startsWith("tinker://")));
+        }
+        if (event.renderer_name) {
+          setTinkerRendererName(event.renderer_name);
+        }
+
         const [settings, availableModels] = await Promise.all([
           window.electron.getAgentSettings(),
           window.electron.listAvailableModels(),
@@ -761,8 +767,15 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                       </div>
                     )}
                     {!tinkerResolving && tinkerBaseModelResolved && (
-                      <div>
-                        Resolved base model: <span className="font-medium text-ink-700">{tinkerBaseModel}</span>
+                      <div className="space-y-1">
+                        <div>
+                          Resolved base model: <span className="font-medium text-ink-700">{tinkerBaseModel}</span>
+                        </div>
+                        {tinkerModelPath.startsWith("tinker://") && (
+                          <div className="break-all font-mono text-[11px] text-ink-600">
+                            Active checkpoint: {tinkerModelPath}
+                          </div>
+                        )}
                       </div>
                     )}
                     {!tinkerResolving && tinkerResolveError && (

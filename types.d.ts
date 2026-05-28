@@ -126,6 +126,7 @@ type TinkerModelUpdateEvent = {
     renderer_name: string | null;
     mode: string;
     updated_at: number;
+    state_path?: string | null;
 }
 
 type EventPayloadMapping = {

@@ -2,8 +2,10 @@ import { BrowserWindow } from "electron";
 import {
   getAgentSettings,
   getOpenAICompatibleProviderConfig,
+  getTinkerProviderConfig,
   saveAgentSettings,
   saveOpenAICompatibleProviderConfig,
+  saveTinkerProviderConfig,
 } from "./pi-config.js";
 import {
   getTrainingProxyBaseUrl,
@@ -12,7 +14,7 @@ import {
   TRAINING_PROXY_START_HINT,
 } from "./training-proxy.js";
 
-/** Matches `ModelUpdate.to_event()` in scripts/server.py. */
+/** Matches `ModelUpdate.to_event()` in scripts/server.py (`model_path` is the sampler checkpoint). */
 export type TinkerModelUpdateEvent = {
   slug: string;
   model_path: string;
@@ -20,7 +22,31 @@ export type TinkerModelUpdateEvent = {
   renderer_name: string | null;
   mode: string;
   updated_at: number;
+  state_path?: string | null;
 };
+
+function persistTinkerCheckpoint(event: TinkerModelUpdateEvent): boolean {
+  const existing = getTinkerProviderConfig();
+  if (!existing) return false;
+
+  const samplerPath = event.model_path.trim();
+  if (!samplerPath.startsWith("tinker://")) return false;
+
+  const baseModel = event.base_model?.trim() || existing.model.baseModel;
+  const slug = event.slug.trim() || existing.model.id;
+
+  saveTinkerProviderConfig({
+    baseUrl: existing.baseUrl,
+    model: slug,
+    baseModel,
+    modelPath: samplerPath,
+    rendererName: event.renderer_name?.trim() || existing.model.rendererName,
+    reasoning: existing.model.reasoning,
+    contextWindow: existing.model.contextWindow,
+    maxTokens: existing.model.maxTokens,
+  });
+  return true;
+}
 
 const POLL_INTERVAL_MS = 5_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
@@ -154,30 +180,29 @@ class TinkerAutoUpdateWatcher {
     if (this.lastAppliedAt !== null && event.updated_at <= this.lastAppliedAt) return;
 
     const providerConfig = getOpenAICompatibleProviderConfig();
-    if (!providerConfig) {
-      console.warn(
-        `[tinker-auto-update] OpenAI-compatible provider not configured; cannot apply slug ${event.slug}`,
-      );
-      return;
+    if (providerConfig) {
+      try {
+        saveOpenAICompatibleProviderConfig({
+          baseUrl: providerConfig.baseUrl,
+          model: event.slug,
+          apiFormat: providerConfig.apiFormat,
+        });
+        const settings = getAgentSettings();
+        if (settings.defaultProvider === OPENAI_COMPATIBLE_PROVIDER) {
+          await saveAgentSettings({
+            defaultProvider: settings.defaultProvider,
+            defaultModel: event.slug,
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[tinker-auto-update] could not persist OpenAI-compatible slug: ${message}`);
+      }
     }
 
-    try {
-      saveOpenAICompatibleProviderConfig({
-        baseUrl: providerConfig.baseUrl,
-        model: event.slug,
-        apiFormat: providerConfig.apiFormat,
-      });
-      const settings = getAgentSettings();
-      if (settings.defaultProvider === OPENAI_COMPATIBLE_PROVIDER) {
-        await saveAgentSettings({
-          defaultProvider: settings.defaultProvider,
-          defaultModel: event.slug,
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[tinker-auto-update] could not persist slug ${event.slug}: ${message}`);
-      return;
+    const tinkerUpdated = persistTinkerCheckpoint(event);
+    if (tinkerUpdated) {
+      console.log(`[tinker-auto-update] updated Tinker checkpoint path=${event.model_path}`);
     }
 
     this.lastAppliedAt = event.updated_at;
