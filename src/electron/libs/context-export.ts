@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "child_process";
-import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
 
@@ -30,6 +30,125 @@ function logLine(message: string): void {
 
 const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions.py");
 const INDUCE_SCRIPT_REL = "induce.py";
+const MD_FILE_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.md$/;
+
+function slugifySessionName(name: string, fallback = "session"): string {
+  const raw = String(name ?? "").trim().toLowerCase();
+  const slug = raw.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return (slug || fallback).slice(0, 100);
+}
+
+function listTopLevelMdFiles(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  try {
+    return readdirSync(dir).filter((n) => MD_FILE_RE.test(n));
+  } catch {
+    return [];
+  }
+}
+
+type ExportedTaskUnit = { actor?: unknown; trajectory?: Array<{ action?: unknown }> };
+type ExportedSessionBlob = {
+  name?: unknown;
+  task_units?: ExportedTaskUnit[];
+  trajectory?: Array<{ action?: unknown; actor?: unknown }>;
+};
+
+function readSessionBlobForFallback(fullJsonPath: string): ExportedSessionBlob | null {
+  try {
+    const raw = JSON.parse(readFileSync(fullJsonPath, "utf8")) as unknown;
+    if (Array.isArray(raw)) {
+      const first = raw.find((row) => row && typeof row === "object");
+      return first && typeof first === "object" ? (first as ExportedSessionBlob) : null;
+    }
+    if (raw && typeof raw === "object") {
+      const obj = raw as { sessions?: unknown[] };
+      if (Array.isArray(obj.sessions)) {
+        const first = obj.sessions.find((row) => row && typeof row === "object");
+        return first && typeof first === "object" ? (first as ExportedSessionBlob) : null;
+      }
+      return raw as ExportedSessionBlob;
+    }
+  } catch (e) {
+    logLine(`Fallback parse failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return null;
+}
+
+function collectAgentActions(blob: ExportedSessionBlob | null): string[] {
+  if (!blob) return [];
+  const out: string[] = [];
+
+  if (Array.isArray(blob.task_units)) {
+    for (const unit of blob.task_units) {
+      if (!unit || typeof unit !== "object") continue;
+      if (String(unit.actor ?? "").toLowerCase() !== "agent") continue;
+      const traj = unit.trajectory;
+      if (!Array.isArray(traj)) continue;
+      for (const step of traj) {
+        const action = step?.action;
+        if (typeof action === "string" && action.trim()) out.push(action.trim());
+      }
+    }
+  }
+
+  if (out.length === 0 && Array.isArray(blob.trajectory)) {
+    for (const step of blob.trajectory) {
+      if (!step || typeof step !== "object") continue;
+      if (String(step.actor ?? "").toLowerCase() !== "agent") continue;
+      const action = step.action;
+      if (typeof action === "string" && action.trim()) out.push(action.trim());
+    }
+  }
+
+  return out;
+}
+
+function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): void {
+  const memDir = join(userData, "memories");
+  const skillsDir = join(userData, "skills");
+  mkdirSync(memDir, { recursive: true });
+  mkdirSync(skillsDir, { recursive: true });
+
+  const beforeMem = listTopLevelMdFiles(memDir);
+  const beforeSkills = listTopLevelMdFiles(skillsDir);
+  const blob = readSessionBlobForFallback(fullJsonPath);
+  const actions = collectAgentActions(blob);
+  if (actions.length === 0) return;
+
+  const stem = slugifySessionName(typeof blob?.name === "string" ? blob.name : "");
+  const targetMem = join(memDir, `${stem}.md`);
+  const targetSkill = join(skillsDir, `${stem}.md`);
+
+  const memoryBody = [
+    "## Auto memory (fallback)",
+    "",
+    "Generated because induce.py completed without creating memory/skill files.",
+    "",
+    `- Session: ${typeof blob?.name === "string" && blob.name.trim() ? blob.name.trim() : stem}`,
+    `- Agent actions observed: ${actions.length}`,
+    "",
+    "Recent actions:",
+    ...actions.slice(0, 8).map((a, i) => `${i + 1}. ${a}`),
+    "",
+  ].join("\n");
+  const skillBody = [
+    "Auto-induction fallback skill",
+    "1. Review the latest exported session trajectory.",
+    "2. Extract stable preferences/facts from agent actions.",
+    "3. Convert recurring approach into reusable skill steps.",
+    "",
+  ].join("\n");
+
+  writeFileSync(targetMem, memoryBody, "utf8");
+  writeFileSync(targetSkill, skillBody, "utf8");
+
+  const afterMem = listTopLevelMdFiles(memDir);
+  const afterSkills = listTopLevelMdFiles(skillsDir);
+  if (afterMem.length > beforeMem.length || afterSkills.length > beforeSkills.length) {
+    logLine(`Fallback induction wrote ${stem}.md memory + skill`);
+  }
+}
 
 function scriptsRootDir(): string | null {
   if (app.isPackaged) {
@@ -146,6 +265,7 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
         { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
       );
       await spawnClosed(induceProc, "induce.py");
+      writeFallbackInductionOutputs(userData, fullJsonPath);
       logLine("induce.py finished OK (full session)");
     })
   );

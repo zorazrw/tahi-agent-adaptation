@@ -775,6 +775,14 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
+  if (event.type === "session.runContextInduction") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid && sessions.getSession(sid)) {
+      runFullSessionExportAndExtract(sid);
+    }
+    return;
+  }
+
   if (event.type === "session.setAutoContextInduction") {
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {

@@ -75,6 +75,10 @@ function App() {
   const shouldRestoreScrollRef = useRef(false);
   const [showPromptInspector, setShowPromptInspector] = useState(false);
   const [showMemoryModal, setShowMemoryModal] = useState(false);
+  const brainSingleClickTimeoutRef = useRef<number | null>(null);
+  const brainShineFallbackTimeoutRef = useRef<number | null>(null);
+  const prevContextInductionDepthRef = useRef(0);
+  const [brainInductionPending, setBrainInductionPending] = useState(false);
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -314,6 +318,64 @@ function App() {
     resetToLatest();
   }, [resetToLatest]);
 
+  const triggerBrainContextUpdate = useCallback(() => {
+    if (!activeSessionId) return;
+    setBrainInductionPending(true);
+    if (brainShineFallbackTimeoutRef.current !== null) {
+      window.clearTimeout(brainShineFallbackTimeoutRef.current);
+    }
+    // Fallback: if backend never emits start/finish events, avoid a stuck shine.
+    brainShineFallbackTimeoutRef.current = window.setTimeout(() => {
+      brainShineFallbackTimeoutRef.current = null;
+      setBrainInductionPending(false);
+    }, 15000);
+    sendEvent({ type: "session.runContextInduction", payload: { sessionId: activeSessionId } });
+  }, [activeSessionId, sendEvent]);
+
+  const handleBrainSingleClick = useCallback(() => {
+    if (brainSingleClickTimeoutRef.current !== null) {
+      window.clearTimeout(brainSingleClickTimeoutRef.current);
+    }
+    brainSingleClickTimeoutRef.current = window.setTimeout(() => {
+      brainSingleClickTimeoutRef.current = null;
+      triggerBrainContextUpdate();
+    }, 220);
+  }, [triggerBrainContextUpdate]);
+
+  const handleBrainDoubleClick = useCallback(() => {
+    if (brainSingleClickTimeoutRef.current !== null) {
+      window.clearTimeout(brainSingleClickTimeoutRef.current);
+      brainSingleClickTimeoutRef.current = null;
+    }
+    setShowMemoryModal(true);
+  }, []);
+
+  useEffect(() => {
+    const prev = prevContextInductionDepthRef.current;
+    // Once an induction cycle finishes, clear any optimistic local shine.
+    if (prev > 0 && contextInductionDepth === 0) {
+      setBrainInductionPending(false);
+      if (brainShineFallbackTimeoutRef.current !== null) {
+        window.clearTimeout(brainShineFallbackTimeoutRef.current);
+        brainShineFallbackTimeoutRef.current = null;
+      }
+    }
+    prevContextInductionDepthRef.current = contextInductionDepth;
+  }, [contextInductionDepth]);
+
+  useEffect(() => {
+    return () => {
+      if (brainSingleClickTimeoutRef.current !== null) {
+        window.clearTimeout(brainSingleClickTimeoutRef.current);
+        brainSingleClickTimeoutRef.current = null;
+      }
+      if (brainShineFallbackTimeoutRef.current !== null) {
+        window.clearTimeout(brainShineFallbackTimeoutRef.current);
+        brainShineFallbackTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   // Horizontal drag handler for resizing chat / preview columns
   const handleSplitMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -365,18 +427,19 @@ function App() {
             <div className="relative z-10 flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <button
                 type="button"
-                onClick={() => setShowMemoryModal(true)}
+                onClick={handleBrainSingleClick}
+                onDoubleClick={handleBrainDoubleClick}
                 className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-ink-800 px-2.5 py-1 rounded-md hover:bg-ink-900/5 transition-colors"
                 title={
                   contextInductionDepth > 0
                     ? "Updating memories and skills from the last completed step…"
-                    : "Brain — edit memory and skill .md files injected into the agent"
+                    : "Brain — click to run context update, double-click to edit memory and skill .md files"
                 }
                 aria-label="Brain: memories and skills"
                 aria-busy={contextInductionDepth > 0}
               >
                 <span
-                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-inherit ${contextInductionDepth > 0 ? "brain-inducing" : ""}`}
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-inherit ${(contextInductionDepth > 0 || brainInductionPending) ? "brain-inducing" : ""}`}
                   aria-hidden
                 >
                   <IdeaBulbWithRays className="h-full w-full" />
