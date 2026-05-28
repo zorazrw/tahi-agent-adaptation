@@ -797,6 +797,22 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
+  if (event.type === "session.uploadForTinkerTraining") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid && sessions.getSession(sid)) {
+      try {
+        uploadSessionForTinkerTraining(sid);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        broadcast({
+          type: "runner.error",
+          payload: { sessionId: sid, message },
+        });
+      }
+    }
+    return;
+  }
+
   if (event.type === "session.setAutoContextInduction") {
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {

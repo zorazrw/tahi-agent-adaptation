@@ -330,7 +330,11 @@ function App() {
       brainShineFallbackTimeoutRef.current = null;
       setBrainInductionPending(false);
     }, 15000);
-    sendEvent({ type: "session.runContextInduction", payload: { sessionId: activeSessionId } });
+    if (readStoredAutoInduction()) {
+      sendEvent({ type: "session.runContextInduction", payload: { sessionId: activeSessionId } });
+    } else {
+      sendEvent({ type: "session.uploadForTinkerTraining", payload: { sessionId: activeSessionId } });
+    }
   }, [activeSessionId, sendEvent]);
 
   const handleBrainSingleClick = useCallback(() => {
@@ -376,6 +380,16 @@ function App() {
       }
     };
   }, []);
+
+  const autoInductionOn = readStoredAutoInduction();
+  const brainBusy = contextInductionDepth > 0 || brainInductionPending;
+  const brainTitle = brainBusy
+    ? autoInductionOn
+      ? "Updating memories and skills from the last completed step…"
+      : "Uploading session for model training…"
+    : autoInductionOn
+      ? "Brain — click to run context update, double-click to edit memory and skill .md files"
+      : "Brain — click to upload session for training, double-click to edit memory and skill files";
 
   // Horizontal drag handler for resizing chat / preview columns
   const handleSplitMouseDown = useCallback((e: React.MouseEvent) => {
@@ -431,16 +445,12 @@ function App() {
                 onClick={handleBrainSingleClick}
                 onDoubleClick={handleBrainDoubleClick}
                 className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-ink-800 px-2.5 py-1 rounded-md hover:bg-ink-900/5 transition-colors"
-                title={
-                  contextInductionDepth > 0
-                    ? "Updating memories and skills from the last completed step…"
-                    : "Brain — click to run context update, double-click to edit memory and skill .md files"
-                }
+                title={brainTitle}
                 aria-label="Brain: memories and skills"
                 aria-busy={brainBusy}
               >
                 <span
-                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-inherit ${(contextInductionDepth > 0 || brainInductionPending) ? "brain-inducing" : ""}`}
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center text-inherit ${brainBusy ? "brain-inducing" : ""}`}
                   aria-hidden
                 >
                   <IdeaBulbWithRays className="h-full w-full" />

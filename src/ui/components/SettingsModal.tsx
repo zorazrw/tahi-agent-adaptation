@@ -1161,8 +1161,8 @@ function SkillsPanel() {
               workflow step (and after follow-up verification turns), updating memory and skill markdown under
               your app data folder. The Brain control shows activity while induction runs. A single Brain click
               also runs that same context update. When disabled, automatic step induction is off and a single
-              Brain click uploads the session to the local training proxy for Tinker weight updates instead.
-              Double-click Brain anytime to edit memory and skill files.
+              Brain click uploads the session to the local training proxy instead. Double-click Brain anytime
+              to edit memory and skill files.
             </p>
           </div>
         </label>

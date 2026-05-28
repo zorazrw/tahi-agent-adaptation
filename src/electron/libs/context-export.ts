@@ -17,7 +17,7 @@ export type ContextInductionNotifierEvent =
 
 let inductionNotifier: ((ev: ContextInductionNotifierEvent) => void) | null = null;
 
-/** Optional UI hook (e.g. brain icon): export / induce / training upload lifecycle. */
+/** Optional UI hook (e.g. brain icon): first export spawn through induce.py exit. */
 export function setContextInductionNotifier(
   fn: ((ev: ContextInductionNotifierEvent) => void) | null
 ): void {
@@ -194,7 +194,7 @@ function spawnClosed(proc: ChildProcess, label: string): Promise<void> {
   });
 }
 
-/** Serialize per-session export jobs (induction, tinker upload) so they do not overlap. */
+/** Serialize per-session export jobs so they do not overlap. */
 const sessionExportChains = new Map<string, Promise<void>>();
 
 export function enqueueSessionJob(sessionId: string, run: () => Promise<void>): void {
@@ -292,7 +292,7 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
   );
 }
 
-/** Export session JSON and POST to the local training proxy (brain click when auto-induction is off). */
+/** Brain click when auto-induction is off: export session and POST to the training proxy. */
 export function uploadSessionForTinkerTraining(sessionId: string): void {
   if (isTrainingProxyDisabled()) {
     throw new Error('Training proxy is disabled (set AGENT_COWORK_PROXY_URL, not "disabled").');
