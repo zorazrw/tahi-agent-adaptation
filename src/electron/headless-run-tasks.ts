@@ -40,7 +40,7 @@ type Args = {
   evalApiKey?: string;
   evalRequestTimeout?: number;
   evalMaxRetries?: number;
-  verifierJson?: string;
+  verifiersJson?: string;
   force: boolean;
   resume: boolean;
   python: string;
@@ -98,7 +98,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--eval-api-key") out.evalApiKey = next();
     else if (a === "--eval-request-timeout") out.evalRequestTimeout = Number(next());
     else if (a === "--eval-max-retries") out.evalMaxRetries = Number(next());
-    else if (a === "--verifier-json") out.verifierJson = next();
+    else if (a === "--verifiers-json" || a === "--verifier-json") out.verifiersJson = next();
     else if (a === "--force") out.force = true;
     else if (a === "--resume") out.resume = true;
     else if (a === "--python") out.python = next();
@@ -136,7 +136,7 @@ function printHelp(): void {
     --renderer-name qwen3_5 --out runs/headless_v2_eval [--eval] [--force|--resume]
 
 Eval defaults to --eval-backend openai --eval-model gpt-4.1-mini via scripts/.env or ./.env.
-Verifier source defaults to out_weight.json.
+Verifier source defaults to out.json.
 `);
 }
 
@@ -468,6 +468,11 @@ function copyUiAuthIfAvailable(sourceUserDataDir: string, targetUserDataDir: str
   return true;
 }
 
+function scorerTaskKey(task: TaskSpec): string {
+  const raw = String(task.id).trim();
+  return /^task\s*\d+$/i.test(raw) ? raw.replace(/\s+/g, "") : `task${raw}`;
+}
+
 async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: number): Promise<TaskSummary> {
   const taskDir = join(resolve(args.out), `task_${String(index + 1).padStart(3, "0")}`);
   const workdir = join(taskDir, "workdir");
@@ -527,13 +532,13 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
       await runChild(
         args.python,
         [
-          "scripts/tools/score_headless_against_weight_verifiers.py",
+          "scripts/tools/score_redo_against_verifiers.py",
           "--verifiers-json",
-          args.verifierJson ? resolve(args.verifierJson) : join(repoRoot, "out_weight.json"),
-          "--session-json",
+          args.verifiersJson ? resolve(args.verifiersJson) : join(repoRoot, "out.json"),
+          "--outputs-json",
           sessionJson,
-          "--task-id",
-          String(task.id),
+          "--task",
+          scorerTaskKey(task),
           "--out",
           ratingsPath,
           "--backend",
