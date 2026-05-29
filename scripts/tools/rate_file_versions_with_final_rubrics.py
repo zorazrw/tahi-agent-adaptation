@@ -54,12 +54,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_scripts = Path(__file__).resolve().parent
-if str(_scripts) not in sys.path:
-    sys.path.insert(0, str(_scripts))
+_tools_dir = Path(__file__).resolve().parent
+_scripts_dir = _tools_dir.parent
+for _path in (_tools_dir, _scripts_dir):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 import induce  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
+
+
+DEFAULT_TINKER_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
 
 
 def normalize_secret(s: str) -> str:
@@ -321,6 +326,45 @@ def call_verifier_llm(client: Any, model: str, user_text: str, *, max_tokens: in
         raise RuntimeError(f"Verifier API error: {tail}{hint}") from e
 
 
+def make_tinker_client(*, api_key: str, base_url: str) -> Any:
+    try:
+        from openai import OpenAI
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Tinker eval requires the openai package. Install scripts/requirements.txt first."
+        ) from exc
+    return OpenAI(api_key=api_key, base_url=base_url.rstrip("/"))
+
+
+def call_tinker_verifier_llm(
+    client: Any,
+    model_path: str,
+    user_text: str,
+    *,
+    max_tokens: int = 1024,
+) -> str:
+    try:
+        response = client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": user_text}],
+            temperature=0,
+            max_tokens=max_tokens,
+        )
+    except Exception as e:  # noqa: BLE001
+        tail = str(e)
+        code = getattr(e, "status_code", None)
+        hint = ""
+        if code == 401 or "401" in tail or "authentication" in tail.lower():
+            hint = "\n\nAuthentication hint: set TINKER_API_KEY or pass --tinker-api-key."
+        raise RuntimeError(f"Tinker verifier API error: {tail}{hint}") from e
+
+    choice = response.choices[0] if response.choices else None
+    content = getattr(getattr(choice, "message", None), "content", None)
+    if isinstance(content, str):
+        return content
+    raise RuntimeError("Tinker verifier returned no text content")
+
+
 def interpret_results(text: str, n: int) -> list[bool | None]:
     parsed = parse_json_from_model_text(text)
     results = parsed.get("results")
@@ -545,6 +589,7 @@ def rate_session(
     leaves_only: bool,
     dry_run: bool,
     max_versions: int | None,
+    call_model: Any | None = None,
 ) -> dict[str, Any]:
     traj = session.get("trajectory")
     if not isinstance(traj, list):
@@ -654,7 +699,10 @@ def rate_session(
                 continue
             try:
                 llm_calls += 1
-                raw = call_verifier_llm(client, model, msg)
+                if call_model is not None:
+                    raw = call_model(msg)
+                else:
+                    raw = call_verifier_llm(client, model, msg)
                 passes = interpret_results(raw, len(criteria))
                 entry["lm"] = {
                     "raw_text": raw,
@@ -706,6 +754,12 @@ def rate_session(
 
 def main() -> None:
     p = argparse.ArgumentParser(description="LM-rate file versions against final workflow rubrics.")
+    p.add_argument(
+        "--backend",
+        choices=["anthropic", "tinker"],
+        default="anthropic",
+        help="Verifier backend. Anthropic preserves the original behavior; tinker uses OpenAI-compatible chat completions.",
+    )
     p.add_argument("--json", "-j", type=Path, required=True, help="Session JSON path")
     p.add_argument(
         "--session",
@@ -766,6 +820,21 @@ def main() -> None:
         help="Anthropic API base URL (else ANTHROPIC_BASE_URL or ~/.claude/settings.json)",
     )
     p.add_argument(
+        "--tinker-model-path",
+        default=None,
+        help="Tinker model/checkpoint path for --backend tinker, e.g. tinker://...",
+    )
+    p.add_argument(
+        "--tinker-base-url",
+        default=None,
+        help=f"Tinker OpenAI-compatible base URL (default: {DEFAULT_TINKER_BASE_URL})",
+    )
+    p.add_argument(
+        "--tinker-api-key",
+        default=None,
+        help="Tinker API key (default: TINKER_API_KEY env var)",
+    )
+    p.add_argument(
         "--plot",
         nargs="?",
         const="__default__",
@@ -805,56 +874,80 @@ def main() -> None:
             load_dotenv(dotenv_path=script_dir / ".env", override=args.dotenv_override)
             load_dotenv(dotenv_path=Path.cwd() / ".env", override=args.dotenv_override)
 
-        cfg: induce.ResolvedAnthropicConfig | None
-        try:
-            cfg = induce.resolve_anthropic_config(
-                skip_api_config=args.no_api_config,
-                skip_claude_settings=args.no_claude_settings,
-            )
-        except induce.AnthropicConfigError as e:
-            if args.dry_run:
-                cfg = None
-            else:
-                raise SystemExit(str(e)) from e
-
         client: Any | None = None
         cred_meta: dict[str, str] | None = None
         model: str
+        call_model = None
 
-        if cfg is not None:
-            cfg = merge_resolved_config(
-                cfg,
-                cli_api_key=args.api_key,
-                cli_base_url=args.base_url,
-                cli_model=args.model,
-            )
-            model = cfg.model
+        if args.backend == "tinker":
+            model = (args.tinker_model_path or args.model or "").strip()
+            if not model:
+                raise SystemExit("--backend tinker requires --tinker-model-path")
+            tinker_base_url = (args.tinker_base_url or DEFAULT_TINKER_BASE_URL).strip().rstrip("/")
+            tinker_api_key = (args.tinker_api_key or os.environ.get("TINKER_API_KEY") or "").strip()
             cred_meta = {
-                "resolver": "induce.resolve_anthropic_config + CLI merge",
-                "skip_api_config": str(args.no_api_config),
-                "skip_claude_settings": str(args.no_claude_settings),
-                "base_url_effective": cfg.base_url or "(Anthropic SDK default)",
-                "model": cfg.model,
+                "resolver": "TINKER_API_KEY + CLI",
+                "base_url_effective": tinker_base_url,
+                "model": model,
             }
             if args.debug_auth:
-                bu = cfg.base_url or "https://api.anthropic.com"
-                print("--- rate_file_versions auth debug (induce + SDK) ---", file=sys.stderr)
-                print(f"  messages URL: {messages_api_url(bu)}", file=sys.stderr)
-                print(f"  model: {cfg.model!r}", file=sys.stderr)
-                print(f"  base_url: {cfg.base_url!r}", file=sys.stderr)
-                print(f"  api_key: {mask_secret(cfg.api_key)}", file=sys.stderr)
+                print("--- rate_file_versions auth debug (tinker + OpenAI SDK) ---", file=sys.stderr)
+                print(f"  chat URL: {tinker_base_url}/chat/completions", file=sys.stderr)
+                print(f"  model: {model!r}", file=sys.stderr)
+                print(f"  api_key: {mask_secret(tinker_api_key) if tinker_api_key else '(missing)'}", file=sys.stderr)
                 print("--- end auth debug ---", file=sys.stderr)
             if not args.dry_run:
-                if cfg.api_key.startswith("tml-") or cfg.api_key.startswith("tml_"):
-                    raise SystemExit(
-                        "Resolved key looks like TINKER_API_KEY. Set ANTHROPIC_API_KEY for Anthropic (see induce.py)."
-                    )
-                client = induce.make_anthropic_client(cfg)
+                if not tinker_api_key:
+                    raise SystemExit("Missing Tinker API key. Set TINKER_API_KEY or pass --tinker-api-key.")
+                client = make_tinker_client(api_key=tinker_api_key, base_url=tinker_base_url)
+                call_model = lambda prompt: call_tinker_verifier_llm(client, model, prompt)
         else:
-            model = (args.model or "").strip() or induce.DEFAULT_MODEL
-            cred_meta = {"resolver": "dry-run (induce.resolve_anthropic_config unavailable)"}
-            if args.debug_auth:
-                print("--- auth debug: dry-run, no induce config ---", file=sys.stderr)
+            cfg: induce.ResolvedAnthropicConfig | None
+            try:
+                cfg = induce.resolve_anthropic_config(
+                    skip_api_config=args.no_api_config,
+                    skip_claude_settings=args.no_claude_settings,
+                )
+            except induce.AnthropicConfigError as e:
+                if args.dry_run:
+                    cfg = None
+                else:
+                    raise SystemExit(str(e)) from e
+
+            if cfg is not None:
+                cfg = merge_resolved_config(
+                    cfg,
+                    cli_api_key=args.api_key,
+                    cli_base_url=args.base_url,
+                    cli_model=args.model,
+                )
+                model = cfg.model
+                cred_meta = {
+                    "resolver": "induce.resolve_anthropic_config + CLI merge",
+                    "skip_api_config": str(args.no_api_config),
+                    "skip_claude_settings": str(args.no_claude_settings),
+                    "base_url_effective": cfg.base_url or "(Anthropic SDK default)",
+                    "model": cfg.model,
+                }
+                if args.debug_auth:
+                    bu = cfg.base_url or "https://api.anthropic.com"
+                    print("--- rate_file_versions auth debug (induce + SDK) ---", file=sys.stderr)
+                    print(f"  messages URL: {messages_api_url(bu)}", file=sys.stderr)
+                    print(f"  model: {cfg.model!r}", file=sys.stderr)
+                    print(f"  base_url: {cfg.base_url!r}", file=sys.stderr)
+                    print(f"  api_key: {mask_secret(cfg.api_key)}", file=sys.stderr)
+                    print("--- end auth debug ---", file=sys.stderr)
+                if not args.dry_run:
+                    if cfg.api_key.startswith("tml-") or cfg.api_key.startswith("tml_"):
+                        raise SystemExit(
+                            "Resolved key looks like TINKER_API_KEY. Set ANTHROPIC_API_KEY for Anthropic (see induce.py)."
+                        )
+                    client = induce.make_anthropic_client(cfg)
+            else:
+                model = (args.model or "").strip() or induce.DEFAULT_MODEL
+                cred_meta = {"resolver": "dry-run (induce.resolve_anthropic_config unavailable)"}
+                if args.debug_auth:
+                    print("--- auth debug: dry-run, no induce config ---", file=sys.stderr)
 
         sessions = load_sessions(args.json)
         session = find_session(sessions, args.session)
@@ -868,6 +961,7 @@ def main() -> None:
             leaves_only=args.leaves_only,
             dry_run=args.dry_run,
             max_versions=args.max_versions,
+            call_model=call_model,
         )
 
     assert report is not None

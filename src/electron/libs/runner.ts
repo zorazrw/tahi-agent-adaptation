@@ -32,6 +32,7 @@ export type RunnerOptions = {
   session: Session;
   regenerateWorkflow?: boolean;
   branchEntryId?: string;
+  bashEnv?: Record<string, string>;
   onEvent: (event: ServerEvent) => void;
   onSessionUpdate?: (updates: Partial<Session>) => void;
 };
@@ -398,7 +399,7 @@ function createAskUserQuestionTool(session: Session, onEvent: (event: ServerEven
 }
 
 export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
-  const { prompt, session, regenerateWorkflow, branchEntryId, onEvent, onSessionUpdate } = options;
+  const { prompt, session, regenerateWorkflow, branchEntryId, bashEnv, onEvent, onSessionUpdate } = options;
   let disposed = false;
   let piSessionAbort: (() => Promise<void>) | undefined;
 
@@ -429,6 +430,17 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       payload: { sessionId: session.id, prompt: promptToSend },
     });
 
+    const bashTool =
+      bashEnv && Object.keys(bashEnv).length > 0
+        ? createBashTool(cwd, {
+            spawnHook: ({ command, cwd: toolCwd, env }) => ({
+              command,
+              cwd: toolCwd,
+              env: { ...env, ...bashEnv },
+            }),
+          })
+        : createBashTool(cwd);
+
     const { session: piSession, modelFallbackMessage } = await createAgentSession({
       cwd,
       agentDir,
@@ -439,7 +451,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       sessionManager,
       tools: [
         createReadTool(cwd),
-        createBashTool(cwd),
+        bashTool,
         createEditTool(cwd),
         createWriteTool(cwd),
         createGrepTool(cwd),
