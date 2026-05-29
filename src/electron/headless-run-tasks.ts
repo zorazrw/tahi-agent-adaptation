@@ -3,6 +3,7 @@ import { spawn } from "child_process";
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { config as loadDotenv } from "dotenv";
 
 import type { ServerEvent, StreamMessage, WorkflowNode } from "./types.js";
 import { runClaude, buildPromptForNode } from "./libs/runner.js";
@@ -33,6 +34,13 @@ type Args = {
   rendererName?: string;
   out: string;
   eval: boolean;
+  evalBackend?: string;
+  evalModel?: string;
+  evalBaseUrl?: string;
+  evalApiKey?: string;
+  evalRequestTimeout?: number;
+  evalMaxRetries?: number;
+  verifierJson?: string;
   force: boolean;
   resume: boolean;
   python: string;
@@ -84,6 +92,13 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--out") out.out = next();
     else if (a === "--eval") out.eval = true;
     else if (a === "--no-eval") out.eval = false;
+    else if (a === "--eval-backend") out.evalBackend = next();
+    else if (a === "--eval-model") out.evalModel = next();
+    else if (a === "--eval-base-url") out.evalBaseUrl = next();
+    else if (a === "--eval-api-key") out.evalApiKey = next();
+    else if (a === "--eval-request-timeout") out.evalRequestTimeout = Number(next());
+    else if (a === "--eval-max-retries") out.evalMaxRetries = Number(next());
+    else if (a === "--verifier-json") out.verifierJson = next();
     else if (a === "--force") out.force = true;
     else if (a === "--resume") out.resume = true;
     else if (a === "--python") out.python = next();
@@ -100,6 +115,15 @@ function parseArgs(argv: string[]): Args {
   const limit = out.limit ?? 18;
   if (!Number.isFinite(limit) || limit <= 0) throw new Error("--limit must be a positive number");
   out.limit = limit;
+  if (out.evalBackend && !["anthropic", "openai", "tinker"].includes(out.evalBackend)) {
+    throw new Error("--eval-backend must be one of: anthropic, openai, tinker");
+  }
+  if (out.evalRequestTimeout !== undefined && (!Number.isFinite(out.evalRequestTimeout) || out.evalRequestTimeout <= 0)) {
+    throw new Error("--eval-request-timeout must be a positive number");
+  }
+  if (out.evalMaxRetries !== undefined && (!Number.isFinite(out.evalMaxRetries) || out.evalMaxRetries < 0)) {
+    throw new Error("--eval-max-retries must be zero or a positive number");
+  }
   if (out.force && out.resume) throw new Error("--force and --resume are mutually exclusive");
   return out as Args;
 }
@@ -110,6 +134,9 @@ function printHelp(): void {
     --workplace-template trash/workplace-set/<DIR> \\
     --model-path tinker://... --base-model Qwen/Qwen3.5-35B-A3B \\
     --renderer-name qwen3_5 --out runs/headless_v2_eval [--eval] [--force|--resume]
+
+Eval defaults to --eval-backend openai --eval-model gpt-4.1-mini via scripts/.env or ./.env.
+Verifier source defaults to out_weight.json.
 `);
 }
 
@@ -496,20 +523,26 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
     let score: number | null | undefined;
     if (args.eval) {
       ratingsPath = join(taskDir, "ratings.json");
+      const evalBackend = args.evalBackend ?? "openai";
       await runChild(
         args.python,
         [
-          "scripts/tools/rate_file_versions_with_final_rubrics.py",
-          "--json",
+          "scripts/tools/score_headless_against_weight_verifiers.py",
+          "--verifiers-json",
+          args.verifierJson ? resolve(args.verifierJson) : join(repoRoot, "out_weight.json"),
+          "--session-json",
           sessionJson,
+          "--task-id",
+          String(task.id),
           "--out",
           ratingsPath,
           "--backend",
-          "tinker",
-          "--tinker-model-path",
-          args.modelPath,
-          ...(args.tinkerBaseUrl ? ["--tinker-base-url", args.tinkerBaseUrl] : []),
-          ...(args.tinkerApiKey ? ["--tinker-api-key", args.tinkerApiKey] : []),
+          evalBackend,
+          ...(args.evalModel ? ["--model", args.evalModel] : []),
+          ...(args.evalBaseUrl ? ["--base-url", args.evalBaseUrl] : []),
+          ...(args.evalApiKey ? ["--api-key", args.evalApiKey] : []),
+          ...(args.evalRequestTimeout !== undefined ? ["--request-timeout", String(args.evalRequestTimeout)] : []),
+          ...(args.evalMaxRetries !== undefined ? ["--max-retries", String(args.evalMaxRetries)] : []),
           "--force",
         ],
         repoRoot,
@@ -570,7 +603,17 @@ function writeSummary(outDir: string, summaries: TaskSummary[]): void {
   const overall = scored.length > 0 ? scored.reduce((a, b) => a + b, 0) / scored.length : null;
   writeFileSync(
     join(outDir, "summary.json"),
-    JSON.stringify({ overall_score: overall, tasks: summaries }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        overall_score: overall,
+        scored_task_count: scored.length,
+        unscored_task_count: summaries.length - scored.length,
+        total_task_count: summaries.length,
+        tasks: summaries,
+      },
+      null,
+      2,
+    ) + "\n",
     "utf8",
   );
   const rows = ["task_id,status,score,session_id,error"];
@@ -587,6 +630,9 @@ function writeSummary(outDir: string, summaries: TaskSummary[]): void {
 }
 
 async function main(): Promise<void> {
+  loadDotenv({ path: join(repoRoot, "scripts", ".env") });
+  loadDotenv({ path: join(repoRoot, ".env") });
+
   const args = parseArgs(process.argv.slice(2));
   const outDir = resolve(args.out);
   const uiUserDataDir = app.getPath("userData");
