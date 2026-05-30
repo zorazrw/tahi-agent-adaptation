@@ -8,7 +8,9 @@ import {
 } from "@mariozechner/pi-coding-agent";
 
 /** Max agent tool calls kept in LLM context during task execution (node solve / follow-ups). */
-export const EXECUTION_CONTEXT_MAX_ACTIONS = 5;
+export const EXECUTION_CONTEXT_MAX_ACTIONS = 10;
+/** Minimum prior agent tool calls retained during overflow trimming retries. */
+export const MIN_EXECUTION_CONTEXT_ACTIONS = 2;
 
 const CONTEXT_LENGTH_RE =
   /prompt length plus max_tokens|exceeds the (?:model's )?context window|exceeds the context window|prompt is too long|context window exceeds|too many tokens|token limit exceeded|maximum context length|input token count.*exceeds the maximum|too large for model with \d+ maximum context length/i;
@@ -108,7 +110,7 @@ async function trimAndContinue(
   const userEntryId = rewindToLastUser(sm);
 
   let trimmed = false;
-  if (maxActions.value > 0) {
+  if (maxActions.value > MIN_EXECUTION_CONTEXT_ACTIONS) {
     const target = maxActions.value - 1;
     if (trimSessionToLastAgentActions(sm, target)) {
       maxActions.value = target;

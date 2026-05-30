@@ -250,9 +250,17 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
     return rows
 
 
-MEMORY_SYSTEM = """From the task description and the numbered action log, write up to 6 short facts or user preferences worth remembering later.
+MEMORY_SYSTEM = """From the task description and the numbered action log, write up to 8 short facts or user preferences worth remembering later.
 
-If an existing memory file is provided, merge with it: keep still-relevant facts, add new ones, drop contradicted or obsolete ones. Output the full updated set (not a diff).
+Your primary job is to extract NEW information from the current session Log (user messages, edits, styling choices, corrections, tools used, preferences). The existing memory file—if any—is background only.
+
+When an existing memory file is provided:
+- FIRST mine the Log for facts/preferences not already captured (this is mandatory when the log is non-empty).
+- Include at least 2 lines clearly derived from this session when the log has agent actions.
+- Adopt the useful parts from original lines only when they do not duplicate what you add.
+- Edit originals when this session refines or contradicts them.
+- Drop obsolete or redundant lines to make room for new learnings.
+Output the full updated memory file (not a diff).
 
 Output rules:
 - One fact per line. Plain text only (no markdown headers like # or ##).
@@ -262,7 +270,14 @@ Output rules:
 
 SKILL_SYSTEM = """From the task and numbered log, describe the workflow the agent used: ordered steps, generalized (no long paths).
 
-If an existing skill file is provided, merge with it: refine steps, keep the same Title when appropriate, generalize (no long paths or raw code).
+Your primary job is to capture what THIS session did—especially techniques, fixes, and steps visible in the Log. The existing skill file—if any—is background only.
+
+When an existing skill file is provided:
+- FIRST update the workflow using concrete steps from this session's Log (mandatory when the log is non-empty).
+- Add or revise steps for anything new in this session (e.g. chart tweaks, file edits, verification, user-requested changes).
+- Adopt the useful parts from original steps only when still accurate; merge duplicates.
+- Do not return the existing skill unchanged if the log shows new agent work.
+Output the full updated skill (not a diff). Generalize: no long paths, file paths, or raw code.
 
 Reply with:
 Title: <short task name>
@@ -331,17 +346,33 @@ def _existing_file_block(label: str, content: str) -> str:
     body = _clip_existing(content)
     if not body:
         return ""
-    return f"{label}:\n{body}\n\n"
+    return (
+        f"{label} (background only—do not copy back unchanged; prioritize new learnings from the Log below):\n"
+        f"{body}\n\n"
+    )
+
+
+def _merge_tail_instruction(has_existing: bool, kind: str) -> str:
+    if not has_existing:
+        return ""
+    noun = "memory facts" if kind == "memory" else "workflow steps"
+    return (
+        f"\nMerge instruction: The Log above is from a NEW session. "
+        f"Extract fresh {noun} from it. Keep prior file content only when still useful; "
+        f"edit or replace stale lines. Do not return the prior file unchanged if the log has agent actions.\n"
+    )
 
 
 def extract_memories(
     client, model: str, task: str, log: str, *, existing_memory: str = ""
 ) -> list[str]:
     task_block = (task or "").strip() or "(no title)"
+    has_existing = bool(existing_memory.strip())
     user = (
         f"Task / session title:\n{task_block}\n\n"
         f"{_existing_file_block('Existing memory file', existing_memory)}"
-        f"Log:\n{log or '(empty)'}\n"
+        f"Log (primary source—mine this session for new facts and preferences):\n{log or '(empty)'}\n"
+        f"{_merge_tail_instruction(has_existing, 'memory')}"
     )
     try:
         raw = _llm_text(client, model, MEMORY_SYSTEM, user)
@@ -359,17 +390,19 @@ def extract_memories(
             "Memory extraction produced 0 lines after parsing (model returned non-empty text). Preview: %s",
             raw.strip()[:500],
         )
-    return out[:6]
+    return out[:8 if has_existing else 6]
 
 
 def extract_skill(
     client, model: str, task: str, log: str, *, existing_skill: str = ""
 ) -> tuple[str, list[str]] | None:
     task_block = (task or "").strip() or "(no title)"
+    has_existing = bool(existing_skill.strip())
     user = (
         f"Task:\n{task_block}\n\n"
         f"{_existing_file_block('Existing skill file', existing_skill)}"
-        f"Log:\n{log or '(empty)'}\n\n"
+        f"Log (primary source—capture what this session did):\n{log or '(empty)'}\n\n"
+        f"{_merge_tail_instruction(has_existing, 'skill')}"
         "Use Title: plus numbered steps only.\n"
     )
     try:

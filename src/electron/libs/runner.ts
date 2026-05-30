@@ -31,6 +31,7 @@ import {
   promptWithExecutionContextRetry,
   trimSessionToLastAgentActions,
 } from "./session-context-trim.js";
+import { assistantTextForDisplay } from "../../lib/assistant-display-sanitize.js";
 
 export type RunnerOptions = {
   prompt: string;
@@ -155,7 +156,9 @@ function normalizeAssistantBlocks(message: Record<string, unknown>, includeToolU
   for (const block of content) {
     if (!block || typeof block !== "object" || !("type" in block)) continue;
     if (block.type === "text" && "text" in block) {
-      blocks.push({ type: "text", text: String(block.text ?? "") });
+      const text = assistantTextForDisplay(String(block.text ?? ""));
+      if (!text) continue;
+      blocks.push({ type: "text", text });
     } else if (block.type === "thinking" && "thinking" in block) {
       blocks.push({ type: "thinking", thinking: String(block.thinking ?? "") });
     } else if (includeToolUses && block.type === "toolCall") {
@@ -433,11 +436,12 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     // This stays correct even if model/provider switches change session-file behavior.
     const shouldForceWorkflowPlan = regenerateWorkflow || !hasExistingWorkflowPlan(session);
     const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, shouldForceWorkflowPlan);
-    const memoryBlock = readMemoryForPrompt().trimEnd();
+    const memoryBlock = readMemoryForPrompt(session.expertiseTask).trimEnd();
     const workflowAppend = shouldForceWorkflowPlan ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : "";
     const appendSystemPrompt = [memoryBlock, workflowAppend].filter(Boolean).join("\n\n") || undefined;
     const resourceLoader = await createPiResourceLoader(cwd, {
       appendSystemPrompt,
+      expertiseTask: session.expertiseTask,
     });
     let planRegistered = false;
     let lastUsage: Record<string, unknown> | undefined;

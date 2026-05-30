@@ -22,6 +22,10 @@ import type { PermissionRequest } from "../store/useAppStore";
 import { DecisionPanel } from "./DecisionPanel";
 import { WorkflowCard } from "./WorkflowCard";
 import {
+  assistantTextForDisplay,
+  shouldShowAssistantTextBlock,
+} from "../../lib/assistant-display-sanitize";
+import {
   isWorkflowPlanToolName,
   parseWorkflowPlanPayloadNormalized,
 } from "../../lib/workflow-plan-parse";
@@ -505,11 +509,15 @@ const ThinkingBlock = ({ text, isStreaming = false }: { text: string; isStreamin
 );
 
 /* ── Assistant Text Block ── */
-const AssistantTextBlock = ({ text, showIndicator = false }: { text: string; showIndicator?: boolean }) => (
-  <div className="mt-4">
-    <MessageResponse isAnimating={showIndicator} caret="block">{text}</MessageResponse>
-  </div>
-);
+const AssistantTextBlock = ({ text, showIndicator = false }: { text: string; showIndicator?: boolean }) => {
+  const displayText = assistantTextForDisplay(text);
+  if (!shouldShowAssistantTextBlock(text)) return null;
+  return (
+    <div className="mt-4">
+      <MessageResponse isAnimating={showIndicator} caret="block">{displayText}</MessageResponse>
+    </div>
+  );
+};
 
 /* ── WorkflowPlan Tool Use Card ── */
 const WorkflowPlanToolUseCard = ({ messageContent }: { messageContent: AnyAssistantContentBlock }) => {

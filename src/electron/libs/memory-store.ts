@@ -9,6 +9,10 @@ import {
 } from "fs";
 import { join } from "path";
 import { app } from "electron";
+import {
+  expertiseTaskMemoryFileName,
+  normalizeExpertiseTaskStem,
+} from "./expertise-task.js";
 
 const LEGACY_MEM_FILENAME = "memory.md";
 /** Any safe single-segment name ending in .md (no slashes, no leading dot). */
@@ -129,10 +133,32 @@ export function writeMemorySections(
 
 }
 
-/** Non-empty prefix for LM: each file as its own block. */
-export function readMemoryForPrompt(): string {
+function readMemorySectionsForPrompt(expertiseTask?: string): MemorySectionFile[] {
   ensureMemoriesDir();
-  const sections = readAllMemorySections();
+  const stem = normalizeExpertiseTaskStem(expertiseTask);
+  if (!stem) {
+    return readAllMemorySections();
+  }
+  const fileName = expertiseTaskMemoryFileName(stem);
+  if (!isValidMemoryFileName(fileName)) {
+    return [];
+  }
+  const path = join(getMemoriesDir(), fileName);
+  if (!existsSync(path)) {
+    return [];
+  }
+  let content = "";
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    /* keep empty */
+  }
+  return [{ fileName, title: titleFromMemoryFileName(fileName), content }];
+}
+
+/** Non-empty prefix for LM: each file as its own block. */
+export function readMemoryForPrompt(expertiseTask?: string): string {
+  const sections = readMemorySectionsForPrompt(expertiseTask);
   const blocks: string[] = [];
   for (const { fileName, title, content } of sections) {
     const text = content.trim();
