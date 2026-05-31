@@ -135,9 +135,25 @@ function printHelp(): void {
     --model-path tinker://... --base-model Qwen/Qwen3.5-35B-A3B \\
     --renderer-name qwen3_5 --out runs/headless_v2_eval [--eval] [--force|--resume]
 
+Simple run example:
+  bun run headless:tasks -- --tasks tasks.json --limit 18 \\
+    --workplace-template trash/workplace-set/test-0527/dpo \\
+    --model-path tinker://... --base-model Qwen/Qwen3.5-35B-A3B \\
+    --renderer-name qwen3_5 --out runs/headless_dpo_eval --resume
+
+Run with eval:
+  bun run headless:tasks -- --tasks tasks.json --limit 18 \\
+    --workplace-template trash/workplace-set/test-0527/dpo \\
+    --model-path tinker://... --base-model Qwen/Qwen3.5-35B-A3B \\
+    --renderer-name qwen3_5 --out runs/headless_dpo_eval \\
+    --resume --eval --eval-backend openai --eval-model gpt-4.1-mini
+
+Optional verifier override:
+  --verifiers-json out.json
+
 Eval defaults to --eval-backend openai --eval-model gpt-4.1-mini via scripts/.env or ./.env.
 Verifier source defaults to out.json.
-`);
+ `);
 }
 
 function piAgentDir(userDataDir: string): string {
