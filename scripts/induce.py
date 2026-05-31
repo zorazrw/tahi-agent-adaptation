@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+_TASK_STEM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 
 
 class AnthropicConfigError(RuntimeError):
@@ -231,7 +232,17 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
         source = sid.strip() if isinstance(sid, str) and sid.strip() else f"session_{i}"
         task_blob = blob.get("task")
         task_str = task_blob.strip() if isinstance(task_blob, str) else ""
-        rows.append({"name": name_str, "task": task_str, "actions": actions, "source": source})
+        expertise_task = blob.get("expertise_task")
+        expertise_str = expertise_task.strip() if isinstance(expertise_task, str) else ""
+        rows.append(
+            {
+                "name": name_str,
+                "task": task_str,
+                "actions": actions,
+                "source": source,
+                "expertise_task": expertise_str,
+            }
+        )
     return rows
 
 
@@ -353,6 +364,26 @@ def extract_skill(client, model: str, task: str, log: str) -> tuple[str, list[st
     return None
 
 
+def _normalize_task_stem(value: str) -> str | None:
+    s = (value or "").strip().lower()
+    if s and _TASK_STEM_RE.match(s):
+        return s
+    return None
+
+
+def _output_stem(row: dict[str, Any]) -> str:
+    expertise = row.get("expertise_task")
+    if isinstance(expertise, str):
+        stem = _normalize_task_stem(expertise)
+        if stem:
+            return stem
+    name = row.get("name")
+    name_str = name if isinstance(name, str) else ""
+    source = row.get("source")
+    source_str = source if isinstance(source, str) else "session"
+    return _slug(name_str, source_str)
+
+
 def _slug(name: str, fallback: str) -> str:
     s = (name or "").strip()
     if len(s) >= 2 and s[0] in "\"'" and s[0] == s[-1]:
@@ -415,10 +446,16 @@ def main() -> None:
             task_for_llm = (name or "").strip()
         actions = row.get("actions") or []
         log = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
-        base = _slug(name, src)
-        n = seen.get(base, 0)
-        seen[base] = n + 1
-        stem = base if n == 0 else f"{base}-{''.join(c for c in src if c.isalnum())[:8] or n}"
+        base = _output_stem(row)
+        expertise_stem = _normalize_task_stem(
+            row.get("expertise_task") if isinstance(row.get("expertise_task"), str) else ""
+        )
+        if expertise_stem:
+            stem = expertise_stem
+        else:
+            n = seen.get(base, 0)
+            seen[base] = n + 1
+            stem = base if n == 0 else f"{base}-{''.join(c for c in src if c.isalnum())[:8] or n}"
 
         memories = extract_memories(client, model, task_for_llm, log)
         (mem_dir / f"{stem}.md").write_text(

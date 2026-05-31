@@ -2847,21 +2847,30 @@ def build_weight_based_session(
     """Build the weight-based export for a single session."""
     try:
         row = cursor.execute(
-            """SELECT id, title, workflow_tree, last_prompt, cwd, engine, steps, output_files, verification_criteria, verifier_marks
+            """SELECT id, title, workflow_tree, last_prompt, cwd, engine, steps, output_files, verification_criteria, verifier_marks, expertise_task
                FROM sessions WHERE id = ?""",
             (session_id,),
         ).fetchone()
     except sqlite3.OperationalError:
-        row = cursor.execute(
-            """SELECT id, title, workflow_tree, last_prompt, cwd, engine
-               FROM sessions WHERE id = ?""",
-            (session_id,),
-        ).fetchone()
-        if row:
-            row = (*row, None, None, None, None)
+        try:
+            row = cursor.execute(
+                """SELECT id, title, workflow_tree, last_prompt, cwd, engine, steps, output_files, verification_criteria, verifier_marks
+                   FROM sessions WHERE id = ?""",
+                (session_id,),
+            ).fetchone()
+            if row:
+                row = (*row, None)
+        except sqlite3.OperationalError:
+            row = cursor.execute(
+                """SELECT id, title, workflow_tree, last_prompt, cwd, engine
+                   FROM sessions WHERE id = ?""",
+                (session_id,),
+            ).fetchone()
+            if row:
+                row = (*row, None, None, None, None, None)
     if not row:
         return None
-    sid, title, workflow_tree_raw, last_prompt, cwd, db_engine, steps_raw, output_files_raw, verification_criteria_raw, verifier_marks_raw = row
+    sid, title, workflow_tree_raw, last_prompt, cwd, db_engine, steps_raw, output_files_raw, verification_criteria_raw, verifier_marks_raw, expertise_task_raw = row
     workflow_tree = parse_json_column(workflow_tree_raw, [])
     steps = parse_json_column(steps_raw, [])
     output_files = parse_json_column(output_files_raw, [])
@@ -3055,6 +3064,10 @@ def build_weight_based_session(
         "model": model_name,
         "task_units": task_units,
     }
+    if expertise_task_raw is not None:
+        et = str(expertise_task_raw).strip()
+        if et:
+            result["expertise_task"] = et
     result["system_prompt"] = _pi_system_prompt(export_cwd) if is_pi else ""
     result["tool_schemas"] = PI_TOOL_SCHEMAS if is_pi else []
     return result
