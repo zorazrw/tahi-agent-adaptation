@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
-import { startTinkerAutoUpdateWatcher } from "./tinker-auto-update.js";
 import {
   getTrainingProxyBaseUrl,
   isTrainingProxyDisabled,
@@ -34,8 +33,19 @@ function logLine(message: string): void {
   console.error(`[context-export] ${message}`);
 }
 
-const EXPORT_SCRIPT_REL = join("tasks", "export_task_sessions.py");
+const EXPORT_SCRIPT_CONTEXT_REL = join("tasks", "export_task_sessions_context.py");
+const EXPORT_SCRIPT_WEIGHT_REL = join("tasks", "export_task_sessions_weight.py");
 const INDUCE_SCRIPT_REL = "induce.py";
+
+export type SessionExportMode = "context" | "weight";
+
+function exportScriptRel(mode: SessionExportMode): string {
+  return mode === "weight" ? EXPORT_SCRIPT_WEIGHT_REL : EXPORT_SCRIPT_CONTEXT_REL;
+}
+
+function exportScriptLabel(mode: SessionExportMode): string {
+  return mode === "weight" ? "export_task_sessions_weight" : "export_task_sessions_context";
+}
 
 function slugifySessionName(name: string, fallback = "session"): string {
   const raw = String(name ?? "").trim().toLowerCase();
@@ -191,17 +201,18 @@ function writeFallbackInductionOutputs(userData: string, fullJsonPath: string): 
 }
 
 function scriptsRootDir(): string | null {
+  const hasScripts = (dir: string) =>
+    existsSync(join(dir, EXPORT_SCRIPT_CONTEXT_REL)) &&
+    existsSync(join(dir, EXPORT_SCRIPT_WEIGHT_REL)) &&
+    existsSync(join(dir, INDUCE_SCRIPT_REL));
+
   if (app.isPackaged) {
     const bundled = join(process.resourcesPath, "scripts");
-    if (existsSync(join(bundled, EXPORT_SCRIPT_REL)) && existsSync(join(bundled, INDUCE_SCRIPT_REL))) {
-      return bundled;
-    }
+    if (hasScripts(bundled)) return bundled;
     return null;
   }
   const dev = join(app.getAppPath(), "scripts");
-  if (existsSync(join(dev, EXPORT_SCRIPT_REL)) && existsSync(join(dev, INDUCE_SCRIPT_REL))) {
-    return dev;
-  }
+  if (hasScripts(dev)) return dev;
   return null;
 }
 
@@ -257,15 +268,19 @@ export function runWithInductionNotifier(
 }
 
 /** Export one session from SQLite to a JSON file; returns path or null on skip/failure. */
-export async function exportSessionJsonFile(sessionId: string): Promise<string | null> {
+export async function exportSessionJsonFile(
+  sessionId: string,
+  mode: SessionExportMode = "context",
+): Promise<string | null> {
   const root = scriptsRootDir();
   if (!root) {
     logLine("Skip export: scripts/ not found.");
     return null;
   }
-  const exportScript = join(root, EXPORT_SCRIPT_REL);
+  const scriptRel = exportScriptRel(mode);
+  const exportScript = join(root, scriptRel);
   if (!existsSync(exportScript)) {
-    logLine(`Skip export: missing script under ${root}`);
+    logLine(`Skip export: missing ${scriptRel} under ${root}`);
     return null;
   }
 
@@ -280,19 +295,20 @@ export async function exportSessionJsonFile(sessionId: string): Promise<string |
   mkdirSync(tasksDir, { recursive: true });
 
   const py = pythonExecutable();
-  logLine(`export_task_sessions session=${sessionId}`);
+  const label = exportScriptLabel(mode);
+  logLine(`${label} session=${sessionId}`);
   const exportProc = spawn(
     py,
     [exportScript, "--db", dbPath, "--session-id", sessionId, "--output", fullJsonPath],
     { cwd: root, stdio: ["ignore", "pipe", "pipe"], env: process.env }
   );
-  await spawnClosed(exportProc, "export_task_sessions");
+  await spawnClosed(exportProc, label);
   return fullJsonPath;
 }
 
 /**
  * Export the current session from SQLite and run induce.py (memories + flat skills).
- * Triggered manually via session.runContextInduction (brain click in Context Update mode).
+ * Triggered only by a manual brain single-click (session.runContextInduction).
  */
 export function runFullSessionExportAndExtract(sessionId: string): void {
   const root = scriptsRootDir();
@@ -309,7 +325,7 @@ export function runFullSessionExportAndExtract(sessionId: string): void {
   const userData = app.getPath("userData");
   enqueueSessionJob(sessionId, () =>
     runWithInductionNotifier(sessionId, async () => {
-      const fullJsonPath = await exportSessionJsonFile(sessionId);
+      const fullJsonPath = await exportSessionJsonFile(sessionId, "context");
       if (!fullJsonPath) return;
 
       const py = pythonExecutable();
@@ -334,12 +350,11 @@ export function uploadSessionForTinkerTraining(sessionId: string): void {
   const baseUrl = getTrainingProxyBaseUrl();
   if (!baseUrl) throw new Error(TRAINING_PROXY_START_HINT);
 
-  startTinkerAutoUpdateWatcher();
   enqueueSessionJob(sessionId, () =>
     runWithInductionNotifier(
       sessionId,
       async () => {
-        const fullJsonPath = await exportSessionJsonFile(sessionId);
+        const fullJsonPath = await exportSessionJsonFile(sessionId, "weight");
         if (!fullJsonPath) throw new Error("Session export failed");
 
         const parsed = JSON.parse(readFileSync(fullJsonPath, "utf8")) as unknown;

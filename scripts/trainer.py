@@ -49,8 +49,10 @@ except Exception as e:  # noqa: BLE001
 from weight.train.run_opd import (
     Config as ArtifactOPDConfig,
     OnlineOPDRolloutDataset,
+    _build_agentic_topk_datums_async,
     _build_offline_topk_datums_async,
     _count_topk_supervision_tokens,
+    _sample_agentic_opd_datums_async,
     _sample_online_artifact_datums_async,
 )
 
@@ -815,27 +817,56 @@ class OPDTrainer(Trainer):
             "progress/batch": batch_idx,
         }
 
+        is_agentic = self.config.extract_version == "agentic"
+
         with trace.trace_iteration(step=step) as window:
             async with trace.scope_span("sample"):
                 rows = dataset.get_batch(batch_idx)
-                student_datums, teacher_prompt_inputs, rollout_metrics = await _sample_online_artifact_datums_async(
-                    rows,
-                    self.renderer,
-                    self.sampling_client,
-                    max_tokens=self.config.rollout_max_tokens,
-                    temperature=self.config.rollout_temperature,
-                    attempts=self.config.rollout_attempts,
-                    max_length=dataset._max_length,
-                    step=step,
-                    sample_log_path=(
-                        Path(self.config.log_path) / "online_rollout_samples.jsonl"
-                        if self.config.log_rollout_samples else None
-                    ),
-                    sample_log_chars=self.config.rollout_sample_log_chars,
-                    extract_version=self.config.extract_version,
-                    log_teacher_prompts=self.config.log_teacher_prompts,
-                    rollout_pipeline=self.config.rollout_pipeline,
-                )
+                if is_agentic:
+                    # On-policy multi-turn tool-using rollout. Returns paired
+                    # student + teacher datums (teacher prompt carries the
+                    # session follow-ups); top-K is built from the teacher datum.
+                    student_datums, teacher_datums, rollout_metrics = await _sample_agentic_opd_datums_async(
+                        rows,
+                        self.renderer,
+                        self.sampling_client,
+                        max_tokens=self.config.rollout_max_tokens,
+                        temperature=self.config.rollout_temperature,
+                        max_turns=self.config.agentic_max_turns,
+                        max_turns_per_step=self.config.agentic_max_turns_per_step,
+                        max_steps=self.config.agentic_max_steps,
+                        enable_bash=self.config.agentic_enable_bash,
+                        tool_timeout_s=self.config.agentic_tool_timeout_s,
+                        max_trajectory_tokens=self.config.agentic_max_trajectory_tokens,
+                        max_length=dataset._max_length,
+                        step=step,
+                        sample_log_path=(
+                            Path(self.config.log_path) / "agentic_rollout_samples.jsonl"
+                            if self.config.log_rollout_samples else None
+                        ),
+                        sample_log_chars=self.config.rollout_sample_log_chars,
+                    )
+                    teacher_prompt_inputs = None
+                else:
+                    student_datums, teacher_prompt_inputs, rollout_metrics = await _sample_online_artifact_datums_async(
+                        rows,
+                        self.renderer,
+                        self.sampling_client,
+                        max_tokens=self.config.rollout_max_tokens,
+                        temperature=self.config.rollout_temperature,
+                        attempts=self.config.rollout_attempts,
+                        max_length=dataset._max_length,
+                        step=step,
+                        sample_log_path=(
+                            Path(self.config.log_path) / "online_rollout_samples.jsonl"
+                            if self.config.log_rollout_samples else None
+                        ),
+                        sample_log_chars=self.config.rollout_sample_log_chars,
+                        extract_version=self.config.extract_version,
+                        log_teacher_prompts=self.config.log_teacher_prompts,
+                        rollout_pipeline=self.config.rollout_pipeline,
+                    )
+                    teacher_datums = None
             metrics.update(rollout_metrics)
 
             if not student_datums:
@@ -861,15 +892,26 @@ class OPDTrainer(Trainer):
                 return
 
             async with trace.scope_span("build_topk_distillation_datums"):
-                topk_datums, topk_metrics = await _build_offline_topk_datums_async(
-                    student_datums,
-                    teacher_prompt_inputs,
-                    self.teacher_client,
-                    topk=self.config.topk,
-                    max_context_length=self.max_context_length,
-                    vocab_size=len(self.tokenizer),
-                    teacher_temperature=self.config.teacher_temperature,
-                )
+                if is_agentic:
+                    topk_datums, topk_metrics = await _build_agentic_topk_datums_async(
+                        student_datums,
+                        teacher_datums,
+                        self.teacher_client,
+                        topk=self.config.topk,
+                        max_context_length=self.max_context_length,
+                        vocab_size=len(self.tokenizer),
+                        teacher_temperature=self.config.teacher_temperature,
+                    )
+                else:
+                    topk_datums, topk_metrics = await _build_offline_topk_datums_async(
+                        student_datums,
+                        teacher_prompt_inputs,
+                        self.teacher_client,
+                        topk=self.config.topk,
+                        max_context_length=self.max_context_length,
+                        vocab_size=len(self.tokenizer),
+                        teacher_temperature=self.config.teacher_temperature,
+                    )
             metrics.update(topk_metrics)
 
             # if self.config.save_every > 0 and step % self.config.save_every == 0 and step > 0:

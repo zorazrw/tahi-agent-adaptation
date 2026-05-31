@@ -8,7 +8,7 @@ import argparse
 import time
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 log = logging.getLogger(__name__)
@@ -82,7 +82,21 @@ class Config:
     opd_rollout_sample_log_chars: int = 4000
     opd_log_teacher_prompts: bool = True
     opd_artifact_only_rollout_instruction: bool = False
-    opd_extract_version: Literal["v1", "v2"] = "v2"
+    # "v1"/"v2" use a historical completion per task unit; "agentic" runs one
+    # continuous on-policy multi-turn tool-using rollout per session in a live
+    # sandbox and distils the whole trajectory against a follow-up-augmented
+    # teacher (see opd_agentic_* below).
+    opd_extract_version: Literal["v1", "v2", "agentic"] = "v2"
+
+    # -- OPD agentic mode (opd_extract_version="agentic") --
+    # Each session is rolled out as a planning turn + one "Proceed with: <step>"
+    # user turn per planned leaf step (steps derived from the model's own plan).
+    opd_agentic_max_turns: int = 48          # overall safety ceiling per episode
+    opd_agentic_max_turns_per_step: int = 8  # inner agent-loop cap within a step
+    opd_agentic_max_steps: int = 6           # max planned steps replayed
+    opd_agentic_enable_bash: bool = True
+    opd_agentic_tool_timeout_s: int = 20
+    opd_agentic_max_trajectory_tokens: int | None = None
     # Reasoning-renderer toggle (Qwen3/Kimi K2/DeepSeek thinking). When False,
     # the golden answer's ``<think>...</think>`` block survives in the
     # teacher prompt so the teacher can attend to the golden chain-of-thought.
@@ -684,11 +698,12 @@ class Server:
                 self.config.opd_strip_thinking_from_history,
             )
         artifact_only = self.config.opd_artifact_only_rollout_instruction
-        if self.config.opd_extract_version == "v2" and artifact_only:
+        if self.config.opd_extract_version in ("v2", "agentic") and artifact_only:
             log.warning(
                 "opd_artifact_only_rollout_instruction=True is v1-only and is "
-                "incompatible with opd_extract_version='v2'. Forcing it to "
-                "False for this OPD training run."
+                "incompatible with opd_extract_version=%r. Forcing it to False "
+                "for this OPD training run.",
+                self.config.opd_extract_version,
             )
             artifact_only = False
         dataset = OnlineOPDRolloutDataset.from_weight_json(
@@ -732,6 +747,12 @@ class Server:
             extract_version=self.config.opd_extract_version,
             strip_thinking_from_history=self.config.opd_strip_thinking_from_history,
             rollout_pipeline=self.config.opd_rollout_pipeline,
+            agentic_max_turns=self.config.opd_agentic_max_turns,
+            agentic_max_turns_per_step=self.config.opd_agentic_max_turns_per_step,
+            agentic_max_steps=self.config.opd_agentic_max_steps,
+            agentic_enable_bash=self.config.opd_agentic_enable_bash,
+            agentic_tool_timeout_s=self.config.opd_agentic_tool_timeout_s,
+            agentic_max_trajectory_tokens=self.config.opd_agentic_max_trajectory_tokens,
         )
 
         def build(

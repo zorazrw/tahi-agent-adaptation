@@ -525,7 +525,9 @@ def main() -> None:
         actions = row.get("actions") or []
         log = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
         base = _output_stem(row)
-        expertise_stem = _normalize_task_stem(row.get("expertise_task") if isinstance(row.get("expertise_task"), str) else "")
+        expertise_stem = _normalize_task_stem(
+            row.get("expertise_task") if isinstance(row.get("expertise_task"), str) else ""
+        )
         if expertise_stem:
             stem = expertise_stem
         else:
