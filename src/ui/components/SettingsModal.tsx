@@ -265,6 +265,14 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     const unsubscribe = window.electron.onTinkerModelUpdated(async (event) => {
       try {
+        const [settings, availableModels] = await Promise.all([
+          window.electron.getAgentSettings(),
+          window.electron.listAvailableModels(),
+          loadOpenAICompatibleProvider(),
+          loadTinkerProvider(),
+        ]);
+
+        // Prefer the live SSE event over disk in case the reload raced the write.
         if (event.model_path?.startsWith("tinker://")) {
           setTinkerModelPath(event.model_path);
           setTinkerResolveError(null);
@@ -277,12 +285,6 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
           setTinkerRendererName(event.renderer_name);
         }
 
-        const [settings, availableModels] = await Promise.all([
-          window.electron.getAgentSettings(),
-          window.electron.listAvailableModels(),
-          loadOpenAICompatibleProvider(),
-          loadTinkerProvider(),
-        ]);
         await syncModelState(availableModels, { model: event.slug }, settings);
       } catch (err) {
         console.error("Failed to apply tinker model update in UI:", err);

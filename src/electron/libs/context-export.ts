@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
-import { startTinkerAutoUpdateWatcher } from "./tinker-auto-update.js";
 import {
   getTrainingProxyBaseUrl,
   isTrainingProxyDisabled,
@@ -339,7 +338,6 @@ export function uploadSessionForTinkerTraining(sessionId: string): void {
   const baseUrl = getTrainingProxyBaseUrl();
   if (!baseUrl) throw new Error(TRAINING_PROXY_START_HINT);
 
-  startTinkerAutoUpdateWatcher();
   enqueueSessionJob(sessionId, () =>
     runWithInductionNotifier(
       sessionId,

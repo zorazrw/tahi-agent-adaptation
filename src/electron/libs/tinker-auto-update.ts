@@ -54,12 +54,14 @@ const RECONNECT_MAX_DELAY_MS = 30_000;
 const OFFLINE_LOG_INTERVAL_MS = 60_000;
 const IPC_CHANNEL = "tinker-model-updated" as const;
 const OPENAI_COMPATIBLE_PROVIDER = "openai-compatible" as const;
+const TINKER_PROVIDER = "tinker" as const;
 
 class TinkerAutoUpdateWatcher {
   private stopped = false;
   private abortController: AbortController | null = null;
   private reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
   private lastAppliedAt: number | null = null;
+  private lastAppliedPath: string | null = null;
   private lastOfflineLogAt = 0;
 
   constructor(
@@ -177,7 +179,14 @@ class TinkerAutoUpdateWatcher {
 
   private async applyUpdate(event: TinkerModelUpdateEvent): Promise<void> {
     if (!event.slug || !event.model_path) return;
-    if (this.lastAppliedAt !== null && event.updated_at <= this.lastAppliedAt) return;
+    const modelPath = event.model_path.trim();
+    if (
+      this.lastAppliedPath === modelPath
+      && this.lastAppliedAt !== null
+      && event.updated_at <= this.lastAppliedAt
+    ) {
+      return;
+    }
 
     const providerConfig = getOpenAICompatibleProviderConfig();
     if (providerConfig) {
@@ -187,13 +196,6 @@ class TinkerAutoUpdateWatcher {
           model: event.slug,
           apiFormat: providerConfig.apiFormat,
         });
-        const settings = getAgentSettings();
-        if (settings.defaultProvider === OPENAI_COMPATIBLE_PROVIDER) {
-          await saveAgentSettings({
-            defaultProvider: settings.defaultProvider,
-            defaultModel: event.slug,
-          });
-        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.warn(`[tinker-auto-update] could not persist OpenAI-compatible slug: ${message}`);
@@ -205,7 +207,24 @@ class TinkerAutoUpdateWatcher {
       console.log(`[tinker-auto-update] updated Tinker checkpoint path=${event.model_path}`);
     }
 
+    try {
+      const settings = getAgentSettings();
+      const shouldUpdateDefaultModel =
+        (settings.defaultProvider === OPENAI_COMPATIBLE_PROVIDER && providerConfig)
+        || (settings.defaultProvider === TINKER_PROVIDER && tinkerUpdated);
+      if (shouldUpdateDefaultModel) {
+        await saveAgentSettings({
+          defaultProvider: settings.defaultProvider,
+          defaultModel: event.slug,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[tinker-auto-update] could not persist default model: ${message}`);
+    }
+
     this.lastAppliedAt = event.updated_at;
+    this.lastAppliedPath = modelPath;
     console.log(`[tinker-auto-update] applied slug=${event.slug} mode=${event.mode}`);
 
     for (const win of this.getWindows()) {
