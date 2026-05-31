@@ -3237,7 +3237,7 @@ def main() -> int:
         "--format",
         type=str,
         choices=["default", "weight"],
-        default="default",
+        default="weight",
         help=(
             'Export format: "default" (human-readable trajectory) or "weight" '
             "(OAI messages + human_trajectories for training; every OAI message in "
