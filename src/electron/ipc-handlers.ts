@@ -808,6 +808,16 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
+  if (event.type === "session.setExpertiseTask") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (!sid || !sessions.getSession(sid)) return;
+    const raw = event.payload.expertiseTask;
+    const expertiseTask =
+      typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+    sessions.updateSession(sid, { expertiseTask });
+    return;
+  }
+
   if (event.type === "session.list") {
     emit({
       type: "session.list",
@@ -838,6 +848,7 @@ export function handleClientEvent(event: ClientEvent) {
   }
 
   if (event.type === "session.start") {
+    const expertiseTask = event.payload.expertiseTask?.trim() || undefined;
     const session = sessions.createSession({
       cwd: event.payload.cwd,
       title: event.payload.title,
@@ -845,6 +856,7 @@ export function handleClientEvent(event: ClientEvent) {
       prompt: event.payload.prompt,
       engine: "pi",
       autoContextInduction: event.payload.autoContextInduction,
+      expertiseTask,
     });
 
     try {

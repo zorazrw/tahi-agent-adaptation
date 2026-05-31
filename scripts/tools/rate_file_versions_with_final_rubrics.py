@@ -14,8 +14,9 @@ Per-version **average success rate** (passing criteria / total × 100) is printe
 (so stdout JSON stays valid when redirected). Use ``--plot path.png`` to save a scatter plot:
 x = trajectory step index, y = average success rate (``scatter_plot_data`` in the JSON mirrors the points).
 
-Input JSON: a session object or an array of sessions (same shape as ``export_task_sessions`` /
-``scripts/out.json``).
+Input JSON: a session object or an array of sessions (``export_task_sessions`` shape).
+Supports legacy top-level ``trajectory`` and current ``task_units`` exports (``scripts/out.json``):
+each unit’s ``environment`` is the end-of-turn state and is attached only to that unit’s last step.
 
 Environment / CLI — same stack as ``scripts/induce.py``:
   ``python-dotenv`` loads ``--env-file`` or ``scripts/.env`` then ``./.env`` (use ``--dotenv-override`` to beat stale shell exports).
@@ -54,9 +55,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_scripts = Path(__file__).resolve().parent
-if str(_scripts) not in sys.path:
-    sys.path.insert(0, str(_scripts))
+_scripts_dir = Path(__file__).resolve().parent.parent
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
 
 import induce  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
@@ -101,6 +102,50 @@ def load_sessions(path: Path) -> list[dict[str, Any]]:
     if isinstance(raw, dict):
         return [raw]
     raise ValueError("JSON root must be an array of sessions or a single session object")
+
+
+def session_trajectory(session: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Flat per-step trajectory with ``actor`` and ``environment``.
+
+    Legacy exports use top-level ``trajectory``. Current exports use ``task_units``: each unit
+    has unit-level ``environment`` (end-of-turn) and step rows without per-step environment.
+    The unit environment is attached only to that unit's last step so file snapshots match
+    post-turn state and trajectory indices align with unit boundaries.
+    """
+    raw = session.get("trajectory")
+    if isinstance(raw, list) and raw:
+        return [x for x in raw if isinstance(x, dict)]
+
+    units = session.get("task_units")
+    if not isinstance(units, list):
+        return []
+
+    merged: list[dict[str, Any]] = []
+    env_carry: dict[str, Any] | None = None
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        actor = str(unit.get("actor") or "user")
+        unit_env = unit.get("environment")
+        if isinstance(unit_env, dict):
+            env_carry = unit_env
+        traj = unit.get("trajectory")
+        if not isinstance(traj, list):
+            continue
+        for step_idx, step in enumerate(traj):
+            if not isinstance(step, dict):
+                continue
+            row = dict(step)
+            row["actor"] = actor
+            step_env = step.get("environment")
+            if isinstance(step_env, dict):
+                row["environment"] = step_env
+                env_carry = step_env
+            elif step_idx == len(traj) - 1 and env_carry is not None:
+                row["environment"] = env_carry
+            merged.append(row)
+    return merged
 
 
 def find_session(sessions: list[dict[str, Any]], session_id: str | None) -> dict[str, Any]:
@@ -546,9 +591,9 @@ def rate_session(
     dry_run: bool,
     max_versions: int | None,
 ) -> dict[str, Any]:
-    traj = session.get("trajectory")
-    if not isinstance(traj, list):
-        raise ValueError("session has no trajectory list")
+    traj = session_trajectory(session)
+    if not traj:
+        raise ValueError("session has no trajectory or task_units")
 
     wf = last_workflow_in_trajectory(traj)
     if not wf:

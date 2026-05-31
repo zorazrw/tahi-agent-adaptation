@@ -26,6 +26,7 @@ import {
   readStoredTinkerProviderConfig,
 } from "./tinker-config.js";
 import { emitLlmDebug } from "./llm-debug.js";
+import { assistantTextForDisplay } from "../../lib/assistant-display-sanitize.js";
 
 type BridgeTextPart = { type: "text"; text: string };
 type BridgeThinkingPart = { type: "thinking"; thinking: string };
@@ -447,13 +448,16 @@ function bridgeMessageToPiContent(message: BridgeMessage | undefined): Assistant
 
   const blocks: AssistantMessage["content"] = [];
   if (typeof message.content === "string") {
-    if (message.content) {
-      blocks.push({ type: "text", text: message.content });
+    const text = assistantTextForDisplay(message.content);
+    if (text) {
+      blocks.push({ type: "text", text });
     }
   } else if (Array.isArray(message.content)) {
     for (const part of message.content) {
       if (part.type === "text" && part.text) {
-        blocks.push({ type: "text", text: part.text });
+        const text = assistantTextForDisplay(part.text);
+        if (!text) continue;
+        blocks.push({ type: "text", text });
       } else if (part.type === "thinking" && part.thinking) {
         blocks.push({ type: "thinking", thinking: part.thinking });
       }

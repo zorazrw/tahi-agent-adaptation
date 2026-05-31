@@ -19,7 +19,7 @@ import type {
   TinkerProviderConfig,
   TinkerProviderInput,
 } from "../types.js";
-import { getAppSkillsDir } from "./skill-store.js";
+import { getSkillLoaderPaths } from "./skill-store.js";
 import { loadApiConfig } from "./config-store.js";
 import {
   TINKER_PROVIDER,
@@ -203,6 +203,8 @@ export async function createPiResourceLoader(
   cwd: string,
   options?: {
     appendSystemPrompt?: string;
+    /** When set (new-task category), load only ``{stem}.md`` skill mirror. */
+    expertiseTask?: string;
   }
 ) {
   const { agentDir, settingsManager } = createPiManagers(cwd);
@@ -210,7 +212,7 @@ export async function createPiResourceLoader(
     cwd,
     agentDir,
     settingsManager,
-    additionalSkillPaths: [getAppSkillsDir()],
+    additionalSkillPaths: getSkillLoaderPaths(options?.expertiseTask),
     appendSystemPrompt: options?.appendSystemPrompt,
   });
   await resourceLoader.reload();

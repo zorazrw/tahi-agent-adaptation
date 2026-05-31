@@ -28,8 +28,10 @@ import {
 } from "./workflow-plan-recovery.js";
 import {
   EXECUTION_CONTEXT_MAX_ACTIONS,
+  promptWithExecutionContextRetry,
   trimSessionToLastAgentActions,
 } from "./session-context-trim.js";
+import { assistantTextForDisplay } from "../../lib/assistant-display-sanitize.js";
 
 export type RunnerOptions = {
   prompt: string;
@@ -53,7 +55,7 @@ const WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT = [
   "Each main step must have a visually verifiable output: use outputFiles or clear verifiers.",
   "You may add children to break a main step into detailed sub-steps when useful.",
   "Do NOT add separate validation/testing steps. Express checks inside each step's verifiers.",
-  "Keep descriptions short but complete. Each node needs description, outputFiles, verifiers, and optional children.",
+  "Keep each step description to 15 words or fewer. Each node needs description, outputFiles, verifiers, and optional children.",
   "Prefer .md for document-style outputs when markdown preview is useful.",
   "After calling workflow_plan, STOP. Do not execute any steps yourself.",
   "The human operator will trigger each step individually.",
@@ -154,7 +156,9 @@ function normalizeAssistantBlocks(message: Record<string, unknown>, includeToolU
   for (const block of content) {
     if (!block || typeof block !== "object" || !("type" in block)) continue;
     if (block.type === "text" && "text" in block) {
-      blocks.push({ type: "text", text: String(block.text ?? "") });
+      const text = assistantTextForDisplay(String(block.text ?? ""));
+      if (!text) continue;
+      blocks.push({ type: "text", text });
     } else if (block.type === "thinking" && "thinking" in block) {
       blocks.push({ type: "thinking", thinking: String(block.thinking ?? "") });
     } else if (includeToolUses && block.type === "toolCall") {
@@ -432,11 +436,12 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     // This stays correct even if model/provider switches change session-file behavior.
     const shouldForceWorkflowPlan = regenerateWorkflow || !hasExistingWorkflowPlan(session);
     const promptToSend = regenerateWorkflow ? prompt : buildPromptForQuery(prompt, shouldForceWorkflowPlan);
-    const memoryBlock = readMemoryForPrompt().trimEnd();
+    const memoryBlock = readMemoryForPrompt(session.expertiseTask).trimEnd();
     const workflowAppend = shouldForceWorkflowPlan ? WORKFLOW_PLAN_APPEND_SYSTEM_PROMPT : "";
     const appendSystemPrompt = [memoryBlock, workflowAppend].filter(Boolean).join("\n\n") || undefined;
     const resourceLoader = await createPiResourceLoader(cwd, {
       appendSystemPrompt,
+      expertiseTask: session.expertiseTask,
     });
     let planRegistered = false;
     let lastUsage: Record<string, unknown> | undefined;
@@ -647,7 +652,15 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           },
         },
         async () => {
-          await piSession.prompt(promptToSend);
+          if (trimExecutionContextToLastActions != null && trimExecutionContextToLastActions > 0) {
+            await promptWithExecutionContextRetry(
+              piSession,
+              promptToSend,
+              trimExecutionContextToLastActions
+            );
+          } else {
+            await piSession.prompt(promptToSend);
+          }
         },
       );
 

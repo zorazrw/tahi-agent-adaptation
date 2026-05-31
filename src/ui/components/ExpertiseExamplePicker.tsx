@@ -13,6 +13,8 @@ const selectClass =
 
 export function ExpertiseExamplePicker() {
   const setPrompt = useAppStore((s) => s.setPrompt);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const setExpertiseTaskCategory = useAppStore((s) => s.setExpertiseTaskCategory);
 
   const [taskCategory, setTaskCategory] = useState<ExpertiseTaskCategory | "">("");
   const [instructionId, setInstructionId] = useState<number | "">("");
@@ -30,10 +32,21 @@ export function ExpertiseExamplePicker() {
     [setPrompt],
   );
 
+  const syncExpertiseTask = (category: ExpertiseTaskCategory | "") => {
+    setExpertiseTaskCategory(category || null);
+    if (activeSessionId && typeof window !== "undefined" && window.electron?.sendClientEvent) {
+      window.electron.sendClientEvent({
+        type: "session.setExpertiseTask",
+        payload: { sessionId: activeSessionId, expertiseTask: category || null },
+      });
+    }
+  };
+
   const handleTaskChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const next = e.target.value as ExpertiseTaskCategory | "";
     setTaskCategory(next);
     setInstructionId("");
+    syncExpertiseTask(next);
   };
 
   const handleInstructionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
