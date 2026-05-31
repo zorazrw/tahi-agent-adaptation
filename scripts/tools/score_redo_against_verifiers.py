@@ -209,8 +209,15 @@ def _interpret_results(text: str, n: int) -> list[bool | None]:
     out: list[bool | None] = [None] * n
     for i in range(min(n, len(arr))):
         row = arr[i]
+        if isinstance(row, bool):
+            out[i] = row
+            continue
         if isinstance(row, dict) and "pass" in row:
-            out[i] = bool(row["pass"])
+            value = row["pass"]
+            if isinstance(value, bool):
+                out[i] = value
+            elif isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+                out[i] = value.strip().lower() == "true"
     return out
 
 
