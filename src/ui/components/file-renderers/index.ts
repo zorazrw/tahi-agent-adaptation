@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import { TextRenderer } from "./TextRenderer";
 import { SpreadsheetRenderer } from "./SpreadsheetRenderer";
+import { XlsHtmlRenderer } from "./XlsHtmlRenderer";
 import { DocxRenderer } from "./DocxRenderer";
 import { ImageRenderer } from "./ImageRenderer";
 import { PdfRenderer } from "./PdfRenderer";
@@ -37,14 +38,16 @@ export type EditableRendererProps = {
   reloadKey?: number;
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type RendererComponent = ComponentType<
+  // Renderer data is discriminated by `kind`; the registry keeps the shared chrome props typed.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   { data: any; zoom?: number } & EditableRendererProps
 >;
 
 const renderers: Record<string, RendererComponent> = {
   txt: TextRenderer,
   xlsx: SpreadsheetRenderer,
+  xls: XlsHtmlRenderer,
   docx: DocxRenderer,
   image: ImageRenderer,
   pdf: PdfRenderer,

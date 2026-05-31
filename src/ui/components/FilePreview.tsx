@@ -70,7 +70,8 @@ export function getPreviewFileForStep(
 
 type PreviewFileResult =
   | { kind: "txt"; content: string }
-  | { kind: "xlsx"; sheets: { name: string; html: string }[] }
+  | { kind: "xlsx"; model: import("../../lib/xlsx-model").XlsxModel }
+  | { kind: "xls"; sheets: { name: string; html: string }[] }
   | { kind: "docx"; data: string }
   | { kind: "image"; dataUrl: string }
   | { kind: "pdf"; data: string }
@@ -107,7 +108,15 @@ function getCopyableContent(result: PreviewFileResult | null): string | null {
 
 function canUseHeaderSave(result: PreviewFileResult | null): boolean {
   if (!result || "error" in result) return false;
-  return result.kind === "txt" || result.kind === "md" || result.kind === "code" || result.kind === "csv" || result.kind === "json" || result.kind === "html";
+  return (
+    result.kind === "txt" ||
+    result.kind === "md" ||
+    result.kind === "code" ||
+    result.kind === "csv" ||
+    result.kind === "json" ||
+    result.kind === "html" ||
+    result.kind === "xlsx"
+  );
 }
 
 type FilePreviewProps = {

@@ -61,6 +61,8 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("preview-file", filePath, cwd ?? undefined),
     writeFile: (filePath: string, cwd?: string | null, content?: string, sessionId?: string | null) =>
         ipcInvoke("write-file", filePath, cwd ?? undefined, content ?? "", sessionId ?? undefined),
+    writeXlsx: (filePath: string, cwd?: string | null, model?: import("../lib/xlsx-model.js").XlsxModel, sessionId?: string | null) =>
+        ipcInvoke("write-xlsx", filePath, cwd ?? undefined, model, sessionId ?? undefined),
     listSkills: () =>
         ipcInvoke("list-skills"),
     removeSkill: (dirName: string) =>
