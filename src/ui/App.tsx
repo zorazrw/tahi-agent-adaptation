@@ -385,7 +385,7 @@ function App() {
   const brainBusy = contextInductionDepth > 0 || brainInductionPending;
   const brainTitle = brainBusy
     ? autoInductionOn
-      ? "Updating memories and skills from the last completed step…"
+      ? "Updating memories and skills…"
       : "Uploading session for model training…"
     : autoInductionOn
       ? "Brain — click to run context update, double-click to edit memory and skill .md files"

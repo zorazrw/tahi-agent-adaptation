@@ -296,7 +296,7 @@ export async function exportSessionJsonFile(
 
 /**
  * Export the current session from SQLite and run induce.py (memories + flat skills).
- * Called after each completed workflow step when auto-induction is on.
+ * Triggered only by a manual brain single-click (session.runContextInduction).
  */
 export function runFullSessionExportAndExtract(sessionId: string): void {
   const root = scriptsRootDir();
