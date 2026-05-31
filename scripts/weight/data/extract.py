@@ -1164,6 +1164,92 @@ def extract_opd_examples_v2(
     return examples
 
 
+def _first_user_message_text(session: dict) -> str | None:
+    """Leading user-turn text across the session's agent trajectories."""
+    for task in session.get("task_units") or []:
+        for traj in task.get("agent_trajectories") or []:
+            for m in traj.get("messages") or []:
+                if isinstance(m, dict) and m.get("role") == "user":
+                    content = m.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return content
+    return None
+
+
+def extract_opd_examples_agentic(
+    sessions: list[dict],
+    renderer: Any | None = None,  # noqa: ARG001 - accepted for API parity
+    *,
+    redo_message: str = OPD_REDO_MESSAGE,  # noqa: ARG001 - applied downstream
+) -> list[dict[str, Any]]:
+    """One example per session for agentic on-policy OPD.
+
+    Unlike v1/v2 (which emit a historical completion per task unit), the
+    agentic record carries only the *seed* for an on-policy rollout: the
+    session's initial task plus its ``system_prompt`` and ``tool_schemas``.
+    The student trajectory is generated live at train time (multi-turn, with
+    live tool results); the teacher prompt splices the session's cumulative
+    user follow-ups (the privileged signal) before the restated initial task,
+    mirroring v2's redo paradigm (see :func:`_build_teacher_prompt_chat` and
+    :data:`OPD_REDO_MESSAGE`).
+
+    Fields per record:
+      - ``prompt_messages``: ``[{"role": "user", "content": initial_task}]``
+        (no tools prefix; the rollout/teacher builders inject it from
+        ``system_prompt`` + ``tool_schemas`` so advertised schemas match the
+        chat template the model was trained under).
+      - ``system_prompt`` / ``tool_schemas``: passthrough from the session.
+      - ``golden_chat``: cumulative ``follow_up`` user turns for the teacher.
+      - ``meta``: ``{session_uuid, n_followups}``.
+
+    ``redo_message`` is accepted for API parity but applied downstream when the
+    teacher messages are assembled post-rollout.
+    """
+    examples: list[dict[str, Any]] = []
+    for session in sessions:
+        system_prompt = session.get("system_prompt", "") or ""
+        tool_schemas = session.get("tool_schemas")
+        session_uuid = session.get("uuid")
+
+        initial_task = session.get("initial_task_instruction")
+        if not (isinstance(initial_task, str) and initial_task.strip()):
+            initial_task = _first_user_message_text(session)
+        if not (isinstance(initial_task, str) and initial_task.strip()):
+            # No user anchor to seed the rollout; skip this session.
+            continue
+
+        tasks = session.get("task_units") or []
+        per_task_humans = _normalized_humans_per_task(tasks)
+        cumulative_humans = _cumulative_humans_from(per_task_humans)
+        all_followups = cumulative_humans[0] if cumulative_humans else []
+        followup_texts = [
+            a["prompt"].strip()
+            for a in all_followups
+            if isinstance(a, dict)
+            and a.get("type") == "follow_up"
+            and isinstance(a.get("prompt"), str)
+            and a["prompt"].strip()
+        ]
+        golden_chat = [{"role": "user", "content": text} for text in followup_texts]
+        # No follow-ups => no privileged signal to distil toward (distilling the
+        # student toward the frozen base on an identical prompt is a no-op at
+        # best). Drop, mirroring v2's empty-golden filtering.
+        if not golden_chat:
+            continue
+
+        examples.append({
+            "prompt_messages": [{"role": "user", "content": initial_task.strip()}],
+            "system_prompt": system_prompt,
+            "tool_schemas": tool_schemas,
+            "golden_chat": golden_chat,
+            "meta": {
+                "session_uuid": session_uuid,
+                "n_followups": len(golden_chat),
+            },
+        })
+    return examples
+
+
 # ---------------------------------------------------------------------------
 # REINFORCE extraction
 # ---------------------------------------------------------------------------

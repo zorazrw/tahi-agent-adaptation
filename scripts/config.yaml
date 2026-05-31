@@ -1,5 +1,5 @@
 # -- Mode --
-mode: dpo  # "dpo", "opd", or "reinforce"
+mode: opd  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
 temperature: 0.3
@@ -12,8 +12,8 @@ update_every_n_sessions: 1
 lora_rank: 64
 dry_run: false
 learning_rate: 5.0e-5
-num_epochs: 6
-batch_size: 8
+num_epochs: 1
+batch_size: 1
 lr_schedule: cosine
 max_steps: null
 max_length: null
@@ -41,10 +41,23 @@ opd_log_teacher_prompts: true
 # Set true only for a prompt-control upper-bound experiment. Default false keeps
 # train-time rollout prompts matched to normal inference prompts.
 opd_artifact_only_rollout_instruction: false
-opd_extract_version: v2  # "v1" (file-centric, needs per-round output_files)
+opd_extract_version: agentic  # "v1" (file-centric, needs per-round output_files)
                          # "v2" (per-assistant-message)
+                         # "agentic" (on-policy multi-turn tool-using rollout per
+                         #   session in a live sandbox: a planning turn plus one
+                         #   "Proceed with: <step>" user turn per step the model
+                         #   itself planned; teacher prompt augmented with the
+                         #   session's follow-ups)
 opd_strip_thinking_from_history: false
 opd_rollout_pipeline: current
+
+# -- OPD agentic mode (only used when opd_extract_version: agentic) --
+opd_agentic_max_turns: 48            # overall safety ceiling on assistant turns per episode
+opd_agentic_max_turns_per_step: 8    # inner agent-loop cap within a single planned step
+opd_agentic_max_steps: 6             # max planned (leaf) steps replayed as "Proceed with" turns
+opd_agentic_enable_bash: true        # allow the bash tool (runs on the server host)
+opd_agentic_tool_timeout_s: 20       # per-bash-command timeout
+opd_agentic_max_trajectory_tokens:   # null = no cap; else stop the rollout near this many tokens
 
 # -- REINFORCE-specific --
 reward_alpha: 0.05
