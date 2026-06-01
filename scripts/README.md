@@ -41,30 +41,17 @@ python scripts/tasks/export_task_sessions.py -o out_weight.json
 
 ## Session file snapshots → GIF
 
-`session_file_versions_to_gif.py` walks one exported session’s trajectory, collects **unique** non-null contents for a given workspace file key (e.g. `webarena_trend.html` from `environment.file`), writes them as `0.html`, `1.html`, …, then renders frames with Playwright and builds a palette-optimized GIF with **ffmpeg**.
+`tools/session_file_versions_to_gif.py` builds animated GIFs from **`.html` / `.png`** snapshot histories in a session (skips `.py` and other text). Discovers visual files automatically; `-o` is the output **`.gif`** path. HTML uses Playwright; PNG uses embedded/base64 bytes when present.
 
 **Dependencies:** `pip install playwright`, `playwright install chromium`, and `ffmpeg` on your PATH.
 
-**Usage:**
-
 ```bash
-# From repo root (default JSON: scripts/out.json)
-python scripts/session_file_versions_to_gif.py \
-  --session <uuid> \
-  --file webarena_trend.html
+python scripts/tools/session_file_versions_to_gif.py \
+  -j sessions/export.json -s <uuid> -o chart.gif
 
-# Custom export path and output directory
-python scripts/session_file_versions_to_gif.py \
-  -j path/to/sessions.json \
-  -s <uuid> \
-  -f chart.html \
-  -o ./my-output
-
-# Only extract numbered HTML files (no Playwright / ffmpeg)
-python scripts/session_file_versions_to_gif.py -s <uuid> -f chart.html --html-only
+# One GIF per visual artifact (e.g. report.html → ./report.gif)
+python scripts/tools/session_file_versions_to_gif.py -j sessions/export.json -s <uuid>
 ```
-
-See `python scripts/session_file_versions_to_gif.py --help` for viewport, FPS, step label, and scaling options.
 
 ## Context-Based Update
 
@@ -151,18 +138,15 @@ The server persists the model registry, latest model path, and latest model-upda
 
 ## Scoring Redo Sessions
 
+Build a rubric catalog from baseline exports, then grade a redo session:
+
 ```bash
+python scripts/tools/extract_verifiers.py scripts/sessions -o scripts/verifiers.json
 
-# Score a redo session's final outputs against final verifiers from baseline export
-python scripts/tools/score_redo_against_verifiers.py \
-  --verifiers-json out.json \
-  --outputs-json out_redo.json \
-  --task task2
-
-# Optional: print full request blocks (text + image metadata) before model call
-python scripts/tools/score_redo_against_verifiers.py \
-  --verifiers-json out.json \
-  --outputs-json out_redo.json \
-  --task task2 \
-  --debug-prompts
+python scripts/tools/grade_redo.py \
+  -j scripts/runs/headless_dpo_eval/task_001/session.json \
+  --verifiers scripts/verifiers.json \
+  --log-file grade_report.txt
 ```
+
+See `scripts/tools/README.md` for options (`--dry-run`, `--json-out`, `--model`, etc.).
