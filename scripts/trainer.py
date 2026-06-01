@@ -24,14 +24,18 @@ try:
         Config as REINFORCEConfig,
         make_reinforce_loss_fn,
         print_example as _REINFORCE_print_example,
+        _sample_agentic_reinforce_async,
         _save_baseline_state,
+        train_reinforce_batch_async,
     )
     REINFORCE_IMPORT_ERROR: Exception | None = None
 except Exception as e:  # noqa: BLE001
     REINFORCEConfig = Any
     make_reinforce_loss_fn = None
     _REINFORCE_print_example = None
+    _sample_agentic_reinforce_async = None
     _save_baseline_state = None
+    train_reinforce_batch_async = None
     REINFORCE_IMPORT_ERROR = e
 
 try:
@@ -99,17 +103,10 @@ class Trainer():
 
 
 class REINFORCETrainer(Trainer):
-    """Long-lived online REINFORCE trainer.
+    """Long-lived REINFORCE trainer (offline or online agentic rollout).
 
-    Mirrors the structure of :class:`DPOTrainer` but with REINFORCE-specific
-    state:
-
-    * No reference sampling client -- variance reduction comes from a running
-      baseline (the mean reward of the previous batch) rather than a KL term.
-    * Per-trajectory rewards are read from the dataset via
-      ``get_batch_rewards``; advantages are ``R_j - baseline``.
-    * ``self.baseline`` persists across ``do_update`` calls so the first batch
-      of a new round reuses the last round's average reward.
+    * ``reinforce_version="offline"``: rewards from ``get_batch_rewards``.
+    * ``reinforce_version="online"``: on-policy rollouts + sandbox LLM rubric.
     """
 
     def __init__(
@@ -126,6 +123,7 @@ class REINFORCETrainer(Trainer):
         self.config = config
         self.training_client = training_client
         self.service_client = service_client
+        self.is_online = config.reinforce_version == "online"
         self.ml_logger = ml_log.setup_logging(
             log_dir=config.log_path,
             wandb_project=config.wandb_project,
@@ -135,6 +133,11 @@ class REINFORCETrainer(Trainer):
         )
         self.log_path = config.log_path
         self.tokenizer = get_tokenizer(config.model_name)
+        self.sampling_client: tinker.SamplingClient | None = None
+        if self.is_online:
+            assert config.renderer_name is not None, "Online REINFORCE requires renderer_name"
+            self.renderer = renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
+            self.logger.info("REINFORCE trainer: online agentic rollout mode")
 
         self.rolling_mgr = checkpoint_utils.RollingCheckpointManager(
             training_client=training_client,
@@ -162,18 +165,22 @@ class REINFORCETrainer(Trainer):
             )
             trace.trace_init(output_file=trace_events_path)
 
+    async def _ensure_sampling_client(self) -> None:
+        if self.sampling_client is None:
+            self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
+                self.training_client,
+                self.step_idx,
+                self.config.log_path,
+                self.config.save_every,
+            )
+
     async def do_update(
         self,
         dataset: SupervisedDataset,
     ) -> TrainingCheckpoint:
-        """Run ``num_epochs`` passes over ``dataset`` and save a checkpoint.
-
-        The dataset is expected to expose ``get_batch(i)`` (standard
-        ``SupervisedDataset`` interface) as well as ``get_batch_rewards(i)``,
-        which :class:`weight.train.formatter._ReinforceDataset` provides.
-
-        Returns sampler and state paths for the final checkpoint produced this round.
-        """
+        """Run ``num_epochs`` passes over ``dataset`` and save a checkpoint."""
+        if self.is_online:
+            await self._ensure_sampling_client()
         self.round_idx += 1
         n_batches = len(dataset)
         round_start_step = self.step_idx
@@ -232,13 +239,7 @@ class REINFORCETrainer(Trainer):
         batch_idx: int,
         dataset: SupervisedDataset,
     ):
-        """Perform a single REINFORCE training update step.
-
-        Handles periodic checkpointing, baseline-state persistence, the
-        forward-backward pass with the REINFORCE loss (``-A_j * seq_logprob_j``),
-        the optimizer step, and metric logging for one batch. Also updates
-        ``self.baseline`` to the mean reward of the processed batch.
-        """
+        """Perform a single REINFORCE training update step."""
         step = self.step_idx
         metrics: dict[str, int | float | str] = {
             "round": self.round_idx,
@@ -246,73 +247,91 @@ class REINFORCETrainer(Trainer):
         }
 
         with trace.trace_iteration(step=step) as window:
-            # Mirror the offline script's behavior so baseline state on disk
-            # tracks the same (epoch, batch) position checkpoint_utils records.
             _save_baseline_state(self.log_path, epoch_idx, batch_idx, self.baseline)
 
-            # Save checkpoint if needed
-            if self.config.save_every > 0 and step % self.config.save_every == 0 and step > 0:
-                with trace.scope_span_sync("save_checkpoint"):
-                    save_result = await checkpoint_utils.save_checkpoint_async(
-                        training_client=self.training_client,
-                        name=f"{step:06d}",
-                        log_path=self.log_path,
-                        kind="both",
-                        loop_state={"epoch": epoch_idx, "batch": batch_idx},
-                        ttl_seconds=self.config.ttl_seconds,
-                    )
-                if "state_path" in save_result:
-                    metrics["state_path"] = save_result["state_path"]
+            # Mid-step Tinker checkpoints omitted (same as OPDTrainer); only the
+            # end-of-round save below is used for model swap.
 
             if self.rolling_mgr is not None:
                 self.rolling_mgr.maybe_save(step=step, loop_state={"epoch": epoch_idx, "batch": batch_idx})
 
-            learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
-                lr_schedule=self.config.lr_schedule, step=step, total_steps=self.total_steps
-            )
-            adam_params = tinker.AdamParams(
-                learning_rate=learning_rate,
-                beta1=self.config.adam_beta1,
-                beta2=self.config.adam_beta2,
-                eps=self.config.adam_eps,
-            )
-
-            # Prepare batch (data + per-trajectory rewards)
-            with trace.scope_span_sync("get_batch"):
-                data = dataset.get_batch(batch_idx)
-                rewards = dataset.get_batch_rewards(batch_idx)
-
-            # Print a few examples on the very first step of the trainer's life
-            if step == 0:
-                for i in range(min(3, len(data))):
-                    _REINFORCE_print_example(
-                        data[i], self.tokenizer, f"Example {i} (reward={rewards[i]:.3f})"
+            if self.is_online:
+                assert self.sampling_client is not None
+                async with trace.scope_span("sample"):
+                    rows = dataset.get_batch(batch_idx)
+                    data, rewards, rollout_metrics = await _sample_agentic_reinforce_async(
+                        rows,
+                        self.renderer,
+                        self.sampling_client,
+                        max_tokens=self.config.rollout_max_tokens,
+                        temperature=self.config.rollout_temperature,
+                        max_turns=self.config.agentic_max_turns,
+                        max_turns_per_step=self.config.agentic_max_turns_per_step,
+                        max_steps=self.config.agentic_max_steps,
+                        enable_bash=self.config.agentic_enable_bash,
+                        tool_timeout_s=self.config.agentic_tool_timeout_s,
+                        max_trajectory_tokens=self.config.agentic_max_trajectory_tokens,
+                        max_length=self.config.max_length,
+                        step=step,
+                        sample_log_path=(
+                            Path(self.config.log_path) / "reinforce_rollout_samples.jsonl"
+                            if self.config.log_rollout_samples else None
+                        ),
+                        sample_log_chars=self.config.rollout_sample_log_chars,
                     )
+                metrics.update(rollout_metrics)
 
-            # A_j = R_j - baseline, using the baseline from before this step
-            advantages = [r - self.baseline for r in rewards]
-            loss_fn = make_reinforce_loss_fn(advantages)
+                if not data:
+                    learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
+                        lr_schedule=self.config.lr_schedule,
+                        step=step,
+                        total_steps=self.total_steps,
+                    )
+                    metrics.update(
+                        {
+                            "reinforce_online/no_valid_batch": 1.0,
+                            "learning_rate": learning_rate,
+                            "progress": step / max(self.total_steps, 1),
+                        }
+                    )
+                    self.ml_logger.log_metrics(metrics=metrics, step=step)
+                    self.logger.warning(
+                        "Skipping REINFORCE step %d: no valid rollout samples (filter_rate=%.3f)",
+                        step,
+                        rollout_metrics.get("reinforce_online/filter_rate", 0.0),
+                    )
+                    self.step_idx += 1
+                    return
+            else:
+                with trace.scope_span_sync("get_batch"):
+                    data = dataset.get_batch(batch_idx)
+                    rewards = dataset.get_batch_rewards(batch_idx)
+
+                if step == 0:
+                    for i in range(min(3, len(data))):
+                        _REINFORCE_print_example(
+                            data[i], self.tokenizer, f"Example {i} (reward={rewards[i]:.3f})"
+                        )
 
             async with trace.scope_span("step"):
-                fb_future = await self.training_client.forward_backward_custom_async(data, loss_fn)
-                backward_result = await fb_future.result_async()
-                reinforce_metrics = backward_result.metrics
-                optim_future = await self.training_client.optim_step_async(adam_params)
-                await optim_future.result_async()
+                train_metrics, self.baseline = await train_reinforce_batch_async(
+                    training_client=self.training_client,
+                    datums=data,
+                    rewards=rewards,
+                    baseline=self.baseline,
+                    config=self.config,
+                    step=step,
+                    total_steps=self.total_steps,
+                )
+            metrics.update(train_metrics)
 
-            # Update baseline to the mean reward of this batch for the next step
-            new_baseline = sum(rewards) / len(rewards) if rewards else self.baseline
-            self.baseline = new_baseline
-
-            metrics.update(
-                num_trajectories=len(data),
-                num_tokens=sum(datum.model_input.length for datum in data),
-                learning_rate=learning_rate,
-                progress=step / self.total_steps,
-                baseline=new_baseline,
-                mean_reward=sum(rewards) / len(rewards) if rewards else 0.0,
-                **reinforce_metrics,
-            )
+            if self.is_online:
+                self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
+                    self.training_client,
+                    self.step_idx + 1,
+                    self.config.log_path,
+                    self.config.save_every,
+                )
 
         # Log timing metrics from trace_iteration window
         metrics.update(window.get_timing_metrics())

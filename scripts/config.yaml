@@ -1,5 +1,5 @@
 # -- Mode --
-mode: opd  # "dpo", "opd", or "reinforce"
+mode: reinforce  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
 temperature: 0.3
@@ -60,8 +60,23 @@ opd_agentic_tool_timeout_s: 20       # per-bash-command timeout
 opd_agentic_max_trajectory_tokens:   # null = no cap; else stop the rollout near this many tokens
 
 # -- REINFORCE-specific --
+reinforce_version: online  # "offline" (logged trajectories + cached rubric rewards)
+                         # "online" (on-policy agentic rollout per session in a live
+                         #   sandbox; LLM rubric grades final filesystem state)
 reward_alpha: 0.05
 initial_baseline: 0.0
+
+# -- REINFORCE online mode (only used when reinforce_version: online) --
+reinforce_rollout_max_tokens: 4096
+reinforce_rollout_temperature: 1.0
+reinforce_agentic_max_turns: 48
+reinforce_agentic_max_turns_per_step: 8
+reinforce_agentic_max_steps: 6
+reinforce_agentic_enable_bash: true
+reinforce_agentic_tool_timeout_s: 20
+reinforce_agentic_max_trajectory_tokens: null
+reinforce_log_rollout_samples: true
+reinforce_rollout_sample_log_chars: 4000
 
 # -- Logging --
 wandb_project: null

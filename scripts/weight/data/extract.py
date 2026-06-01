@@ -1250,6 +1250,44 @@ def extract_opd_examples_agentic(
     return examples
 
 
+def extract_reinforce_rollout_seeds(
+    sessions: list[dict],
+    renderer: Any | None = None,  # noqa: ARG001 - API parity with other extractors
+) -> list[dict[str, Any]]:
+    """One rollout seed per session for on-policy REINFORCE (no teacher / follow-ups).
+
+    Same live multi-turn agentic rollout as OPD agentic; reward is computed after
+    the episode from the sandbox filesystem (see ``compute_llm_rubric_file_blocks``).
+    """
+    examples: list[dict[str, Any]] = []
+    for session in sessions:
+        system_prompt = session.get("system_prompt", "") or ""
+        tool_schemas = session.get("tool_schemas")
+
+        initial_task = session.get("initial_task_instruction")
+        if not (isinstance(initial_task, str) and initial_task.strip()):
+            initial_task = _first_user_message_text(session)
+        if not (isinstance(initial_task, str) and initial_task.strip()):
+            continue
+
+        task_units = session.get("task_units") or []
+        verifiers = (task_units[-1].get("verifiers") or []) if task_units else []
+        rubrics = [
+            str(v["criterion"])
+            for v in verifiers
+            if isinstance(v, dict) and v.get("criterion")
+        ]
+
+        examples.append({
+            "prompt_messages": [{"role": "user", "content": initial_task.strip()}],
+            "system_prompt": system_prompt,
+            "tool_schemas": tool_schemas,
+            "rubrics": rubrics,
+            "meta": {"session_uuid": session.get("uuid"), "n_rubrics": len(rubrics)},
+        })
+    return examples
+
+
 # ---------------------------------------------------------------------------
 # REINFORCE extraction
 # ---------------------------------------------------------------------------
