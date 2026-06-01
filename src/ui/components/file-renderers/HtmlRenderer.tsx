@@ -33,6 +33,30 @@ type Props = { data: { kind: "html"; content: string } } & EditableRendererProps
 
 type HtmlVisualTool = "none" | "text" | "layout";
 
+type ContentSize = { w: number; h: number };
+
+/** Cheap fingerprint so iframe remounts when disk content changes (srcDoc-only updates are unreliable in Electron). */
+function hashPreviewContent(content: string): number {
+  let h = 0;
+  for (let i = 0; i < content.length; i++) {
+    h = (Math.imul(31, h) + content.charCodeAt(i)) | 0;
+  }
+  return h;
+}
+
+function previewIframeKey(reloadKey: number | undefined, content: string): string {
+  return `${reloadKey ?? 0}:${content.length}:${hashPreviewContent(content)}`;
+}
+
+function readIframeContentSize(doc: Document): ContentSize {
+  const root = doc.documentElement;
+  const body = doc.body;
+  return {
+    w: Math.max(root.scrollWidth, body?.scrollWidth ?? 0, root.offsetWidth, body?.offsetWidth ?? 0, 1),
+    h: Math.max(root.scrollHeight, body?.scrollHeight ?? 0, root.offsetHeight, body?.offsetHeight ?? 0, 1),
+  };
+}
+
 const previewToolbarMenuItemBtn =
   "flex size-9 items-center justify-center rounded text-ink-800 hover:bg-ink-900/8";
 const previewToolbarPopoverTriggerBtn =
@@ -128,6 +152,7 @@ export function HtmlRenderer({
   filePath,
   cwd,
   sessionId,
+  reloadKey,
   onReload,
   onHtmlVisualSaveChromeChange,
   onTextSaveChromeChange,
@@ -137,6 +162,8 @@ export function HtmlRenderer({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const iframeViewportRef = useRef<HTMLDivElement>(null);
   const previewCleanupRef = useRef<(() => void) | null>(null);
+  /** ResizeObserver / timers on the iframe document so fit-to-view updates after async layout (e.g. Chart.js). */
+  const previewLayoutFitCleanupRef = useRef<(() => void) | null>(null);
   const editContentRef = useRef(data.content);
   const fitRafRef = useRef<number | null>(null);
 
@@ -155,6 +182,8 @@ export function HtmlRenderer({
   const previewTextColorCustomInputRef = useRef<HTMLInputElement>(null);
   const [previewTextColor, setPreviewTextColor] = useState(PREVIEW_DEFAULT_TEXT_COLOR);
   const [fitScale, setFitScale] = useState(1);
+  const [contentSize, setContentSize] = useState<ContentSize | null>(null);
+  const contentSizeRef = useRef<ContentSize | null>(null);
 
   const visualDirtyRef = useRef(visualDirty);
   const visualSavingRef = useRef(visualSaving);
@@ -162,9 +191,26 @@ export function HtmlRenderer({
   visualSavingRef.current = visualSaving;
 
   const displayContent = canEdit ? editContent : data.content;
+  const iframeKey = previewIframeKey(reloadKey, displayContent);
 
   useEffect(() => {
     setEditContent(data.content);
+    editContentRef.current = data.content;
+    visualDirtyRef.current = false;
+    setVisualDirty(false);
+    setVisualSaveError(null);
+  }, [data.content, reloadKey]);
+
+  useEffect(() => {
+    const onDiscard = () => {
+      setEditContent(data.content);
+      editContentRef.current = data.content;
+      visualDirtyRef.current = false;
+      setVisualDirty(false);
+      setVisualSaveError(null);
+    };
+    window.addEventListener("preview-reload-discard", onDiscard);
+    return () => window.removeEventListener("preview-reload-discard", onDiscard);
   }, [data.content]);
 
   useEffect(() => {
@@ -184,10 +230,24 @@ export function HtmlRenderer({
   }, []);
 
   /**
-   * Fit rendered HTML into the preview viewport so users don't need two-axis scrolling.
-   * Uses a contain-style scale against the iframe document's full scroll size.
+   * Fit rendered HTML into the preview viewport. Content size is measured once (or when
+   * the document layout changes), then only scale is recomputed on viewport resize.
+   * Sizing the iframe as ``100/fitScale%`` caused a feedback loop: a smaller viewport
+   * lowered scale → wider iframe layout → larger scrollWidth → lower scale again.
    */
-  const syncPreviewFitScale = useCallback(() => {
+  const recomputeFitScaleFromViewport = useCallback(
+    (size: ContentSize) => {
+      const viewport = iframeViewportRef.current;
+      if (!viewport || mode !== "preview") return;
+      const vw = Math.max(1, viewport.clientWidth);
+      const vh = Math.max(1, viewport.clientHeight);
+      const next = Math.min(1, vw / size.w, vh / size.h);
+      setFitScale(Number.isFinite(next) ? Math.max(0.05, +next.toFixed(4)) : 1);
+    },
+    [mode]
+  );
+
+  const remeasureContentAndFit = useCallback(() => {
     const frame = iframeRef.current;
     const viewport = iframeViewportRef.current;
     const doc = frame?.contentDocument;
@@ -195,38 +255,33 @@ export function HtmlRenderer({
       setFitScale(1);
       return;
     }
-    const vw = Math.max(1, viewport.clientWidth);
-    const vh = Math.max(1, viewport.clientHeight);
-    const root = doc.documentElement;
-    const body = doc.body;
-    const contentW = Math.max(
-      root.scrollWidth,
-      body?.scrollWidth ?? 0,
-      root.offsetWidth,
-      body?.offsetWidth ?? 0
-    );
-    const contentH = Math.max(
-      root.scrollHeight,
-      body?.scrollHeight ?? 0,
-      root.offsetHeight,
-      body?.offsetHeight ?? 0
-    );
-    const safeW = Math.max(1, contentW);
-    const safeH = Math.max(1, contentH);
-    const next = Math.min(1, vw / safeW, vh / safeH);
-    const rounded = Number.isFinite(next) ? Math.max(0.05, +next.toFixed(4)) : 1;
-    setFitScale(rounded);
-  }, [mode]);
+    const size = readIframeContentSize(doc);
+    contentSizeRef.current = size;
+    setContentSize(size);
+    recomputeFitScaleFromViewport(size);
+  }, [mode, recomputeFitScaleFromViewport]);
 
-  const schedulePreviewFitScale = useCallback(() => {
+  const scheduleRemeasureContentAndFit = useCallback(() => {
     if (fitRafRef.current != null) {
       cancelAnimationFrame(fitRafRef.current);
     }
     fitRafRef.current = requestAnimationFrame(() => {
       fitRafRef.current = null;
-      syncPreviewFitScale();
+      remeasureContentAndFit();
     });
-  }, [syncPreviewFitScale]);
+  }, [remeasureContentAndFit]);
+
+  const scheduleViewportFit = useCallback(() => {
+    if (fitRafRef.current != null) {
+      cancelAnimationFrame(fitRafRef.current);
+    }
+    fitRafRef.current = requestAnimationFrame(() => {
+      fitRafRef.current = null;
+      const size = contentSizeRef.current;
+      if (size) recomputeFitScaleFromViewport(size);
+      else remeasureContentAndFit();
+    });
+  }, [remeasureContentAndFit, recomputeFitScaleFromViewport]);
 
   const markVisualDirtyFromDoc = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
@@ -234,8 +289,8 @@ export function HtmlRenderer({
     const dirty = serializeIframeDocument(doc) !== editContentRef.current;
     visualDirtyRef.current = dirty;
     setVisualDirty(dirty);
-    schedulePreviewFitScale();
-  }, [schedulePreviewFitScale]);
+    scheduleRemeasureContentAndFit();
+  }, [scheduleRemeasureContentAndFit]);
 
   /** Sync ref immediately on keystroke so ⌘/Ctrl+S works before React re-renders (hotkey reads the ref). */
   const markVisualLikelyDirty = useCallback(() => {
@@ -370,23 +425,36 @@ export function HtmlRenderer({
   }, [runPreviewCleanup]);
 
   useEffect(() => {
+    return () => {
+      previewLayoutFitCleanupRef.current?.();
+      previewLayoutFitCleanupRef.current = null;
+    };
+  }, [mode, displayContent]);
+
+  useEffect(() => {
+    contentSizeRef.current = null;
+    setContentSize(null);
+    setFitScale(1);
+  }, [displayContent, reloadKey]);
+
+  useEffect(() => {
     if (mode !== "preview") return;
     const viewport = iframeViewportRef.current;
     if (!viewport) return;
     const ro = new ResizeObserver(() => {
-      schedulePreviewFitScale();
+      scheduleViewportFit();
     });
     ro.observe(viewport);
     return () => ro.disconnect();
-  }, [mode, schedulePreviewFitScale]);
+  }, [mode, scheduleViewportFit]);
 
   useEffect(() => {
     if (mode !== "preview") {
       setFitScale(1);
       return;
     }
-    schedulePreviewFitScale();
-  }, [mode, displayContent, schedulePreviewFitScale]);
+    scheduleRemeasureContentAndFit();
+  }, [mode, displayContent, scheduleRemeasureContentAndFit]);
 
   useEffect(() => {
     return () => {
@@ -409,14 +477,35 @@ export function HtmlRenderer({
   }, [mode, visualTool, canEdit, attachPreviewTool, runPreviewCleanup]);
 
   const handleIframeLoad = useCallback(() => {
-    schedulePreviewFitScale();
+    previewLayoutFitCleanupRef.current?.();
+    previewLayoutFitCleanupRef.current = null;
+
+    scheduleRemeasureContentAndFit();
+
+    const doc = iframeRef.current?.contentDocument;
+    if (doc?.documentElement && mode === "preview") {
+      const ro = new ResizeObserver(() => scheduleRemeasureContentAndFit());
+      ro.observe(doc.documentElement);
+      if (doc.body) ro.observe(doc.body);
+      const bump = () => scheduleRemeasureContentAndFit();
+      const t1 = window.setTimeout(bump, 0);
+      const t2 = window.setTimeout(bump, 120);
+      const t3 = window.setTimeout(bump, 400);
+      previewLayoutFitCleanupRef.current = () => {
+        ro.disconnect();
+        window.clearTimeout(t1);
+        window.clearTimeout(t2);
+        window.clearTimeout(t3);
+      };
+    }
+
     if (mode !== "preview" || visualTool === "none" || !canEdit) {
       runPreviewCleanup();
       setVisualDirty(false);
       return;
     }
     attachPreviewTool(visualTool);
-  }, [mode, visualTool, canEdit, attachPreviewTool, runPreviewCleanup, schedulePreviewFitScale]);
+  }, [mode, visualTool, canEdit, attachPreviewTool, runPreviewCleanup, scheduleRemeasureContentAndFit]);
 
   useEffect(() => {
     if (visualTool === "none") setVisualSaveError(null);
@@ -502,8 +591,12 @@ export function HtmlRenderer({
     handleSaveVisual,
   ]);
 
-  /** `allow-same-origin` must apply from the first paint when the file is saveable; otherwise the iframe document is opaque and parent JS never gets a usable `contentDocument`, so Text / Shape never attach. */
-  const previewSandbox = canEdit ? "allow-scripts allow-same-origin" : "allow-scripts";
+  /**
+   * ``allow-same-origin`` is required for (a) saveable files so Text/Shape can attach, and (b) all previews so the host
+   * can read ``contentDocument`` for fit-to-view and observe layout after async scripts (Chart.js, etc.). ``allow-scripts``
+   * alone makes the iframe opaque in Chromium, breaking scale math and inner ``ResizeObserver``s.
+   */
+  const previewSandbox = "allow-scripts allow-same-origin";
 
   const toolBtn = (id: HtmlVisualTool, label: string) => (
     <button
@@ -732,27 +825,39 @@ export function HtmlRenderer({
       </div>
       {mode === "preview" ? (
         <div ref={iframeViewportRef} className="flex-1 min-h-0 w-full overflow-hidden rounded bg-white">
-          <iframe
-            ref={iframeRef}
-            srcDoc={displayContent}
-            sandbox={previewSandbox}
-            onLoad={handleIframeLoad}
-            tabIndex={canEdit ? 0 : undefined}
-            className="border-0 bg-white"
-            style={{
-              minHeight: 200,
-              width: `${100 / fitScale}%`,
-              height: `${100 / fitScale}%`,
-              transform: `scale(${fitScale})`,
-              transformOrigin: "top left",
-            }}
-            title="HTML Preview"
-          />
+          <div
+            style={
+              contentSize
+                ? {
+                    transform: `scale(${fitScale})`,
+                    transformOrigin: "top left",
+                    width: contentSize.w,
+                    height: contentSize.h,
+                  }
+                : undefined
+            }
+          >
+            <iframe
+              key={iframeKey}
+              ref={iframeRef}
+              srcDoc={displayContent}
+              sandbox={previewSandbox}
+              onLoad={handleIframeLoad}
+              tabIndex={canEdit ? 0 : undefined}
+              className="block border-0 bg-white"
+              style={{
+                minHeight: 200,
+                width: contentSize?.w ?? "100%",
+                height: contentSize?.h ?? "100%",
+              }}
+              title="HTML Preview"
+            />
+          </div>
         </div>
       ) : canEdit ? (
         <EditableTextPanel
           content={editContent}
-          contentKey={data.content}
+          contentKey={iframeKey}
           monospace
           onSave={async (content) => {
             setEditContent(content);

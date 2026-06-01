@@ -115,8 +115,8 @@ function parseArgs(argv: string[]): Args {
   const limit = out.limit ?? 18;
   if (!Number.isFinite(limit) || limit <= 0) throw new Error("--limit must be a positive number");
   out.limit = limit;
-  if (out.evalBackend && !["anthropic", "openai", "tinker"].includes(out.evalBackend)) {
-    throw new Error("--eval-backend must be one of: anthropic, openai, tinker");
+  if (out.evalBackend && !["anthropic", "openai"].includes(out.evalBackend)) {
+    throw new Error("--eval-backend must be one of: anthropic, openai");
   }
   if (out.evalRequestTimeout !== undefined && (!Number.isFinite(out.evalRequestTimeout) || out.evalRequestTimeout <= 0)) {
     throw new Error("--eval-request-timeout must be a positive number");
@@ -149,10 +149,10 @@ Run with eval:
     --resume --eval --eval-backend openai --eval-model gpt-4.1-mini
 
 Optional verifier override:
-  --verifiers-json out.json
+  --verifiers-json scripts/verifiers.json
 
 Eval defaults to --eval-backend openai --eval-model gpt-4.1-mini via scripts/.env or ./.env.
-Verifier source defaults to out.json.
+Verifier source defaults to scripts/verifiers.json.
  `);
 }
 
@@ -437,7 +437,13 @@ function runChild(command: string, args: string[], cwd: string, logPath: string)
 
 function scoreFromRatings(path: string): number | null {
   if (!existsSync(path)) return null;
-  const report = JSON.parse(readFileSync(path, "utf8")) as { tasks?: Array<{ versions?: Array<{ average_success_pct?: number }> }> };
+  const report = JSON.parse(readFileSync(path, "utf8")) as {
+    average_success_rate?: number;
+    tasks?: Array<{ versions?: Array<{ average_success_pct?: number }> }>;
+  };
+  if (typeof report.average_success_rate === "number") {
+    return report.average_success_rate * 100.0;
+  }
   const scores: number[] = [];
   for (const task of report.tasks ?? []) {
     const versions = task.versions ?? [];
@@ -482,11 +488,6 @@ function copyUiAuthIfAvailable(sourceUserDataDir: string, targetUserDataDir: str
   mkdirSync(dirname(target), { recursive: true });
   cpSync(source, target);
   return true;
-}
-
-function scorerTaskKey(task: TaskSpec): string {
-  const raw = String(task.id).trim();
-  return /^task\s*\d+$/i.test(raw) ? raw.replace(/\s+/g, "") : `task${raw}`;
 }
 
 async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: number): Promise<TaskSummary> {
@@ -548,14 +549,12 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
       await runChild(
         args.python,
         [
-          "scripts/tools/score_redo_against_verifiers.py",
-          "--verifiers-json",
-          args.verifiersJson ? resolve(args.verifiersJson) : join(repoRoot, "out.json"),
-          "--outputs-json",
+          "scripts/tools/grade_redo.py",
+          "--session-json",
           sessionJson,
-          "--task",
-          scorerTaskKey(task),
-          "--out",
+          "--verifiers",
+          args.verifiersJson ? resolve(args.verifiersJson) : join(repoRoot, "scripts", "verifiers.json"),
+          "--json-out",
           ratingsPath,
           "--backend",
           evalBackend,
@@ -564,7 +563,6 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
           ...(args.evalApiKey ? ["--api-key", args.evalApiKey] : []),
           ...(args.evalRequestTimeout !== undefined ? ["--request-timeout", String(args.evalRequestTimeout)] : []),
           ...(args.evalMaxRetries !== undefined ? ["--max-retries", String(args.evalMaxRetries)] : []),
-          "--force",
         ],
         repoRoot,
         runLog,

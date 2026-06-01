@@ -9,20 +9,14 @@ import {
 } from "fs";
 import { join } from "path";
 import { app } from "electron";
+import {
+  expertiseTaskMemoryFileName,
+  normalizeExpertiseTaskStem,
+} from "./expertise-task.js";
 
 const LEGACY_MEM_FILENAME = "memory.md";
 /** Any safe single-segment name ending in .md (no slashes, no leading dot). */
 const MEMORY_MD_FILE_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.md$/;
-
-const DEFAULT_SEED_FILENAME = "general.md";
-
-const DEFAULT_GENERAL = `## General
-
-Add persistent notes here. Put more topics in separate \`.md\` files in the memories folder.
-
-- Preferences, project facts, glossary
-- Conventions you want the agent to follow
-`;
 
 export type MemorySectionFile = {
   fileName: string;
@@ -54,7 +48,7 @@ export function isValidMemoryFileName(name: string): boolean {
   return MEMORY_MD_FILE_RE.test(name) && !name.includes("/") && !name.includes("\\");
 }
 
-/** Create memories/, migrate legacy memory.md, seed default when no .md files. */
+/** Create memories/ and migrate legacy root memory.md if present. */
 export function ensureMemoriesDir(): void {
   const dir = getMemoriesDir();
   if (!existsSync(dir)) {
@@ -65,7 +59,7 @@ export function ensureMemoriesDir(): void {
   if (existsSync(legacy)) {
     const existing = listMemorySectionFiles();
     if (existing.length === 0) {
-      const target = join(dir, DEFAULT_SEED_FILENAME);
+      const target = join(dir, "memory.md");
       try {
         renameSync(legacy, target);
       } catch {
@@ -78,10 +72,6 @@ export function ensureMemoriesDir(): void {
         }
       }
     }
-  }
-
-  if (listMemorySectionFiles().length === 0) {
-    writeFileSync(join(dir, DEFAULT_SEED_FILENAME), DEFAULT_GENERAL, "utf8");
   }
 }
 
@@ -141,15 +131,34 @@ export function writeMemorySections(
     writeFileSync(join(dir, fileName), body, "utf8");
   }
 
-  if (listMemorySectionFiles().length === 0) {
-    writeFileSync(join(dir, DEFAULT_SEED_FILENAME), DEFAULT_GENERAL, "utf8");
+}
+
+function readMemorySectionsForPrompt(expertiseTask?: string): MemorySectionFile[] {
+  ensureMemoriesDir();
+  const stem = normalizeExpertiseTaskStem(expertiseTask);
+  if (!stem) {
+    return readAllMemorySections();
   }
+  const fileName = expertiseTaskMemoryFileName(stem);
+  if (!isValidMemoryFileName(fileName)) {
+    return [];
+  }
+  const path = join(getMemoriesDir(), fileName);
+  if (!existsSync(path)) {
+    return [];
+  }
+  let content = "";
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    /* keep empty */
+  }
+  return [{ fileName, title: titleFromMemoryFileName(fileName), content }];
 }
 
 /** Non-empty prefix for LM: each file as its own block. */
-export function readMemoryForPrompt(): string {
-  ensureMemoriesDir();
-  const sections = readAllMemorySections();
+export function readMemoryForPrompt(expertiseTask?: string): string {
+  const sections = readMemorySectionsForPrompt(expertiseTask);
   const blocks: string[] = [];
   for (const { fileName, title, content } of sections) {
     const text = content.trim();

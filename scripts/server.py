@@ -8,7 +8,7 @@ import argparse
 import time
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 log = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from weight.train.formatter import WeightDPODataBuilder, WeightReinforceDataBuilder
 from weight.train.run_dpo import Config as DPOConfig
-from weight.train.run_reinforce import Config as ReinforceConfig
+from weight.train.run_reinforce import Config as ReinforceConfig, OnlineReinforceRolloutDataset
 from weight.train.run_opd import Config as ArtifactOPDConfig, OnlineOPDRolloutDataset
 
 from model_manager import ModelManager, ModelUpdate
@@ -82,7 +82,21 @@ class Config:
     opd_rollout_sample_log_chars: int = 4000
     opd_log_teacher_prompts: bool = True
     opd_artifact_only_rollout_instruction: bool = False
-    opd_extract_version: Literal["v1", "v2"] = "v2"
+    # "v1"/"v2" use a historical completion per task unit; "agentic" runs one
+    # continuous on-policy multi-turn tool-using rollout per session in a live
+    # sandbox and distils the whole trajectory against a follow-up-augmented
+    # teacher (see opd_agentic_* below).
+    opd_extract_version: Literal["v1", "v2", "agentic"] = "v2"
+
+    # -- OPD agentic mode (opd_extract_version="agentic") --
+    # Each session is rolled out as a planning turn + one "Proceed with: <step>"
+    # user turn per planned leaf step (steps derived from the model's own plan).
+    opd_agentic_max_turns: int = 48          # overall safety ceiling per episode
+    opd_agentic_max_turns_per_step: int = 8  # inner agent-loop cap within a step
+    opd_agentic_max_steps: int = 6           # max planned steps replayed
+    opd_agentic_enable_bash: bool = True
+    opd_agentic_tool_timeout_s: int = 20
+    opd_agentic_max_trajectory_tokens: int | None = None
     # Reasoning-renderer toggle (Qwen3/Kimi K2/DeepSeek thinking). When False,
     # the golden answer's ``<think>...</think>`` block survives in the
     # teacher prompt so the teacher can attend to the golden chain-of-thought.
@@ -104,8 +118,21 @@ class Config:
     opd_rollout_pipeline: Literal["current", "legacy"] = "current"
 
     # -- REINFORCE-specific --
+    reinforce_version: Literal["offline", "online"] = "offline"
     reward_alpha: float = 0.05
     initial_baseline: float = 0.0
+
+    # REINFORCE online (reinforce_version="online")
+    reinforce_rollout_max_tokens: int = 4096
+    reinforce_rollout_temperature: float = 1.0
+    reinforce_agentic_max_turns: int = 48
+    reinforce_agentic_max_turns_per_step: int = 8
+    reinforce_agentic_max_steps: int = 6
+    reinforce_agentic_enable_bash: bool = True
+    reinforce_agentic_tool_timeout_s: int = 20
+    reinforce_agentic_max_trajectory_tokens: int | None = None
+    reinforce_log_rollout_samples: bool = True
+    reinforce_rollout_sample_log_chars: int = 4000
 
     # -- Logging --
     wandb_project: str | None = None
@@ -630,23 +657,42 @@ class Server:
         return dataset, build
 
     def _prepare_reinforce(self, train_path: str, model_name: str, renderer_name: str):
-        dataset_builder = WeightReinforceDataBuilder(
-            train_path=train_path,
-            common_config=ChatDatasetBuilderCommonConfig(
-                model_name_for_tokenizer=model_name,
-                renderer_name=renderer_name,
-                max_length=self.config.max_length,
-                batch_size=self.config.batch_size,
-            ),
-        )
-        dataset, _ = dataset_builder()
-
         log_path = f"logs/weight_reinforce/{int(time.time())}"
+        is_online = self.config.reinforce_version == "online"
+
+        if is_online:
+            dataset = OnlineReinforceRolloutDataset.from_weight_json(
+                train_path, self.config.batch_size,
+            )
+            if not dataset._rows:
+                raise ValueError(
+                    f"No REINFORCE online rollout seeds in {train_path} "
+                    "(need sessions with initial_task_instruction)."
+                )
+            dataset_builder = None
+            log.info(
+                "REINFORCE online: %d rollout seeds, batch_size=%d",
+                len(dataset._rows), self.config.batch_size,
+            )
+        else:
+            dataset_builder = WeightReinforceDataBuilder(
+                train_path=train_path,
+                common_config=ChatDatasetBuilderCommonConfig(
+                    model_name_for_tokenizer=model_name,
+                    renderer_name=renderer_name,
+                    max_length=self.config.max_length,
+                    batch_size=self.config.batch_size,
+                ),
+            )
+            dataset, _ = dataset_builder()
+
         trainer_config = ReinforceConfig(
             log_path=log_path,
             model_name=model_name,
             dataset_builder=dataset_builder,
             renderer_name=renderer_name,
+            reinforce_version=self.config.reinforce_version,
+            max_length=self.config.max_length,
             learning_rate=self.config.learning_rate,
             lr_schedule=self.config.lr_schedule,
             num_epochs=self.config.num_epochs,
@@ -657,6 +703,16 @@ class Server:
             max_steps=self.config.max_steps,
             wandb_project=self.config.wandb_project,
             wandb_name=self.config.wandb_name,
+            rollout_max_tokens=self.config.reinforce_rollout_max_tokens,
+            rollout_temperature=self.config.reinforce_rollout_temperature,
+            agentic_max_turns=self.config.reinforce_agentic_max_turns,
+            agentic_max_turns_per_step=self.config.reinforce_agentic_max_turns_per_step,
+            agentic_max_steps=self.config.reinforce_agentic_max_steps,
+            agentic_enable_bash=self.config.reinforce_agentic_enable_bash,
+            agentic_tool_timeout_s=self.config.reinforce_agentic_tool_timeout_s,
+            agentic_max_trajectory_tokens=self.config.reinforce_agentic_max_trajectory_tokens,
+            log_rollout_samples=self.config.reinforce_log_rollout_samples,
+            rollout_sample_log_chars=self.config.reinforce_rollout_sample_log_chars,
         )
 
         def build(
@@ -684,11 +740,12 @@ class Server:
                 self.config.opd_strip_thinking_from_history,
             )
         artifact_only = self.config.opd_artifact_only_rollout_instruction
-        if self.config.opd_extract_version == "v2" and artifact_only:
+        if self.config.opd_extract_version in ("v2", "agentic") and artifact_only:
             log.warning(
                 "opd_artifact_only_rollout_instruction=True is v1-only and is "
-                "incompatible with opd_extract_version='v2'. Forcing it to "
-                "False for this OPD training run."
+                "incompatible with opd_extract_version=%r. Forcing it to False "
+                "for this OPD training run.",
+                self.config.opd_extract_version,
             )
             artifact_only = False
         dataset = OnlineOPDRolloutDataset.from_weight_json(
@@ -732,6 +789,12 @@ class Server:
             extract_version=self.config.opd_extract_version,
             strip_thinking_from_history=self.config.opd_strip_thinking_from_history,
             rollout_pipeline=self.config.opd_rollout_pipeline,
+            agentic_max_turns=self.config.opd_agentic_max_turns,
+            agentic_max_turns_per_step=self.config.opd_agentic_max_turns_per_step,
+            agentic_max_steps=self.config.opd_agentic_max_steps,
+            agentic_enable_bash=self.config.opd_agentic_enable_bash,
+            agentic_tool_timeout_s=self.config.opd_agentic_tool_timeout_s,
+            agentic_max_trajectory_tokens=self.config.opd_agentic_max_trajectory_tokens,
         )
 
         def build(

@@ -105,6 +105,11 @@ function getCopyableContent(result: PreviewFileResult | null): string | null {
   }
 }
 
+function canUseHeaderSave(result: PreviewFileResult | null): boolean {
+  if (!result || "error" in result) return false;
+  return result.kind === "txt" || result.kind === "md" || result.kind === "code" || result.kind === "csv" || result.kind === "json" || result.kind === "html";
+}
+
 type FilePreviewProps = {
   filePath: string | null;
   cwd?: string | null;
@@ -152,19 +157,38 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
     });
   };
 
+  const handleRefresh = useCallback(() => {
+    setPreviewSaveChrome(null);
+    setRefreshKey((k) => k + 1);
+  }, []);
+
+  const handleRefreshPointerDown = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("preview-reload-discard"));
+  }, []);
+
   useEffect(() => {
     if (!filePath) {
       setResult(null);
       setLoading(false);
       return;
     }
+    let cancelled = false;
     setLoading(true);
     setResult(null);
     window.electron
       .previewFile(filePath, cwd ?? undefined)
-      .then((res) => setResult(res))
-      .catch((err) => setResult({ error: err instanceof Error ? err.message : String(err) }))
-      .finally(() => setLoading(false));
+      .then((res) => {
+        if (!cancelled) setResult(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setResult({ error: err instanceof Error ? err.message : String(err) });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [filePath, cwd, stepCompleted, refreshKey]);
 
   if (!filePath) {
@@ -183,6 +207,17 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
   const showZoom = result && "kind" in result && result.kind === "docx";
   const isTextualPreview =
     result && "kind" in result && (result.kind === "txt" || result.kind === "md");
+  const showHeaderSave = canUseHeaderSave(result);
+  const effectiveSaveChrome: PreviewSaveChrome | null = showHeaderSave
+    ? (previewSaveChrome ?? {
+        save: () => {
+          window.dispatchEvent(new CustomEvent("preview-flush-save"));
+        },
+        disabled: false,
+        saving: false,
+        error: null,
+      })
+    : null;
 
   return (
     <div
@@ -190,26 +225,29 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
         isTextualPreview ? "rounded-xl border-ink-900/8 shadow-card" : "rounded-lg border-ink-900/10"
       }`}
     >
-      <div className="px-3 py-1.5 border-b border-ink-900/10 flex items-center gap-2 shrink-0">
+      <div
+        className="px-3 py-1.5 border-b border-ink-900/10 flex items-center gap-2 shrink-0"
+        data-preview-toolbar
+      >
         <span className="text-xs font-medium text-muted-foreground truncate flex-1" title={filePath}>
           {filePath}
         </span>
-        {previewSaveChrome && (
+        {effectiveSaveChrome && (
           <button
             type="button"
-            onClick={() => previewSaveChrome.save()}
-            disabled={previewSaveChrome.disabled}
+            onClick={() => effectiveSaveChrome.save()}
+            disabled={effectiveSaveChrome.disabled}
             className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors disabled:opacity-50 disabled:pointer-events-auto"
-            aria-label={previewSaveChrome.saving ? "Saving preview changes" : "Save preview changes"}
+            aria-label={effectiveSaveChrome.saving ? "Saving preview changes" : "Save preview changes"}
             title={
-              previewSaveChrome.error
-                ? previewSaveChrome.error
-                : previewSaveChrome.disabled && !previewSaveChrome.saving
-                  ? "No preview changes to save yet"
-                  : "Save changes to file (Ctrl or ⌘+S)"
+              effectiveSaveChrome.error
+                ? effectiveSaveChrome.error
+                : effectiveSaveChrome.disabled && !effectiveSaveChrome.saving
+                  ? "Switch to source/edit mode to modify content, then save"
+                  : "Save changes to file (Ctrl or ⌘+S). If no edits are pending, this is a no-op."
             }
           >
-            {previewSaveChrome.saving ? (
+            {effectiveSaveChrome.saving ? (
               <Loader2Icon className="size-4 animate-spin" aria-hidden />
             ) : (
               <SaveIcon className="size-4" aria-hidden />
@@ -217,7 +255,9 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
           </button>
         )}
         <button
-          onClick={() => setRefreshKey((k) => k + 1)}
+          type="button"
+          onMouseDown={handleRefreshPointerDown}
+          onClick={handleRefresh}
           className="shrink-0 p-1 rounded hover:bg-ink-900/5 text-muted-foreground hover:text-ink-700 transition-colors"
           aria-label="Refresh preview"
           title="Refresh preview"
@@ -277,12 +317,14 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
         {Renderer && !loading && (
           <div className="flex-1 flex flex-col min-h-0 min-w-0 h-full">
             <Renderer
+              key={`${refreshKey}:${filePath}`}
               data={result}
               zoom={showZoom ? zoom : undefined}
               filePath={filePath}
               cwd={cwd ?? undefined}
               sessionId={sessionId ?? undefined}
-              onReload={() => setRefreshKey((k) => k + 1)}
+              reloadKey={refreshKey}
+              onReload={handleRefresh}
               onHtmlVisualSaveChromeChange={onPreviewSaveChromeChange}
               onTextSaveChromeChange={onPreviewSaveChromeChange}
             />

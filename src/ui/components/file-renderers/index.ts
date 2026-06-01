@@ -33,6 +33,8 @@ export type EditableRendererProps = {
   onHtmlVisualSaveChromeChange?: (chrome: PreviewSaveChrome | null) => void;
   /** Markdown/code/text source editors: header Save + records ``file_edit`` on save. */
   onTextSaveChromeChange?: (chrome: PreviewSaveChrome | null) => void;
+  /** Bumps when the user hits Refresh so renderers can force-remount (e.g. HTML iframe). */
+  reloadKey?: number;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

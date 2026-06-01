@@ -551,3 +551,49 @@ code, pre, textarea.mono, input.mono {
   color: var(--color-primary);
   border-radius: 9999px;
 }
+
+/* Sidebar Run: draw attention after initial workflow plan is ready */
+@keyframes run-button-shine {
+  0%,
+  100% {
+    border-color: color-mix(in srgb, var(--color-primary) 28%, transparent);
+    box-shadow:
+      0 0 0 0 color-mix(in srgb, var(--color-primary) 0%, transparent),
+      inset 0 0 0 0 color-mix(in srgb, var(--color-primary) 0%, transparent);
+  }
+  50% {
+    border-color: color-mix(in srgb, var(--color-primary) 62%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--color-primary) 22%, transparent),
+      0 0 14px color-mix(in srgb, var(--color-primary) 28%, transparent),
+      inset 0 0 12px color-mix(in srgb, var(--color-primary) 8%, transparent);
+  }
+}
+
+.run-button-shine {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  animation: run-button-shine 2s ease-in-out infinite;
+}
+
+.run-button-shine::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  background: linear-gradient(
+    105deg,
+    transparent 38%,
+    color-mix(in srgb, var(--color-primary) 22%, white) 50%,
+    transparent 62%
+  );
+  transform: translateX(-120%);
+  animation: shimmer 2.4s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.run-button-shine > * {
+  position: relative;
+  z-index: 1;
+}

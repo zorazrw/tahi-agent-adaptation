@@ -8,24 +8,13 @@ import type {
   OpenAICompatibleApiFormat,
   ProviderAuthStatus,
 } from "../../lib/runtime-types";
+import { AUTO_INDUCTION_KEY, readStoredAutoInduction } from "../lib/auto-induction";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = "api" | "workflow" | "skills" | "data";
-const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
-
-function readStoredAutoInduction(): boolean {
-  try {
-    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
-    if (v === "false") return false;
-    if (v === "true") return true;
-  } catch {
-    /* ignore */
-  }
-  return true;
-}
+type Tab = "api" | "mode" | "data";
 
 function WorkflowPanel() {
   const workflowRunMode = useAppStore((s) => s.workflowRunMode);
@@ -55,7 +44,7 @@ function WorkflowPanel() {
       <p className="text-sm text-muted-foreground leading-relaxed">
         Controls how the app advances through the workflow tree after a step completes successfully.
       </p>
-      <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2">
         {row(
           "manual",
           "Wait",
@@ -117,23 +106,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                  tab === "workflow"
+                  tab === "mode"
                     ? "bg-primary/10 text-primary"
                     : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
                 }`}
-                onClick={() => setTab("workflow")}
+                onClick={() => setTab("mode")}
               >
-                Execution
-              </button>
-              <button
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                  tab === "skills"
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:text-ink-700 hover:bg-ink-900/5"
-                }`}
-                onClick={() => setTab("skills")}
-              >
-                Skills
+                Mode
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
@@ -151,10 +130,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6 pt-4">
               {tab === "api" ? (
                 <ApiPanel onClose={onClose} />
-              ) : tab === "workflow" ? (
-                <WorkflowPanel />
-              ) : tab === "skills" ? (
-                <SkillsPanel />
+              ) : tab === "mode" ? (
+                <ModePanel />
               ) : (
                 <DataPanel />
               )}
@@ -282,6 +259,38 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
       .finally(() => {
         setLoading(false);
       });
+  }, []);
+
+  // After training completes, main persists the new sampler_path into the Tinker provider file.
+  useEffect(() => {
+    const unsubscribe = window.electron.onTinkerModelUpdated(async (event) => {
+      try {
+        const [settings, availableModels] = await Promise.all([
+          window.electron.getAgentSettings(),
+          window.electron.listAvailableModels(),
+          loadOpenAICompatibleProvider(),
+          loadTinkerProvider(),
+        ]);
+
+        // Prefer the live SSE event over disk in case the reload raced the write.
+        if (event.model_path?.startsWith("tinker://")) {
+          setTinkerModelPath(event.model_path);
+          setTinkerResolveError(null);
+        }
+        if (event.base_model) {
+          setTinkerBaseModel(event.base_model);
+          setTinkerBaseModelResolved(Boolean(event.model_path?.startsWith("tinker://")));
+        }
+        if (event.renderer_name) {
+          setTinkerRendererName(event.renderer_name);
+        }
+
+        await syncModelState(availableModels, { model: event.slug }, settings);
+      } catch (err) {
+        console.error("Failed to apply tinker model update in UI:", err);
+      }
+    });
+    return unsubscribe;
   }, []);
 
   // Sync authMethod when provider or statuses change.
@@ -748,8 +757,15 @@ function ApiPanel({ onClose }: { onClose: () => void }) {
                       </div>
                     )}
                     {!tinkerResolving && tinkerBaseModelResolved && (
-                      <div>
-                        Resolved base model: <span className="font-medium text-ink-700">{tinkerBaseModel}</span>
+                      <div className="space-y-1">
+                        <div>
+                          Resolved base model: <span className="font-medium text-ink-700">{tinkerBaseModel}</span>
+                        </div>
+                        {tinkerModelPath.startsWith("tinker://") && (
+                          <div className="break-all font-mono text-[11px] text-ink-600">
+                            Active checkpoint: {tinkerModelPath}
+                          </div>
+                        )}
                       </div>
                     )}
                     {!tinkerResolving && tinkerResolveError && (
@@ -1057,6 +1073,19 @@ function DataPanel() {
   );
 }
 
+/* ---------- Mode Panel (skills + execution) ---------- */
+
+function ModePanel() {
+  return (
+    <div className="space-y-6">
+      <SkillsPanel />
+      <div className="border-t border-ink-900/10 pt-6">
+        <WorkflowPanel />
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Skills Panel ---------- */
 
 function SkillsPanel() {
@@ -1114,45 +1143,56 @@ function SkillsPanel() {
     window.electron.getSkillsDir();
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-8">
-        <Spinner className="w-6 h-6 text-primary" color="currentColor" />
+  const setUpdateMode = (contextUpdate: boolean) => {
+    setAutoContextInduction(contextUpdate);
+    if (activeSessionId && typeof window !== "undefined" && window.electron?.sendClientEvent) {
+      window.electron.sendClientEvent({
+        type: "session.setAutoContextInduction",
+        payload: { sessionId: activeSessionId, autoContextInduction: contextUpdate },
+      });
+    }
+  };
+
+  const updateModeRow = (contextUpdate: boolean, title: string, description: string) => (
+    <label
+      key={title}
+      className="flex cursor-pointer gap-3 rounded-xl border border-ink-900/10 bg-surface p-4 hover:border-ink-900/20 transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary/30"
+    >
+      <input
+        type="radio"
+        name="updateMode"
+        className="mt-1 border-ink-900/20 text-primary focus:ring-primary/30"
+        checked={autoContextInduction === contextUpdate}
+        onChange={() => setUpdateMode(contextUpdate)}
+      />
+      <div>
+        <div className="text-sm font-medium text-ink-800">{title}</div>
+        <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{description}</p>
       </div>
-    );
-  }
+    </label>
+  );
 
   return (
     <>
-      <div className="mb-4 rounded-xl border border-ink-900/10 bg-surface px-4 py-3">
-        <label className="flex items-start gap-3 cursor-pointer">
-          <input
-            type="checkbox"
-            className="mt-0.5 h-4 w-4 accent-primary"
-            checked={autoContextInduction}
-            onChange={(e) => {
-              const next = e.target.checked;
-              setAutoContextInduction(next);
-              if (activeSessionId && typeof window !== "undefined" && window.electron?.sendClientEvent) {
-                window.electron.sendClientEvent({
-                  type: "session.setAutoContextInduction",
-                  payload: { sessionId: activeSessionId, autoContextInduction: next },
-                });
-              }
-            }}
-          />
-          <div>
-            <div className="text-sm font-medium text-ink-800">Auto-generate memory and skill</div>
-            <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
-              When enabled, the app exports the task session and runs context induction after each completed
-              workflow step (and after follow-up verification turns), updating memory and skill markdown under
-              your app data folder. The Brain control shows activity while induction runs. When disabled, no
-              automatic generation runs during task sessions.
-            </p>
-          </div>
-        </label>
+      <div className="mb-4 grid grid-cols-2 gap-2">
+        {updateModeRow(
+          true,
+          "Context Update",
+          "A Brain click triggers memory and skill induction based on the current task session data. Double-click Brain anytime to view and edit the content."
+        )}
+        {updateModeRow(
+          false,
+          "Weight Update",
+          "A Brain click triggers weight update of the agent backbone language model."
+        )}
       </div>
 
+      {loading ? (
+        <div className="flex items-center justify-center py-8">
+          <Spinner className="w-6 h-6 text-primary" color="currentColor" />
+        </div>
+      ) : (
+        <>
       <div className="flex items-center justify-between mb-4">
         <p className="text-sm text-muted-foreground">Manage installed skills.</p>
         <button
@@ -1263,6 +1303,8 @@ function SkillsPanel() {
             </button>
           </div>
         </div>
+      )}
+        </>
       )}
     </>
   );

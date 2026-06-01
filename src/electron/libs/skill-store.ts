@@ -13,12 +13,16 @@ import {
 } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import {
+  expertiseTaskMemoryFileName,
+  normalizeExpertiseTaskStem,
+} from "./expertise-task.js";
 
 /** Top-level skill markdown files in the app skills dir (same rules as memory *.md). */
 const FLAT_SKILL_MD_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.md$/;
 
 /** Sync mirror: each flat foo.md → _flat/foo/SKILL.md for Claude SDK directory layout. */
-const FLAT_SYNC_ROOT = "_flat";
+export const FLAT_SYNC_ROOT = "_flat";
 
 /** Prefix on app skill ids for flat files: flat_<stem> where stem is basename without .md */
 const FLAT_SKILL_ID_PREFIX = "flat_";
@@ -98,6 +102,38 @@ export type FlatSkillSection = {
 };
 
 /** Top-level *.md files in the app skills folder (brain UI + SDK sync via _flat/). */
+function ensureFlatSkillMirrored(stem: string): string | null {
+  const fileName = expertiseTaskMemoryFileName(stem);
+  if (!isValidFlatSkillMdFileName(fileName)) return null;
+  const appSkillsDir = getAppSkillsDir();
+  const sourcePath = join(appSkillsDir, fileName);
+  if (!existsSync(sourcePath)) return null;
+
+  const flatDir = join(appSkillsDir, FLAT_SYNC_ROOT, stem);
+  const flatSkillPath = join(flatDir, "SKILL.md");
+  try {
+    mkdirSync(flatDir, { recursive: true });
+    writeFileSync(flatSkillPath, readFileSync(sourcePath, "utf8"), "utf8");
+    return flatDir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pi ``additionalSkillPaths`` for task-solving: all app skills, or only the
+ * expertise-category ``{stem}.md`` mirror when a task category is set.
+ */
+export function getSkillLoaderPaths(expertiseTask?: string): string[] {
+  const appSkillsDir = getAppSkillsDir();
+  const stem = normalizeExpertiseTaskStem(expertiseTask);
+  if (!stem) {
+    return [appSkillsDir];
+  }
+  const mirrored = ensureFlatSkillMirrored(stem);
+  return mirrored ? [mirrored] : [];
+}
+
 export function readAllFlatSkillSections(): FlatSkillSection[] {
   ensureAppSkillsDir();
   const appSkillsDir = getAppSkillsDir();

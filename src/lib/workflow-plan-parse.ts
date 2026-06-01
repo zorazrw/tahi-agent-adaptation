@@ -76,6 +76,25 @@ export function parseWorkflowPlanPayload(payload: unknown): WorkflowPlanTaskInpu
   return null;
 }
 
+/**
+ * Unwrap a single synthetic root that only has ``children`` (common model pattern).
+ * Must match electron ``registerWorkflowPlanFromTasks`` / export scripts so chat and sidebar agree.
+ */
+export function normalizeWorkflowPlanRoots<T extends { children?: T[] }>(tasks: T[]): T[] {
+  let roots = tasks;
+  while (roots.length === 1 && roots[0].children && roots[0].children.length > 0) {
+    roots = roots[0].children;
+  }
+  return roots;
+}
+
+/** Parsed plan with the same root normalization applied before persisting the workflow tree. */
+export function parseWorkflowPlanPayloadNormalized(payload: unknown): WorkflowPlanTaskInput[] | null {
+  const parsed = parseWorkflowPlanPayload(payload);
+  if (!parsed) return null;
+  return normalizeWorkflowPlanRoots(parsed);
+}
+
 export function isWorkflowPlanToolName(name: string): boolean {
   const n = name.trim();
   if (!n) return false;

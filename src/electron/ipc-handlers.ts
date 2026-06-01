@@ -1,6 +1,7 @@
 import { BrowserWindow } from "electron";
 import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
 import { runClaude, buildPromptForNode, buildRegenerateWorkflowPrompt, type RunnerHandle } from "./libs/runner.js";
+import { EXECUTION_CONTEXT_MAX_ACTIONS } from "./libs/session-context-trim.js";
 import { SessionStore, type Session } from "./libs/session-store.js";
 import {
   findNodeById,
@@ -23,7 +24,12 @@ import {
   syncAppSkills,
   isValidFlatSkillMdFileName,
 } from "./libs/skill-store.js";
-import { runFullSessionExportAndExtract, setContextInductionNotifier } from "./libs/context-export.js";
+import {
+  runFullSessionExportAndExtract,
+  setContextInductionNotifier,
+  uploadSessionForTinkerTraining,
+} from "./libs/context-export.js";
+import { TRAINING_PROXY_START_HINT } from "./libs/training-proxy.js";
 import { labelVerifiersForNode } from "./libs/verifier-labeler.js";
 import {
   buildExportEnvironmentSnapshot,
@@ -133,6 +139,15 @@ setContextInductionNotifier((ev) => {
       type: "session.contextInduction",
       payload: { phase: "finished", sessionId: ev.sessionId, ok: ev.ok },
     });
+    if (!ev.ok && ev.trainingUpload) {
+      broadcast({
+        type: "runner.error",
+        payload: {
+          sessionId: ev.sessionId,
+          message: `Training upload failed. ${TRAINING_PROXY_START_HINT}`,
+        },
+      });
+    }
   }
 });
 
@@ -210,16 +225,6 @@ async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Pr
   }
 }
 
-function runPostSolverExport(sessionId: string): void {
-  const store = initializeSessions();
-  const session = store.getSession(sessionId);
-  if (!session) return;
-
-  if (session.autoContextInduction) {
-    runFullSessionExportAndExtract(sessionId);
-  }
-}
-
 async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: string) {
   await runVerifierLabelingForNode(sessionId, nodeId);
 
@@ -228,8 +233,6 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
   if (!session) return;
 
   broadcast({ type: "session.nodeCompleted", payload: { sessionId, nodeId } });
-
-  runPostSolverExport(sessionId);
 
   emit({
     type: "session.status",
@@ -245,7 +248,6 @@ async function finalizeNodeSolveAfterVerifierPass(sessionId: string, nodeId: str
 /** After a free-form session.continue finishes: re-check verifiers + export; no nodeCompleted (runner already set status). */
 async function finalizeContinueWithVerification(sessionId: string, nodeId: string) {
   await runVerifierLabelingForNode(sessionId, nodeId);
-  runPostSolverExport(sessionId);
   const session = initializeSessions().getSession(sessionId);
   if (!session) return;
   emit({
@@ -693,6 +695,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
     prompt: nodePrompt,
     session,
     branchEntryId,
+    trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS,
     onEvent: emit,
     onSessionUpdate: (updates) => {
       store.updateSession(session.id, updates);
@@ -773,11 +776,45 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
+  if (event.type === "session.runContextInduction") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid && sessions.getSession(sid)) {
+      runFullSessionExportAndExtract(sid);
+    }
+    return;
+  }
+
+  if (event.type === "session.uploadForTinkerTraining") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (sid && sessions.getSession(sid)) {
+      try {
+        uploadSessionForTinkerTraining(sid);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        broadcast({
+          type: "runner.error",
+          payload: { sessionId: sid, message },
+        });
+      }
+    }
+    return;
+  }
+
   if (event.type === "session.setAutoContextInduction") {
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {
       sessions.updateSession(sid, { autoContextInduction: Boolean(event.payload.autoContextInduction) });
     }
+    return;
+  }
+
+  if (event.type === "session.setExpertiseTask") {
+    const sid = String(event.payload.sessionId ?? "").trim();
+    if (!sid || !sessions.getSession(sid)) return;
+    const raw = event.payload.expertiseTask;
+    const expertiseTask =
+      typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+    sessions.updateSession(sid, { expertiseTask });
     return;
   }
 
@@ -811,6 +848,7 @@ export function handleClientEvent(event: ClientEvent) {
   }
 
   if (event.type === "session.start") {
+    const expertiseTask = event.payload.expertiseTask?.trim() || undefined;
     const session = sessions.createSession({
       cwd: event.payload.cwd,
       title: event.payload.title,
@@ -818,6 +856,7 @@ export function handleClientEvent(event: ClientEvent) {
       prompt: event.payload.prompt,
       engine: "pi",
       autoContextInduction: event.payload.autoContextInduction,
+      expertiseTask,
     });
 
     try {
@@ -918,6 +957,9 @@ export function handleClientEvent(event: ClientEvent) {
     runClaude({
       prompt: event.payload.prompt,
       session,
+      ...(session.workflowTree?.length
+        ? { trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS }
+        : {}),
       onEvent: emit,
       onSessionUpdate: (updates) => {
         sessions.updateSession(session.id, updates);
@@ -1172,6 +1214,38 @@ export function recordFileEditAfterPreviewSave(
   } else if (sess.workflowTree?.length) {
     void autoRefineVerifiersFromUserMessages(sessionId, flattenWorkflowNodeIds(sess.workflowTree));
   }
+}
+
+/** Best-effort fallback when renderer omits ``sessionId`` for preview writes. */
+export function inferSessionIdForPreviewWrite(
+  editedAbsPath: string,
+  cwdHint?: string | null
+): string | null {
+  const store = initializeSessions();
+  const abs = editedAbsPath.replace(/\\/g, "/");
+  const cwdTrim = typeof cwdHint === "string" ? cwdHint.trim() : "";
+  const recent = store.listSessions();
+
+  for (const row of recent) {
+    const sid = String(row.id ?? "").trim();
+    if (!sid) continue;
+    const sess = store.getSession(sid);
+    if (!sess) continue;
+    const sessCwd = sess.cwd?.trim();
+    if (!sessCwd) continue;
+
+    try {
+      const root = resolve(sessCwd).replace(/\\/g, "/");
+      const file = resolve(abs).replace(/\\/g, "/");
+      const inCwd = file === root || file.startsWith(`${root}/`);
+      if (!inCwd) continue;
+      if (cwdTrim && resolve(cwdTrim).replace(/\\/g, "/") !== root) continue;
+      return sid;
+    } catch {
+      // ignore malformed paths and keep searching
+    }
+  }
+  return null;
 }
 
 export function cleanupAllSessions(): void {

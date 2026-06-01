@@ -41,6 +41,7 @@ import torch
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.renderers import TrainOnWhat
+from tinker_cookbook.supervised.data import conversation_to_datum
 from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
 from tinker_cookbook.rl.rollouts import do_group_rollout_and_filter_constant_reward
 from tinker_cookbook.rl.types import EnvGroupBuilder, StepResult
@@ -51,16 +52,28 @@ from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_
 
 try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts.weight...`.
     from weight.data.extract import (  # type: ignore[import-not-found]
+        OPD_REDO_MESSAGE,
+        _session_tools_prefix,
         extract_opd_examples,
+        extract_opd_examples_agentic,
         extract_opd_examples_v2,
     )
 except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
     from ..data.extract import (
+        OPD_REDO_MESSAGE,
+        _session_tools_prefix,
         extract_opd_examples,
+        extract_opd_examples_agentic,
         extract_opd_examples_v2,
     )
 
 from .formatter import OfflineOPDDataset, _hydrate_tool_calls, _load_sessions
+from .tool_rollout_env import (
+    FileToolset,
+    SandboxAgentToolEnv,
+    WorkspaceSandbox,
+    zero_reward,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +175,22 @@ class Config:
     use_gt: bool = True             # append last-version artifact to teacher prompt
     use_student: bool = True        # append student artifact to teacher prompt
     extract_version: str = "v2"
+
+    # Agentic on-policy rollout (extract_version="agentic").  One continuous
+    # multi-turn tool-using episode per session in a live ephemeral sandbox;
+    # the whole trajectory is distilled against a teacher whose prompt is
+    # augmented with the session's user follow-ups (see tool_rollout_env.py).
+    # A session is rolled out as a planning turn + one "Proceed with: <step>"
+    # user turn per planned leaf step (steps derived from the model's own plan).
+    # ``agentic_max_turns`` is the overall safety ceiling across all segments;
+    # ``agentic_max_turns_per_step`` caps the inner agent loop within one step,
+    # and ``agentic_max_steps`` caps how many planned steps are replayed.
+    agentic_max_turns: int = 48
+    agentic_max_turns_per_step: int = 8
+    agentic_max_steps: int = 6
+    agentic_enable_bash: bool = True
+    agentic_tool_timeout_s: int = 20
+    agentic_max_trajectory_tokens: int | None = None
 
     # Top-K distillation (Tinker only; ignored when use_skyrl=True).
     # topk > 0 → forward KL distillation with K teacher vocabulary candidates
@@ -1185,6 +1214,25 @@ class OnlineOPDRolloutDataset:
             artifact_only_instruction = False
 
         rows: list[dict[str, Any]] = []
+        if extract_version == "agentic":
+            # Agentic rows carry only the rollout seed; the student trajectory
+            # is generated live at train time and tokenised post-rollout, so we
+            # do NOT pre-tokenise a student/teacher prompt here.
+            for ex in examples:
+                rows.append({
+                    "prompt_messages": _hydrate_tool_calls(ex["prompt_messages"]),
+                    "system_prompt": ex.get("system_prompt", "") or "",
+                    "tool_schemas": ex.get("tool_schemas"),
+                    "golden_chat": _hydrate_tool_calls(ex.get("golden_chat") or []),
+                    "meta": ex.get("meta") or {},
+                })
+            self._rows = rows
+            self._renderer = renderer
+            self._max_length = max_length
+            self._batch_size = batch_size
+            self._extract_version = extract_version
+            self._indices = list(range(len(rows)))
+            return
         for ex in examples:
             if extract_version == "v2":
                 # v2 trains on the verbatim assistant turn; the historical
@@ -1234,17 +1282,23 @@ class OnlineOPDRolloutDataset:
         artifact_only_instruction: bool = False,
         extract_version: str = "v2",
     ) -> "OnlineOPDRolloutDataset":
-        extract_fn = (
-            extract_opd_examples_v2 if extract_version == "v2"
-            else extract_opd_examples
-        )
-        examples = extract_fn(
-            _load_sessions(path),
-            renderer=renderer,
-            pair_mode=pair_mode,
-            use_gt=use_gt,
-            use_student=use_student,
-        )
+        if extract_version == "agentic":
+            examples = extract_opd_examples_agentic(
+                _load_sessions(path),
+                renderer=renderer,
+            )
+        else:
+            extract_fn = (
+                extract_opd_examples_v2 if extract_version == "v2"
+                else extract_opd_examples
+            )
+            examples = extract_fn(
+                _load_sessions(path),
+                renderer=renderer,
+                pair_mode=pair_mode,
+                use_gt=use_gt,
+                use_student=use_student,
+            )
         dataset = cls(
             examples,
             renderer,
@@ -1531,6 +1585,704 @@ async def _sample_legacy_pipeline_datums_async(
         safe_reason = reason.replace("/", "_").replace(":", "_")
         metrics[f"opd_online/filter_reason/{safe_reason}"] = float(count)
     return valid_datums, valid_teacher_prompts, metrics
+
+
+# ---------------------------------------------------------------------------
+# Agentic on-policy rollout (extract_version="agentic")
+# ---------------------------------------------------------------------------
+#
+# A session is rolled out as a *sequence of user queries*, mirroring the Pi
+# agent loop: a planning turn (the model calls ``workflow_plan`` on-policy)
+# followed by one "Proceed with: <step>" user turn per planned step.  The step
+# queries are derived from the model's OWN plan (parsed from its workflow_plan
+# tool call), so the whole episode stays on-policy.  All segments share one
+# ephemeral sandbox (state carries across steps), and the whole trajectory
+# (every assistant turn, interleaved with real tool results and the injected
+# step user turns) becomes a single student datum (ALL_ASSISTANT_MESSAGES
+# mask).  The teacher sees the same trajectory tail but with the session's user
+# follow-ups spliced into its prefix (privileged signal), and supplies top-K
+# soft targets at every assistant token for forward-KL distillation.
+
+
+def _node_prompt(
+    description: str,
+    path_context: str,
+    output_files: list[str],
+    cwd: str,
+) -> str:
+    """Synthesize one per-step user instruction.
+
+    Mirrors ``buildPromptForNode`` in ``src/electron/libs/runner.ts`` (sans the
+    human-edit note, which has no analogue in an autonomous rollout) so the step
+    queries match the chat distribution the model was trained under.
+    """
+    cwd = (cwd or "").strip()
+    if cwd:
+        cwd_note = (
+            "\n\nWorking directory for this session (the agent runs with this as "
+            "cwd). For Read, Write, Edit, and any file paths, use each output file "
+            "as a path **relative to this directory** (e.g. the basename `report.md` "
+            "means read/write under this folder). Do not place outputs outside this "
+            "directory unless the task explicitly requires it.\n"
+            f"Working directory: {cwd}"
+        )
+    else:
+        cwd_note = (
+            "\n\nUse paths relative to the session working directory for all Read, "
+            "Write, and Edit calls."
+        )
+    has_md = any(str(f).lower().endswith(".md") for f in output_files)
+    format_note = (
+        "\n\nWhen writing output to .md files, use markdown format so the file "
+        "preview renders properly."
+        if has_md
+        else ""
+    )
+    files_note = (
+        "\n\nRelevant output files for this step:\n"
+        + "\n".join(f"- {f}" for f in output_files)
+        if output_files
+        else ""
+    )
+    refinement_note = (
+        "\n\nWhen refining existing outputs, first read the current on-disk "
+        "contents, then edit on top of that version. Do not recreate files from "
+        "memory."
+    )
+    return (
+        f"Proceed with: {path_context}\n\nTask: {description}"
+        f"{cwd_note}{files_note}{format_note}{refinement_note}"
+    )
+
+
+def _plan_step_prompts(tasks: Any, cwd: str, max_steps: int) -> list[str]:
+    """Preorder leaf-node "Proceed with" prompts from a ``workflow_plan`` tree.
+
+    Mirrors the app's per-node execution: each executable (leaf) node becomes
+    one user instruction, with ``pathContext`` = the ``" > "``-joined chain of
+    ancestor descriptions (matching ``getNodePath`` in the UI).  Parent nodes
+    (those with children) are groupings only and do not get their own turn.
+    """
+    prompts: list[str] = []
+
+    def walk(nodes: Any, ancestors: list[str]) -> None:
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            if len(prompts) >= max_steps:
+                return
+            if not isinstance(node, dict):
+                continue
+            desc = str(node.get("description") or "").strip()
+            path = ancestors + ([desc] if desc else [])
+            children = node.get("children")
+            if isinstance(children, list) and children:
+                walk(children, path)
+            else:
+                output_files = [str(f) for f in (node.get("outputFiles") or [])]
+                path_context = " > ".join(path) if path else desc
+                prompts.append(_node_prompt(desc, path_context, output_files, cwd))
+
+    walk(tasks if isinstance(tasks, list) else [], [])
+    return prompts[:max_steps]
+
+
+def _extract_workflow_plan_tasks(messages: list[dict[str, Any]]) -> Any | None:
+    """Return the ``tasks`` arg of the last ``workflow_plan`` tool call, if any.
+
+    Reads the model's on-policy plan back out of the rendered trajectory so the
+    rollout driver can synthesize step queries from it (option B).
+    """
+    found: Any | None = None
+    for m in messages:
+        if not (isinstance(m, dict) and m.get("role") == "assistant"):
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = getattr(tc, "function", None)
+            if fn is not None:
+                name = getattr(fn, "name", None)
+                args = getattr(fn, "arguments", None)
+            elif isinstance(tc, dict):
+                fn_d = tc.get("function") or {}
+                name = fn_d.get("name")
+                args = fn_d.get("arguments")
+            else:
+                continue
+            if name != "workflow_plan":
+                continue
+            try:
+                parsed = json.loads(args) if isinstance(args, str) else args
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict) and "tasks" in parsed:
+                found = parsed["tasks"]
+    return found
+
+
+# ---- rollout transcript logging helpers -----------------------------------
+# These render a live agentic rollout (every user turn, assistant turn, tool
+# call and tool result) into compact JSON entries and a human-readable block so
+# the rollouts are actually inspectable in the logs.
+
+
+def _message_text_for_log(content: Any) -> str:
+    """Best-effort plain-text extraction from a renderer ``Message`` content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for p in content:
+            is_dict = isinstance(p, dict)
+            ptype = p.get("type") if is_dict else getattr(p, "type", None)
+            if ptype == "text":
+                parts.append(str(p.get("text", "") if is_dict else getattr(p, "text", "")))
+            elif ptype == "thinking":
+                think = p.get("thinking", "") if is_dict else getattr(p, "thinking", "")
+                parts.append(f"<think>{think}</think>")
+        return "".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _tool_calls_for_log(message: dict[str, Any]) -> list[dict[str, str]]:
+    """Extract ``[{name, arguments}]`` from a message's tool calls (if any)."""
+    out: list[dict[str, str]] = []
+    for tc in (message.get("tool_calls") or []):
+        fn = getattr(tc, "function", None)
+        if fn is not None:
+            out.append(
+                {"name": str(getattr(fn, "name", "")), "arguments": str(getattr(fn, "arguments", ""))}
+            )
+        elif isinstance(tc, dict):
+            f = tc.get("function") or {}
+            out.append({"name": str(f.get("name", "")), "arguments": str(f.get("arguments", ""))})
+    return out
+
+
+def _agentic_messages_to_log(
+    messages: list[dict[str, Any]], *, max_field_chars: int = 2000
+) -> list[dict[str, Any]]:
+    """Convert a rollout history into compact, JSON-serializable log entries.
+
+    Each entry keeps the role, truncated text content, any tool calls
+    (name + truncated arguments), and the tool name for tool-result turns.
+    """
+    logged: list[dict[str, Any]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        entry: dict[str, Any] = {"role": role}
+        text = _message_text_for_log(m.get("content"))
+        if text:
+            entry["content"] = text[:max_field_chars]
+        tcs = _tool_calls_for_log(m)
+        if tcs:
+            entry["tool_calls"] = [
+                {"name": tc["name"], "arguments": tc["arguments"][:max_field_chars]}
+                for tc in tcs
+            ]
+        if role == "tool" and m.get("name"):
+            entry["name"] = m.get("name")
+        logged.append(entry)
+    return logged
+
+
+def _format_agentic_transcript(record: dict[str, Any]) -> str:
+    """Render a logged rollout record as a human-readable transcript block."""
+    lines: list[str] = [
+        f"================ step {record.get('step')} | session "
+        f"{record.get('session_uuid')} ================",
+        (
+            f"valid={record.get('valid')} drop_reason={record.get('drop_reason')} "
+            f"turns={record.get('turns')} steps={record.get('steps')} "
+            f"tool_calls={record.get('tool_calls')} "
+            f"trajectory_tokens={record.get('trajectory_tokens')} "
+            f"n_followups={record.get('n_followups')}"
+        ),
+    ]
+    for m in record.get("messages") or []:
+        role = str(m.get("role", "?")).upper()
+        name = f" ({m['name']})" if m.get("role") == "tool" and m.get("name") else ""
+        lines.append(f"\n----- {role}{name} -----")
+        content = m.get("content")
+        if content:
+            lines.append(content)
+        for tc in m.get("tool_calls") or []:
+            lines.append(f"  >> tool_call: {tc['name']}({tc['arguments']})")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_agentic_teacher_messages(
+    row: dict[str, Any],
+    trajectory_tail: list[dict[str, Any]],
+    tools_prefix: list[dict[str, Any]],
+    redo_message: str = OPD_REDO_MESSAGE,
+) -> list[dict[str, Any]]:
+    """Teacher conversation: tools_prefix + follow-ups + redo + task + trajectory.
+
+    Mirrors :func:`_build_teacher_prompt_chat` (``head + golden_chat + [redo] +
+    trailing``): the privileged user follow-ups are spliced ONCE before the
+    restated initial task (and thus before the first assistant token), so they
+    condition every distilled assistant distribution.  ``trajectory_tail`` (the
+    student's assistant/tool messages) is byte-identical to the student datum's,
+    so teacher top-K aligns 1-to-1 onto the student mask.
+    """
+    golden_chat = row.get("golden_chat") or []
+    prompt_messages = row["prompt_messages"]
+    messages: list[dict[str, Any]] = list(tools_prefix)
+    messages.extend(dict(m) for m in golden_chat)
+    messages.append({"role": "user", "content": redo_message})
+    messages.extend(dict(m) for m in prompt_messages)
+    messages.extend(trajectory_tail)
+    return messages
+
+
+async def _rollout_one_agentic_episode(
+    row: dict[str, Any],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    *,
+    max_tokens: int,
+    temperature: float,
+    max_turns: int,
+    max_turns_per_step: int,
+    max_steps: int,
+    enable_bash: bool,
+    tool_timeout_s: int,
+    max_trajectory_tokens: int | None,
+    max_length: int | None,
+    collect_transcript: bool = False,
+    log_field_chars: int = 2000,
+) -> tuple[
+    tinker.Datum | None, tinker.Datum | None, dict[str, float], dict[str, Any] | None
+]:
+    """Run one multi-query tool-using rollout and build (student, teacher) datums.
+
+    The episode is a sequence of user-turn *segments*: a planning segment (where
+    the model calls ``workflow_plan`` on-policy) followed by one segment per
+    planned leaf step (a synthesized "Proceed with: ..." user turn).  Each
+    segment runs the inner agent loop -- sample -> parse -> execute tools -- until
+    the model emits an assistant turn with no tool calls (the step's final
+    answer) or the per-step turn cap is hit.  All segments share one sandbox.
+    """
+    system_prompt = row.get("system_prompt", "") or ""
+    tool_schemas = row.get("tool_schemas")
+    tools_prefix = list(_session_tools_prefix(system_prompt, tool_schemas, renderer))
+    prompt_messages = list(row["prompt_messages"])
+    initial_messages = tools_prefix + prompt_messages
+
+    sandbox = WorkspaceSandbox(bash_timeout_s=tool_timeout_s)
+    metrics_local: dict[str, float] = {}
+    try:
+        toolset = FileToolset(
+            sandbox, enable_bash=enable_bash, bash_timeout_s=tool_timeout_s
+        )
+        msg_env = SandboxAgentToolEnv(
+            tools=toolset.tools(),
+            initial_messages=initial_messages,
+            # Overall safety ceiling across all segments; per-step caps below are
+            # the usual limiter.
+            max_turns=max_turns,
+            reward_fn=zero_reward,
+            sandbox=sandbox,
+        )
+        history = await msg_env.initial_observation()
+        stop = renderer.get_stop_sequences()
+        n_turns = 0
+        n_tool_calls = 0
+        parse_failed = False
+        overflow = False
+
+        async def run_segment() -> None:
+            """Drive the current user-turn segment to a no-tool assistant turn.
+
+            Sets ``parse_failed`` / ``overflow`` on abort.  Mutates the shared
+            ``history`` (== ``msg_env.history``) in place.
+            """
+            nonlocal n_turns, n_tool_calls, parse_failed, overflow, history
+            for _ in range(max_turns_per_step):
+                if msg_env._turn_count >= max_turns:
+                    return
+                prompt_input = await asyncio.to_thread(
+                    renderer.build_generation_prompt, history
+                )
+                if (
+                    max_trajectory_tokens is not None
+                    and prompt_input.length >= max_trajectory_tokens
+                ):
+                    overflow = True
+                    return
+                result = await sampling_client.sample_async(
+                    prompt=prompt_input,
+                    num_samples=1,
+                    sampling_params=tinker.SamplingParams(
+                        stop=stop,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    ),
+                )
+                tokens = list(result.sequences[0].tokens)
+                message, ok = renderer.parse_response(tokens)
+                if not ok:
+                    parse_failed = True
+                    return
+                n_turns += 1
+                tool_calls = message.get("tool_calls") or []
+                n_tool_calls += len(tool_calls)
+                if logger.isEnabledFor(logging.DEBUG):
+                    preview = _message_text_for_log(
+                        message.get("content")
+                    )[:200].replace("\n", " ")
+                    logger.debug(
+                        "agentic turn=%d tools=%s content=%r",
+                        n_turns,
+                        [b["name"] for b in _tool_calls_for_log(message)],
+                        preview,
+                    )
+                step_result = await msg_env.step(message)
+                history = step_result.next_messages
+                if not tool_calls:
+                    # Final (no-tool) assistant turn => this segment is done.
+                    return
+                if msg_env._should_stop:
+                    # A tool explicitly halted the episode (not used by our
+                    # toolset, but honor it defensively).
+                    return
+
+        # Segment 0: planning. The model registers a workflow_plan on-policy.
+        await run_segment()
+
+        # Derive the step queries from the model's OWN plan and replay them as
+        # subsequent user turns in the same sandbox.
+        n_steps = 0
+        if not parse_failed and not overflow:
+            tasks = _extract_workflow_plan_tasks(history)
+            step_prompts = (
+                _plan_step_prompts(tasks, sandbox.root, max_steps) if tasks else []
+            )
+            if not step_prompts:
+                metrics_local["agentic/no_plan"] = 1.0
+            for step_prompt in step_prompts:
+                if msg_env._turn_count >= max_turns:
+                    break
+                history.append({"role": "user", "content": step_prompt})
+                n_steps += 1
+                await run_segment()
+                if parse_failed or overflow:
+                    break
+
+        if overflow:
+            metrics_local["agentic/context_overflow"] = 1.0
+
+        def _episode_log(drop_reason: str | None, *, valid: bool) -> dict[str, Any] | None:
+            if not collect_transcript:
+                return None
+            return {
+                "messages": _agentic_messages_to_log(
+                    history, max_field_chars=log_field_chars
+                ),
+                "drop_reason": drop_reason,
+                "valid": valid,
+                "n_turns": n_turns,
+                "n_steps": n_steps,
+                "n_tool_calls": n_tool_calls,
+            }
+
+        trajectory_tail = list(history[len(initial_messages):])
+        if not any(
+            isinstance(m, dict) and m.get("role") == "assistant" for m in trajectory_tail
+        ):
+            # No assistant turn produced (e.g. immediate parse failure): no
+            # supervision signal, skip the episode.
+            metrics_local["agentic/empty_trajectory"] = 1.0
+            drop_reason = (
+                "parse_failed" if parse_failed
+                else "context_overflow" if overflow
+                else "empty_trajectory"
+            )
+            return None, None, metrics_local, _episode_log(drop_reason, valid=False)
+
+        # The env-produced messages already carry renderer-native ToolCall
+        # objects (from renderer.parse_response), so they must NOT be re-hydrated.
+        student_convo = list(history)
+        teacher_convo = _build_agentic_teacher_messages(
+            row, trajectory_tail, tools_prefix,
+        )
+        student_datum = conversation_to_datum(
+            student_convo, renderer, max_length,
+            train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        )
+        teacher_datum = conversation_to_datum(
+            teacher_convo, renderer, max_length,
+            train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        )
+        metrics_local.update({
+            "agentic/turns": float(n_turns),
+            "agentic/tool_calls": float(n_tool_calls),
+            "agentic/steps": float(n_steps),
+            "agentic/parse_failed": 1.0 if parse_failed else 0.0,
+            "agentic/trajectory_tokens": float(student_datum.model_input.length),
+        })
+        return student_datum, teacher_datum, metrics_local, _episode_log(None, valid=True)
+    finally:
+        sandbox.cleanup()
+
+
+async def _sample_agentic_opd_datums_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    *,
+    max_tokens: int,
+    temperature: float,
+    max_turns: int,
+    max_turns_per_step: int,
+    max_steps: int,
+    enable_bash: bool,
+    tool_timeout_s: int,
+    max_trajectory_tokens: int | None,
+    max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+    sample_log_chars: int = 4000,
+) -> tuple[list[tinker.Datum], list[tinker.Datum], dict[str, float]]:
+    """Collect agentic student trajectories and follow-up-augmented teacher datums.
+
+    Returns ``(student_datums, teacher_datums, metrics)``.  Each session yields
+    at most one (student, teacher) datum pair; sessions that produce no
+    assistant turn are dropped.  Student and teacher datums are 1-to-1.
+    """
+    results = await asyncio.gather(*[
+        _rollout_one_agentic_episode(
+            row,
+            renderer,
+            sampling_client,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_turns=max_turns,
+            max_turns_per_step=max_turns_per_step,
+            max_steps=max_steps,
+            enable_bash=enable_bash,
+            tool_timeout_s=tool_timeout_s,
+            max_trajectory_tokens=max_trajectory_tokens,
+            max_length=max_length,
+            collect_transcript=sample_log_path is not None,
+            log_field_chars=sample_log_chars,
+        )
+        for row in rows
+    ])
+
+    student_datums: list[tinker.Datum] = []
+    teacher_datums: list[tinker.Datum] = []
+    n_valid = 0
+    agg_turns = 0.0
+    agg_tool_calls = 0.0
+    agg_steps = 0.0
+    agg_parse_failed = 0.0
+    agg_overflow = 0.0
+    agg_empty = 0.0
+    agg_no_plan = 0.0
+
+    sample_log_f = None
+    transcript_f = None
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_log_f = sample_log_path.open("a", encoding="utf-8")
+        # Sibling human-readable transcript (the actual rollouts, turn by turn).
+        transcript_f = sample_log_path.with_name(
+            "agentic_rollout_transcripts.txt"
+        ).open("a", encoding="utf-8")
+    try:
+        for (row, (sd, td, m, episode_log)) in zip(rows, results, strict=True):
+            agg_parse_failed += m.get("agentic/parse_failed", 0.0)
+            agg_overflow += m.get("agentic/context_overflow", 0.0)
+            agg_empty += m.get("agentic/empty_trajectory", 0.0)
+            agg_no_plan += m.get("agentic/no_plan", 0.0)
+            valid = sd is not None and td is not None
+            meta = row.get("meta") or {}
+            drop_reason = (episode_log or {}).get("drop_reason")
+            if not valid and not drop_reason:
+                drop_reason = "dropped"
+
+            # Per-session console summary (always on, even without file logging),
+            # so the rollouts are visible at a glance during training.
+            logger.info(
+                "agentic rollout step=%d session=%s valid=%s turns=%d steps=%d "
+                "tool_calls=%d tokens=%s drop=%s",
+                step,
+                meta.get("session_uuid"),
+                valid,
+                int(m.get("agentic/turns", 0.0)),
+                int(m.get("agentic/steps", 0.0)),
+                int(m.get("agentic/tool_calls", 0.0)),
+                m.get("agentic/trajectory_tokens"),
+                drop_reason or "-",
+            )
+
+            if sample_log_f is not None:
+                rec = {
+                    "step": step,
+                    "session_uuid": meta.get("session_uuid"),
+                    "valid": valid,
+                    "drop_reason": drop_reason,
+                    "turns": m.get("agentic/turns"),
+                    "steps": m.get("agentic/steps"),
+                    "tool_calls": m.get("agentic/tool_calls"),
+                    "trajectory_tokens": m.get("agentic/trajectory_tokens"),
+                    "n_followups": meta.get("n_followups"),
+                    "messages": (episode_log or {}).get("messages") or [],
+                }
+                sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                sample_log_f.flush()
+                if transcript_f is not None:
+                    transcript_f.write(_format_agentic_transcript(rec) + "\n")
+                    transcript_f.flush()
+
+            if not valid:
+                continue
+            n_valid += 1
+            agg_turns += m.get("agentic/turns", 0.0)
+            agg_tool_calls += m.get("agentic/tool_calls", 0.0)
+            agg_steps += m.get("agentic/steps", 0.0)
+            student_datums.append(sd)
+            teacher_datums.append(td)
+    finally:
+        if sample_log_f is not None:
+            sample_log_f.close()
+        if transcript_f is not None:
+            transcript_f.close()
+
+    batch = len(rows)
+    metrics: dict[str, float] = {
+        "opd_online/batch_examples": float(batch),
+        "opd_online/valid_examples": float(n_valid),
+        "opd_online/filter_rate": (1.0 - n_valid / batch) if batch else 0.0,
+        "agentic/parse_failed_total": agg_parse_failed,
+        "agentic/context_overflow_total": agg_overflow,
+        "agentic/empty_trajectory_total": agg_empty,
+        "agentic/no_plan_total": agg_no_plan,
+    }
+    if n_valid:
+        metrics["agentic/mean_turns"] = agg_turns / n_valid
+        metrics["agentic/mean_tool_calls"] = agg_tool_calls / n_valid
+        metrics["agentic/mean_steps"] = agg_steps / n_valid
+    return student_datums, teacher_datums, metrics
+
+
+async def _build_agentic_topk_datums_async(
+    student_datums: list[tinker.Datum],
+    teacher_datums: list[tinker.Datum],
+    teacher_client: tinker.SamplingClient,
+    topk: int = 20,
+    max_context_length: int = 32768,
+    vocab_size: int | None = None,
+    skip_first_n_tokens: int = 0,
+    teacher_temperature: float = 1.0,
+) -> tuple[list[tinker.Datum], dict[str, float]]:
+    """Top-K teacher soft targets for multi-turn (non-contiguous) student masks.
+
+    Generalises :func:`_build_offline_topk_datums_async` to the agentic case:
+    the teacher-forced sequence is the *entire* teacher conversation (built by
+    ``conversation_to_datum`` with the privileged follow-up prefix), and teacher
+    top-K is read at the teacher datum's assistant-mask positions, then mapped
+    onto the student datum's assistant-mask positions (1-to-1, in order).
+    """
+    teacher_forced_seqs: list[tinker.ModelInput] = []
+    teacher_mask_indices_list: list[list[int]] = []
+    for td in teacher_datums:
+        targets = td.loss_fn_inputs["target_tokens"].data
+        td_weights = td.loss_fn_inputs["weights"].data
+        td_mask = [j for j, w in enumerate(td_weights) if w > 0]
+        # Full teacher-forced sequence = model_input (== full[:-1]) + last target.
+        teacher_forced = td.model_input
+        if len(targets) > 0:
+            teacher_forced = teacher_forced.append_int(int(targets[-1]))
+        teacher_forced_seqs.append(teacher_forced)
+        teacher_mask_indices_list.append(td_mask)
+
+    topk_responses = await asyncio.gather(*[
+        teacher_client.sample_async(
+            prompt=tf_seq,
+            num_samples=1,
+            sampling_params=tinker.SamplingParams(max_tokens=1),
+            include_prompt_logprobs=True,
+            topk_prompt_logprobs=topk,
+        )
+        for tf_seq in teacher_forced_seqs
+    ])
+
+    total_completion_tokens = 0.0
+    total_teacher_entropy = 0.0
+    new_datums: list[tinker.Datum] = []
+
+    for i, sd in enumerate(student_datums):
+        weights_1d = sd.loss_fn_inputs["weights"].data
+        student_mask = [j for j, w in enumerate(weights_1d) if w > 0]
+        td_mask = teacher_mask_indices_list[i]
+        N = sd.model_input.length
+
+        target_tokens_NK = torch.zeros(N, topk, dtype=torch.long)
+        weights_NK = torch.zeros(N, topk, dtype=torch.float32)
+
+        topk_all = topk_responses[i].topk_prompt_logprobs
+        n_tokens = min(len(student_mask), len(td_mask))
+        used = 0
+        for t in range(n_tokens):
+            if t < skip_first_n_tokens:
+                continue
+            # topk_prompt_logprobs[p] predicts the token AT sequence position p;
+            # the t-th assistant token sits at teacher full-seq position
+            # td_mask[t] + 1 (target[j] == full[j + 1]).
+            teacher_pos = td_mask[t] + 1
+            student_pos = student_mask[t]
+
+            if topk_all is None or teacher_pos >= len(topk_all):
+                continue
+            topk_entries = topk_all[teacher_pos]
+            if not topk_entries:
+                continue
+
+            filtered = [
+                (tok_id, lp)
+                for tok_id, lp in topk_entries[:topk]
+                if vocab_size is None or tok_id < vocab_size
+            ]
+            if not filtered:
+                continue
+
+            k_actual = len(filtered)
+            token_ids = torch.tensor([tid for tid, _ in filtered], dtype=torch.long)
+            logprobs = torch.tensor([lp for _, lp in filtered], dtype=torch.float32)
+            if teacher_temperature != 1.0:
+                logprobs = logprobs / teacher_temperature
+            logprobs -= torch.logsumexp(logprobs, dim=0)
+            probs = logprobs.exp()
+
+            target_tokens_NK[student_pos, :k_actual] = token_ids
+            weights_NK[student_pos, :k_actual] = probs
+            total_teacher_entropy += -(probs * logprobs).sum().item()
+            used += 1
+
+        total_completion_tokens += used
+        new_datums.append(tinker.Datum(
+            model_input=sd.model_input,
+            loss_fn_inputs={
+                "target_tokens": tinker.TensorData.from_torch(target_tokens_NK),
+                "weights": tinker.TensorData.from_torch(weights_NK),
+            },
+        ))
+
+    metrics: dict[str, float] = {
+        "opd/topk_num_datums": float(len(student_datums)),
+        "opd/topk_k": float(topk),
+    }
+    if total_completion_tokens > 0:
+        metrics["opd/total_completion_tokens"] = total_completion_tokens
+        metrics["opd/mean_teacher_entropy"] = total_teacher_entropy / total_completion_tokens
+    return new_datums, metrics
 
 
 async def _sample_online_artifact_datums_async(

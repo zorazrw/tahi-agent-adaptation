@@ -62,6 +62,15 @@ function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
   return undefined;
 }
 
+/** True once any step has been started or finished (not a fresh plan awaiting first Run). */
+function workflowHasExecutionStarted(tree: WorkflowNode[]): boolean {
+  for (const node of tree) {
+    if (node.status !== "pending") return true;
+    if (workflowHasExecutionStarted(node.children)) return true;
+  }
+  return false;
+}
+
 function createEmptyNode(depth: number): WorkflowNode {
   return {
     id: crypto.randomUUID(),
@@ -516,6 +525,48 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   }, [activeSessionId, workflowTree]);
 
   const lastAppliedCollapseRef = useRef<{ identity: string; depth: number } | null>(null);
+  const dismissedRunShinePlanRef = useRef<string | null>(null);
+  const [runButtonShine, setRunButtonShine] = useState(false);
+
+  // Shine Run after the plan (and async verifier fill) settle; stop after the user clicks Run once.
+  useEffect(() => {
+    if (!activeSessionId || workflowTree.length === 0) {
+      setRunButtonShine(false);
+      return;
+    }
+    if (activeSession?.status !== "idle") {
+      setRunButtonShine(false);
+      return;
+    }
+    if (workflowHasExecutionStarted(workflowTree)) {
+      setRunButtonShine(false);
+      return;
+    }
+    if (dismissedRunShinePlanRef.current === workflowTreeIdentity) {
+      setRunButtonShine(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const session = useAppStore.getState().sessions[activeSessionId];
+      const tree = session?.workflowTree ?? [];
+      if (
+        session?.status === "idle" &&
+        tree.length > 0 &&
+        !workflowHasExecutionStarted(tree) &&
+        dismissedRunShinePlanRef.current !== workflowTreeIdentity
+      ) {
+        setRunButtonShine(true);
+      }
+    }, 400);
+
+    return () => window.clearTimeout(timer);
+  }, [activeSessionId, activeSession?.status, workflowTree, workflowTreeIdentity]);
+
+  useEffect(() => {
+    dismissedRunShinePlanRef.current = null;
+    setRunButtonShine(false);
+  }, [workflowTreeIdentity]);
 
   // Collapse branches that should be hidden at the current verification depth (coarse = collapse all nested parents).
   useEffect(() => {
@@ -1036,11 +1087,17 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                 </div>
               );
             }
+            const showRunShine = runButtonShine && !isNodeCompleted;
             return (
               <button
                 type="button"
-                className="shrink-0 mt-1 flex w-full items-center justify-center gap-1.5 rounded-md border border-ink-900/15 bg-ink-900/[0.04] px-2.5 py-2 text-sm font-medium text-ink-800 hover:bg-ink-900/[0.07] transition-colors"
-                onClick={() => { setRunningNodeId(selectedNodeId); sendEvent({ type: "session.solveNode", payload: { sessionId: activeSessionId, nodeId: selectedNodeId! } }); }}
+                className={`shrink-0 mt-1 flex w-full items-center justify-center gap-1.5 rounded-md border border-ink-900/15 bg-ink-900/[0.04] px-2.5 py-2 text-sm font-medium text-ink-800 hover:bg-ink-900/[0.07] transition-colors${showRunShine ? " run-button-shine" : ""}`}
+                onClick={() => {
+                  dismissedRunShinePlanRef.current = workflowTreeIdentity;
+                  setRunButtonShine(false);
+                  setRunningNodeId(selectedNodeId);
+                  sendEvent({ type: "session.solveNode", payload: { sessionId: activeSessionId, nodeId: selectedNodeId! } });
+                }}
               >
                 {isNodeCompleted ? (
                   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>

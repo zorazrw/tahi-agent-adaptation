@@ -5,6 +5,9 @@ Accepts export shape ``{ uuid, name, trajectory }``, weight-based ``{ uuid, name
 (a JSON array of those objects), or legacy ``{ sessions: [...] }``.
 Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 
+When export JSON includes ``expertise_task`` (e.g. ``data-viz-html``), writes to that stem
+instead of slugifying the session title, and includes existing memory/skill file content in the LM prompt.
+
 Requires: anthropic, python-dotenv. API key resolution matches the Electron app (see below).
 """
 
@@ -27,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+_TASK_STEM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
+_MAX_EXISTING_FILE_CHARS = 6000
 
 
 class AnthropicConfigError(RuntimeError):
@@ -231,11 +236,31 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
         source = sid.strip() if isinstance(sid, str) and sid.strip() else f"session_{i}"
         task_blob = blob.get("task")
         task_str = task_blob.strip() if isinstance(task_blob, str) else ""
-        rows.append({"name": name_str, "task": task_str, "actions": actions, "source": source})
+        expertise_task = blob.get("expertise_task")
+        expertise_str = expertise_task.strip() if isinstance(expertise_task, str) else ""
+        rows.append(
+            {
+                "name": name_str,
+                "task": task_str,
+                "actions": actions,
+                "source": source,
+                "expertise_task": expertise_str,
+            }
+        )
     return rows
 
 
-MEMORY_SYSTEM = """From the task description and the numbered action log, write up to 6 short facts or user preferences worth remembering later.
+MEMORY_SYSTEM = """From the task description and the numbered action log, write up to 8 short facts or user preferences worth remembering later.
+
+Your primary job is to extract NEW information from the current session Log (user messages, edits, styling choices, corrections, tools used, preferences). The existing memory file—if any—is background only.
+
+When an existing memory file is provided:
+- FIRST mine the Log for facts/preferences not already captured (this is mandatory when the log is non-empty).
+- Include at least 2 lines clearly derived from this session when the log has agent actions.
+- Adopt the useful parts from original lines only when they do not duplicate what you add.
+- Edit originals when this session refines or contradicts them.
+- Drop obsolete or redundant lines to make room for new learnings.
+Output the full updated memory file (not a diff).
 
 Output rules:
 - One fact per line. Plain text only (no markdown headers like # or ##).
@@ -244,6 +269,16 @@ Output rules:
 - If nothing is worth saving, output exactly the single word NONE (nothing else)."""
 
 SKILL_SYSTEM = """From the task and numbered log, describe the workflow the agent used: ordered steps, generalized (no long paths).
+
+Your primary job is to capture what THIS session did—especially techniques, fixes, and steps visible in the Log. The existing skill file—if any—is background only.
+
+When an existing skill file is provided:
+- FIRST update the workflow using concrete steps from this session's Log (mandatory when the log is non-empty).
+- Add or revise steps for anything new in this session (e.g. chart tweaks, file edits, verification, user-requested changes).
+- Adopt the useful parts from original steps only when still accurate; merge duplicates.
+- Do not return the existing skill unchanged if the log shows new agent work.
+Output the full updated skill (not a diff). Generalize: no long paths, file paths, or raw code.
+
 Reply with:
 Title: <short task name>
 1. <step>
@@ -300,9 +335,45 @@ def _normalize_memory_line(line: str) -> str | None:
     return s
 
 
-def extract_memories(client, model: str, task: str, log: str) -> list[str]:
+def _clip_existing(text: str) -> str:
+    s = text.strip()
+    if len(s) <= _MAX_EXISTING_FILE_CHARS:
+        return s
+    return s[:_MAX_EXISTING_FILE_CHARS] + "\n...[truncated]"
+
+
+def _existing_file_block(label: str, content: str) -> str:
+    body = _clip_existing(content)
+    if not body:
+        return ""
+    return (
+        f"{label} (background only—do not copy back unchanged; prioritize new learnings from the Log below):\n"
+        f"{body}\n\n"
+    )
+
+
+def _merge_tail_instruction(has_existing: bool, kind: str) -> str:
+    if not has_existing:
+        return ""
+    noun = "memory facts" if kind == "memory" else "workflow steps"
+    return (
+        f"\nMerge instruction: The Log above is from a NEW session. "
+        f"Extract fresh {noun} from it. Keep prior file content only when still useful; "
+        f"edit or replace stale lines. Do not return the prior file unchanged if the log has agent actions.\n"
+    )
+
+
+def extract_memories(
+    client, model: str, task: str, log: str, *, existing_memory: str = ""
+) -> list[str]:
     task_block = (task or "").strip() or "(no title)"
-    user = f"Task / session title:\n{task_block}\n\nLog:\n{log or '(empty)'}\n"
+    has_existing = bool(existing_memory.strip())
+    user = (
+        f"Task / session title:\n{task_block}\n\n"
+        f"{_existing_file_block('Existing memory file', existing_memory)}"
+        f"Log (primary source—mine this session for new facts and preferences):\n{log or '(empty)'}\n"
+        f"{_merge_tail_instruction(has_existing, 'memory')}"
+    )
     try:
         raw = _llm_text(client, model, MEMORY_SYSTEM, user)
     except Exception:
@@ -319,13 +390,19 @@ def extract_memories(client, model: str, task: str, log: str) -> list[str]:
             "Memory extraction produced 0 lines after parsing (model returned non-empty text). Preview: %s",
             raw.strip()[:500],
         )
-    return out[:6]
+    return out[:8 if has_existing else 6]
 
 
-def extract_skill(client, model: str, task: str, log: str) -> tuple[str, list[str]] | None:
+def extract_skill(
+    client, model: str, task: str, log: str, *, existing_skill: str = ""
+) -> tuple[str, list[str]] | None:
     task_block = (task or "").strip() or "(no title)"
+    has_existing = bool(existing_skill.strip())
     user = (
-        f"Task:\n{task_block}\n\nLog:\n{log or '(empty)'}\n\n"
+        f"Task:\n{task_block}\n\n"
+        f"{_existing_file_block('Existing skill file', existing_skill)}"
+        f"Log (primary source—capture what this session did):\n{log or '(empty)'}\n\n"
+        f"{_merge_tail_instruction(has_existing, 'skill')}"
         "Use Title: plus numbered steps only.\n"
     )
     try:
@@ -351,6 +428,38 @@ def extract_skill(client, model: str, task: str, log: str) -> tuple[str, list[st
     if title and steps:
         return (title, steps)
     return None
+
+
+def _normalize_task_stem(value: str) -> str | None:
+    s = (value or "").strip().lower()
+    if s and _TASK_STEM_RE.match(s):
+        return s
+    return None
+
+
+def _output_stem(row: dict[str, Any]) -> str:
+    expertise = row.get("expertise_task")
+    if isinstance(expertise, str):
+        stem = _normalize_task_stem(expertise)
+        if stem:
+            return stem
+    name = row.get("name")
+    name_str = name if isinstance(name, str) else ""
+    source = row.get("source")
+    source_str = source if isinstance(source, str) else "session"
+    return _slug(name_str, source_str)
+
+
+def _read_existing_outputs(out: Path, stem: str) -> tuple[str, str]:
+    mem_path = out / "memories" / f"{stem}.md"
+    skill_path = out / "skills" / f"{stem}.md"
+    memory = mem_path.read_text(encoding="utf-8") if mem_path.is_file() else ""
+    skill = skill_path.read_text(encoding="utf-8") if skill_path.is_file() else ""
+    if memory.strip().startswith("## Auto memory (fallback)"):
+        memory = ""
+    if skill.strip().startswith("Auto-induction fallback skill"):
+        skill = ""
+    return memory, skill
 
 
 def _slug(name: str, fallback: str) -> str:
@@ -412,21 +521,32 @@ def main() -> None:
         src = row["source"]
         task_for_llm = (row.get("task") or "").strip() if isinstance(row.get("task"), str) else ""
         if not task_for_llm:
-            task_for_llm = (name or "").strip()
+            task_for_llm = (name or "").strip() if isinstance(name, str) else ""
         actions = row.get("actions") or []
         log = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
-        base = _slug(name, src)
-        n = seen.get(base, 0)
-        seen[base] = n + 1
-        stem = base if n == 0 else f"{base}-{''.join(c for c in src if c.isalnum())[:8] or n}"
+        base = _output_stem(row)
+        expertise_stem = _normalize_task_stem(
+            row.get("expertise_task") if isinstance(row.get("expertise_task"), str) else ""
+        )
+        if expertise_stem:
+            stem = expertise_stem
+        else:
+            n = seen.get(base, 0)
+            seen[base] = n + 1
+            stem = base if n == 0 else f"{base}-{''.join(c for c in src if c.isalnum())[:8] or n}"
 
-        memories = extract_memories(client, model, task_for_llm, log)
+        existing_memory, existing_skill = _read_existing_outputs(out, stem)
+        memories = extract_memories(
+            client, model, task_for_llm, log, existing_memory=existing_memory
+        )
         (mem_dir / f"{stem}.md").write_text(
             ("\n\n".join(memories) + "\n") if memories else "",
             encoding="utf-8",
         )
 
-        skill = extract_skill(client, model, task_for_llm, log)
+        skill = extract_skill(
+            client, model, task_for_llm, log, existing_skill=existing_skill
+        )
         if skill:
             t, steps = skill
             body = t + "\n" + "\n".join(f"{i + 1}. {st}" for i, st in enumerate(steps)) + "\n"

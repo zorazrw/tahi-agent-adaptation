@@ -1,23 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClientEvent } from "../types";
 import { useAppStore } from "../store/useAppStore";
+import { readStoredAutoInduction } from "../lib/auto-induction";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 8;
 const LINE_HEIGHT = 21;
 const MAX_HEIGHT = MAX_ROWS * LINE_HEIGHT;
-const AUTO_INDUCTION_KEY = "agent-cowork-auto-context-induction";
-
-function readStoredAutoInduction(): boolean {
-  try {
-    const v = localStorage.getItem(AUTO_INDUCTION_KEY);
-    if (v === "false") return false;
-    if (v === "true") return true;
-  } catch {
-    /* ignore */
-  }
-  return true;
-}
 
 function fileTypeLabel(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -41,6 +30,8 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
   const setAttachedFiles = useAppStore((s) => s.setAttachedFiles);
   const tempCwd = useAppStore((s) => s.tempCwd);
   const setTempCwd = useAppStore((s) => s.setTempCwd);
+  const expertiseTaskCategory = useAppStore((s) => s.expertiseTaskCategory);
+  const setExpertiseTaskCategory = useAppStore((s) => s.setExpertiseTaskCategory);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -140,12 +131,14 @@ export function HomePromptInput({ sendEvent }: HomePromptInputProps) {
         cwd: sessionCwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         autoContextInduction: readStoredAutoInduction(),
+        ...(expertiseTaskCategory ? { expertiseTask: expertiseTaskCategory } : {}),
       },
     });
     setPrompt("");
     setAttachedFiles([]);
     setTempCwd(null);
-  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd]);
+    setExpertiseTaskCategory(null);
+  }, [prompt, pendingStart, cwd, tempCwd, attachedFiles, expertiseTaskCategory, sendEvent, setPendingStart, setGlobalError, setPrompt, setAttachedFiles, setTempCwd, setExpertiseTaskCategory]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;

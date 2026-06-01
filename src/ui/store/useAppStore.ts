@@ -71,9 +71,12 @@ interface AppState {
   /** LM is labeling verifiers for this session/step before the next run can proceed. */
   verifierCheckSessionId: string | null;
   verifierCheckNodeId: string | null;
+  /** Expertise picker category slug for the next session / active session updates. */
+  expertiseTaskCategory: string | null;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
+  setExpertiseTaskCategory: (category: string | null) => void;
   setPendingStart: (pending: boolean) => void;
   setGlobalError: (error: string | null) => void;
   setShowStartModal: (show: boolean) => void;
@@ -140,9 +143,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   workflowRunMode: readStoredWorkflowRunMode(),
   verifierCheckSessionId: null,
   verifierCheckNodeId: null,
+  expertiseTaskCategory: null,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
+  setExpertiseTaskCategory: (expertiseTaskCategory) => set({ expertiseTaskCategory }),
   setAttachedFiles: (attachedFiles) => set({ attachedFiles }),
   setTempCwd: (tempCwd) => set({ tempCwd }),
   setPendingStart: (pendingStart) => set({ pendingStart }),

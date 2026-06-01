@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
   isWorkflowPlanToolName,
+  normalizeWorkflowPlanRoots,
   parseWorkflowPlanPayload,
   type WorkflowPlanTaskInput,
 } from "../../lib/workflow-plan-parse.js";
@@ -12,14 +13,6 @@ export { isWorkflowPlanToolName } from "../../lib/workflow-plan-parse.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
-
-function normalizeRoots(tasks: RawWorkflowNode[]): RawWorkflowNode[] {
-  let roots = tasks;
-  while (roots.length === 1 && roots[0].children && roots[0].children.length > 0) {
-    roots = roots[0].children;
-  }
-  return roots;
 }
 
 function toRawWorkflowNodes(tasks: WorkflowPlanTaskInput[]): RawWorkflowNode[] {
@@ -57,7 +50,7 @@ export function registerWorkflowPlanFromTasks(
   tasks: RawWorkflowNode[],
   onEvent: (event: ServerEvent) => void
 ): WorkflowNode[] {
-  const roots = normalizeRoots(tasks);
+  const roots = normalizeWorkflowPlanRoots(tasks);
   const tree = hydrateWorkflowTree(roots);
   onEvent({
     type: "workflow.plan",

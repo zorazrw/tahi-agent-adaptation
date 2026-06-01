@@ -87,6 +87,17 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("save-skill-md", payload),
     exportRecordingsBundle: () =>
         ipcInvoke("export-recordings-bundle"),
+    onTinkerModelUpdated: (callback: (event: TinkerModelUpdateEvent) => void) => {
+        const cb = (_: Electron.IpcRendererEvent, payload: TinkerModelUpdateEvent) => {
+            try {
+                callback(payload);
+            } catch (error) {
+                console.error("Failed to handle tinker model update:", error);
+            }
+        };
+        electron.ipcRenderer.on("tinker-model-updated", cb);
+        return () => electron.ipcRenderer.off("tinker-model-updated", cb);
+    },
 } satisfies Window['electron'])
 
 // Intercept drop events in the preload context where webUtils has direct

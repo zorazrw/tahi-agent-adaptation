@@ -12,6 +12,7 @@ in round order (later rounds win per path). Uses Anthropic (``scripts/induce.py`
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -302,30 +303,19 @@ def _parse_rubric_results_json(text: str, n: int) -> tuple[list[bool | None], li
     return out, results
 
 
-def compute_llm_rubric_file_scores(
-    unit: dict[str, Any],
+def compute_llm_rubric_file_blocks(
     rubrics: list[str],
+    file_blocks: list[tuple[str, str]],
     *,
     client: Any | None = None,
     model: str | None = None,
     max_tokens: int = 1024,
     max_file_chars: int = 14_000,
 ) -> tuple[float, list[float]]:
-    """Grade unit file text (see ``_unit_files_to_blocks``) against ``rubrics`` with one LLM call.
-
-    Returns ``(mean_pass, rubric_scores)`` where ``rubric_scores`` has length
-    ``len(rubrics)``, each entry ``0.0`` or ``1.0`` (fail/pass per criterion).
-    ``mean_pass`` is the arithmetic mean of those scores in ``[0, 1]``.
-
-    Empty ``rubrics`` returns ``(1.0, [])`` (no criteria to violate).
-
-    Uses Anthropic Messages API via ``induce.anthropic_user_text`` when ``client`` /
-    ``model`` are omitted (resolves credentials like ``scripts/induce.py``).
-    """
+    """Grade ``file_blocks`` (``path``, ``content`` pairs) against ``rubrics`` with one LLM call."""
     if not rubrics:
         return 1.0, []
 
-    file_blocks = _unit_files_to_blocks(unit)
     user_prompt = _build_rubric_grader_prompt(rubrics, file_blocks, max_file_chars=max_file_chars)
 
     _ensure_scripts_on_path()
@@ -357,6 +347,54 @@ def compute_llm_rubric_file_scores(
     scored = [1.0 if p is True else 0.0 for p in passes]
     mean = sum(scored) / len(rubrics)
     return mean, scored
+
+
+async def grade_sandbox_rubrics(
+    sandbox: Any,
+    rubrics: list[str],
+    **kwargs: Any,
+) -> float:
+    """Mean LLM rubric pass rate from files in a live rollout sandbox."""
+    if not rubrics:
+        return 1.0
+    file_blocks = sorted(sandbox.snapshot().items())
+    mean, _ = await asyncio.to_thread(
+        compute_llm_rubric_file_blocks,
+        [str(r) for r in rubrics],
+        file_blocks,
+        **kwargs,
+    )
+    return float(mean)
+
+
+def compute_llm_rubric_file_scores(
+    unit: dict[str, Any],
+    rubrics: list[str],
+    *,
+    client: Any | None = None,
+    model: str | None = None,
+    max_tokens: int = 1024,
+    max_file_chars: int = 14_000,
+) -> tuple[float, list[float]]:
+    """Grade unit file text (see ``_unit_files_to_blocks``) against ``rubrics`` with one LLM call.
+
+    Returns ``(mean_pass, rubric_scores)`` where ``rubric_scores`` has length
+    ``len(rubrics)``, each entry ``0.0`` or ``1.0`` (fail/pass per criterion).
+    ``mean_pass`` is the arithmetic mean of those scores in ``[0, 1]``.
+
+    Empty ``rubrics`` returns ``(1.0, [])`` (no criteria to violate).
+
+    Uses Anthropic Messages API via ``induce.anthropic_user_text`` when ``client`` /
+    ``model`` are omitted (resolves credentials like ``scripts/induce.py``).
+    """
+    return compute_llm_rubric_file_blocks(
+        rubrics,
+        _unit_files_to_blocks(unit),
+        client=client,
+        model=model,
+        max_tokens=max_tokens,
+        max_file_chars=max_file_chars,
+    )
 
 
 def compute_llm_rubric_file_reward(

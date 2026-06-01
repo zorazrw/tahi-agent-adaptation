@@ -63,6 +63,23 @@ Formats
     verifiers           : final verifier criteria + pass/fail status
   Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
 
+  Per-message ``environment`` (Pi engine sessions): every OAI message inside
+  ``agent_trajectories[].messages`` and every entry in ``human_trajectories`` carries an
+  ``environment`` of the same shape as the default exporter:
+      {workflow: [...nested nodes with verifier criterion+status...],
+       file:     [{path, content, content_source, content_encoding, error}, ...],
+       memory:   {<filename>: <content>, ...},
+       skill:    {<filename>: <content>, ...}}
+  The state is carried forward from each message's ``state_snapshot`` (workflow + file +
+  memory + skill); messages without their own snapshot inherit the previous snapshot's
+  state. The synthetic leading ``{role: user, content: prompt}`` message of each
+  trajectory carries the start-of-segment environment (state at the moment the human
+  posted that prompt). REINFORCE rewards read the final verifier statuses from the last
+  message's ``environment.workflow[*].verifiers[*].status``; memory/skill induction takes
+  diffs across successive ``environment.file`` snapshots within and between chunks.
+  ``output_files`` (Pi-only, change-only artifacts) is retained alongside the full
+  ``environment.file`` to preserve the existing "what was written this turn" signal.
+
 Usage:
   conda activate code   # optional: use "code" env
   python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] \\
@@ -800,6 +817,70 @@ def _build_memory_skill_timeline(msgs: List[dict]) -> Tuple[List[dict], List[dic
         mems_out.append(copy.deepcopy(mem_cur))
         sks_out.append(copy.deepcopy(sk_cur))
     return mems_out, sks_out
+
+
+def _build_file_timeline(msgs: List[dict]) -> List[Optional[list]]:
+    """
+    Carry forward each snapshot's ``file`` list (path/content rows) across messages.
+
+    Rows from the most recent snapshot persist until a later snapshot replaces them. Used by the
+    weight-format exporter so messages without their own snapshot still see file content from the
+    nearest preceding snapshot (instead of falling back to a fresh on-disk read that may not match
+    the historical state).
+    """
+    current: Optional[list] = None
+    out: List[Optional[list]] = []
+    for m in msgs:
+        snap = m.get("state_snapshot")
+        if isinstance(snap, dict):
+            files = snap.get("file")
+            if isinstance(files, list):
+                current = copy.deepcopy(files)
+        out.append(copy.deepcopy(current) if current is not None else None)
+    return out
+
+
+def _build_message_environment(
+    norm: dict,
+    *,
+    cwd: Optional[str],
+    workflow_override: Optional[list],
+    file_override: Optional[list],
+    memory: dict,
+    skill: dict,
+) -> dict:
+    """Per-message canonical 4-key environment for the weight format.
+
+    Returns the genuine carried-forward snapshot state at this message — never the session's final
+    on-disk / final-workflow state. This mirrors the default exporter, which seeds ``env_carry`` with
+    :func:`empty_environment` and only advances it when a real ``state_snapshot`` is encountered, so
+    the env attached to early messages (e.g., before the workflow is planned, before any file is
+    written) accurately reflects "nothing exists yet" instead of leaking the post-completion state.
+
+    Behavior:
+    - ``workflow_override`` (carried-forward snapshot workflow) and ``file_override`` (carried-forward
+      snapshot ``file`` rows) drive the result. File rows are realigned to the workflow tree so paths
+      that no longer appear under the current tree drop out (matches :func:`_realign_env_to_workflow`).
+    - When both are ``None`` (no snapshot has been recorded yet at this point in the timeline),
+      returns an empty environment — *not* a fallback to session-level workflow_tree / on-disk reads.
+    - ``memory`` / ``skill`` are passed through as filename → content maps.
+    """
+    if isinstance(workflow_override, list):
+        files_in: List[dict] = file_override if isinstance(file_override, list) else []
+        realigned = _realign_env_to_workflow(
+            {"workflow": copy.deepcopy(workflow_override), "file": copy.deepcopy(files_in)},
+            workflow_override,
+            cwd,
+        )
+        realigned["memory"] = copy.deepcopy(memory) if isinstance(memory, dict) else {}
+        realigned["skill"] = copy.deepcopy(skill) if isinstance(skill, dict) else {}
+        return realigned
+    return {
+        "workflow": [],
+        "file": copy.deepcopy(file_override) if isinstance(file_override, list) else [],
+        "memory": copy.deepcopy(memory) if isinstance(memory, dict) else {},
+        "skill": copy.deepcopy(skill) if isinstance(skill, dict) else {},
+    }
 
 
 def _environment_for_norm_merge(norm: dict, default_env: dict) -> Tuple[dict, bool]:
@@ -2313,6 +2394,84 @@ def pi_messages_to_openai(all_msgs: List[dict]) -> List[dict]:
     return oai
 
 
+def pi_messages_to_openai_with_envs(
+    raw_env_pairs: List[Tuple[dict, dict]],
+) -> List[dict]:
+    """Like ``pi_messages_to_openai`` but each (raw, env) pair contributes ``env`` to its OAI message.
+
+    The mapping is one-to-one for ``assistant`` (non-error) / ``tool_result`` / ``user_prompt`` rows;
+    ``assistant`` rows with ``stopReason == "error"`` and ``system_init`` / ``run_result`` are still
+    skipped. ``env`` is attached as the canonical 4-key dict under the ``environment`` key on the
+    emitted OAI message, so REINFORCE can read final verifier statuses and memory/skill induction can
+    diff successive ``environment.file`` snapshots without consulting other arrays.
+    """
+    oai: List[dict] = []
+    for raw, env in raw_env_pairs:
+        t = raw.get("type")
+
+        if t == "user_prompt":
+            msg: Dict[str, Any] = {"role": "user", "content": raw.get("prompt", "")}
+            if isinstance(env, dict):
+                msg["environment"] = env
+            oai.append(msg)
+            continue
+
+        if t == "assistant":
+            if raw.get("stopReason") == "error":
+                continue
+            blocks = raw.get("blocks") or []
+            text_parts: List[str] = []
+            tool_calls: List[dict] = []
+            thinking_parts: List[str] = []
+            for b in blocks:
+                bt = b.get("type")
+                if bt == "text":
+                    text_parts.append(b.get("text", ""))
+                elif bt == "thinking":
+                    thinking_parts.append(b.get("thinking", ""))
+                elif bt == "tool_use":
+                    inp = b.get("input", {})
+                    tool_calls.append({
+                        "id": b.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": json.dumps(inp, ensure_ascii=False) if isinstance(inp, dict) else str(inp),
+                        },
+                    })
+            msg = {"role": "assistant"}
+            content_str = "\n".join(text_parts).strip()
+            msg["content"] = content_str if content_str else None
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            if thinking_parts:
+                msg["thinking"] = "\n".join(thinking_parts)
+            if isinstance(env, dict):
+                msg["environment"] = env
+            oai.append(msg)
+            continue
+
+        if t == "tool_result":
+            content = raw.get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(
+                    p.get("text", str(p)) if isinstance(p, dict) else str(p)
+                    for p in content
+                )
+            msg = {
+                "role": "tool",
+                "tool_call_id": raw.get("toolUseId", ""),
+                "name": raw.get("toolName", ""),
+                "content": str(content),
+            }
+            if isinstance(env, dict):
+                msg["environment"] = env
+            oai.append(msg)
+            continue
+
+    return oai
+
+
 def _collect_written_paths_from_segment(seg: List[dict]) -> set[str]:
     """Return paths the agent **successfully** invoked ``write`` / ``edit`` on.
 
@@ -2540,6 +2699,34 @@ def build_weight_based_session(
 
     is_pi = _is_pi_engine(all_msgs)
 
+    # ── Per-message timelines (carry-forward state from snapshots) ──
+    # ``wf_timeline_all[i]`` / ``file_timeline_all[i]`` / ``mem_timeline_all[i]`` /
+    # ``sk_timeline_all[i]`` reflect the state right after applying message ``i``'s
+    # ``state_snapshot`` (or the previous carried-forward state when ``i`` has no snapshot).
+    # These power the per-OAI-message ``environment`` and per-human_trajectory ``environment``
+    # so REINFORCE rewards can read final verifier statuses and memory/skill induction can diff
+    # successive ``environment.file`` snapshots without consulting other arrays.
+    wf_timeline_all = _build_workflow_timeline(all_msgs)
+    file_timeline_all = _build_file_timeline(all_msgs)
+    mem_timeline_all, sk_timeline_all = _build_memory_skill_timeline(all_msgs)
+
+    def _env_at(idx: int) -> dict:
+        """Return the canonical {workflow, file, memory, skill} environment at ``all_msgs[idx]``.
+
+        ``idx < 0`` (e.g., before any message) yields an empty environment so the synthetic
+        leading user prompt of the very first segment still gets a well-typed shape.
+        """
+        if idx < 0 or idx >= len(all_msgs):
+            return {"workflow": [], "file": [], "memory": {}, "skill": {}}
+        return _build_message_environment(
+            all_msgs[idx],
+            cwd=export_cwd,
+            workflow_override=wf_timeline_all[idx],
+            file_override=file_timeline_all[idx],
+            memory=mem_timeline_all[idx],
+            skill=sk_timeline_all[idx],
+        )
+
     initial_task_instruction = ""
     for m in all_msgs:
         if m.get("type") == "user_prompt":
@@ -2575,13 +2762,18 @@ def build_weight_based_session(
     planning_msgs = all_msgs[:planning_end]
 
     planning_agent_traj_raw: List[dict] = []
+    # Absolute index in ``all_msgs`` for each entry pushed to ``planning_agent_traj_raw`` (Pi only;
+    # Legacy merging shifts indices, so the env-aware OAI mapping below is gated on ``is_pi``).
+    planning_msg_indices: List[int] = []
     planning_human_traj: List[dict] = []
     prev_workflow_snapshot: Optional[List[dict]] = None
 
-    for m in planning_msgs:
+    for local_i, m in enumerate(planning_msgs):
+        i_abs = local_i  # planning_msgs starts at all_msgs[0]
         t = m.get("type")
         if t in ALL_AGENT_MSG_TYPES:
             planning_agent_traj_raw.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
+            planning_msg_indices.append(i_abs)
 
         elif t == "edit_workflow":
             wf_after = _snapshot_workflow_tree(m)
@@ -2594,6 +2786,7 @@ def build_weight_based_session(
             if wf_after is not None:
                 entry["workflow_tree_after"] = wf_after
                 prev_workflow_snapshot = wf_after
+            entry["environment"] = _env_at(i_abs)
             planning_human_traj.append(entry)
 
         elif t == "edit_verifier":
@@ -2607,10 +2800,13 @@ def build_weight_based_session(
             if wf_after is not None:
                 entry["verifiers_after"] = _extract_verifier_criteria(wf_after)
                 prev_workflow_snapshot = wf_after
+            entry["environment"] = _env_at(i_abs)
             planning_human_traj.append(entry)
 
         elif t == "brain_edit":
-            planning_human_traj.append(_brain_edit_human_entry(m))
+            be_entry = _brain_edit_human_entry(m)
+            be_entry["environment"] = _env_at(i_abs)
+            planning_human_traj.append(be_entry)
 
     if is_pi:
         planning_agent_traj_merged = planning_agent_traj_raw
@@ -2638,12 +2834,26 @@ def build_weight_based_session(
     # effective_prompt is persisted (TODO: modify src/electron).
     planning_prompt = WORKFLOW_PLAN_INSTRUCTION + initial_task_instruction
 
-    # Build planning trajectories (planning is always a single trajectory)
+    # Build planning trajectories (planning is always a single trajectory).
+    # The synthetic leading user message gets the start-of-segment environment so memory/skill
+    # induction can compare it against the first assistant turn's post-state.
+    planning_user_env = _env_at(0) if planning_msgs else {"workflow": [], "file": [], "memory": {}, "skill": {}}
+    leading_user_msg: Dict[str, Any] = {"role": "user", "content": planning_prompt}
+    if isinstance(planning_user_env, dict):
+        leading_user_msg["environment"] = planning_user_env
     if is_pi:
-        pi_raw_msgs = [e["raw"] for e in planning_agent_traj if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
-        planning_messages = [{"role": "user", "content": planning_prompt}] + pi_messages_to_openai(pi_raw_msgs)
+        # Pi: no merging happens, so ``planning_agent_traj`` order matches ``planning_agent_traj_raw``
+        # one-for-one and ``planning_msg_indices`` aligns with each entry.
+        pi_pairs: List[Tuple[dict, dict]] = []
+        for k, e in enumerate(planning_agent_traj):
+            raw = e["raw"]
+            if raw.get("type") not in ("assistant", "tool_result", "user_prompt"):
+                continue
+            idx_abs = planning_msg_indices[k] if k < len(planning_msg_indices) else -1
+            pi_pairs.append((raw, _env_at(idx_abs)))
+        planning_messages = [leading_user_msg] + pi_messages_to_openai_with_envs(pi_pairs)
     else:
-        planning_messages = [{"role": "user", "content": planning_prompt}]
+        planning_messages = [leading_user_msg]
     planning_traj_entry: Dict[str, Any] = {
         "prompt": planning_prompt,
         "messages": planning_messages,
@@ -2675,16 +2885,22 @@ def build_weight_based_session(
         # merging happens; Legacy: indices may shift after merging — we therefore
         # only emit ``output_files`` for Pi sessions (gated below).
         agent_traj_snapshots: List[Optional[dict]] = []
+        # Absolute index in ``all_msgs`` for each entry pushed to ``agent_traj_raw`` (Pi only;
+        # Legacy merging shifts indices, so per-OAI-message env mapping below is gated on ``is_pi``).
+        agent_msg_indices: List[int] = []
         human_traj: List[dict] = []
         round_counter = 0
         node_prompt_consumed = False
         node_first_turn_prompt: Optional[str] = None
+        # Absolute index of the node's first-turn ``Proceed with: …`` prompt (start-of-segment).
+        node_first_turn_idx: Optional[int] = None
         last_snapshot_msg: Optional[dict] = None
         # Track where follow_up prompts split the trajectory.
-        # Each entry: (index into agent_traj_raw at time of split, prompt text)
-        follow_up_splits: List[Tuple[int, str]] = []
+        # Each entry: (index into agent_traj_raw at time of split, prompt text, abs idx of prompt msg)
+        follow_up_splits: List[Tuple[int, str, int]] = []
 
-        for m in node_msgs:
+        for local_i, m in enumerate(node_msgs):
+            i_abs = start_i + local_i
             t = m.get("type")
 
             if t == "user_prompt":
@@ -2693,20 +2909,23 @@ def build_weight_based_session(
                     if not node_prompt_consumed:
                         node_prompt_consumed = True
                         node_first_turn_prompt = p
+                        node_first_turn_idx = i_abs
                         continue
-                    follow_up_splits.append((len(agent_traj_raw), p))
+                    follow_up_splits.append((len(agent_traj_raw), p, i_abs))
                     human_traj.append({
                         "type": "follow_up",
                         # 0-based index of this follow-up (aligns with trajectories[1], [2], …)
                         "round_index": len(follow_up_splits) - 1,
                         "prompt": p,
+                        "environment": _env_at(i_abs),
                     })
                     continue
-                follow_up_splits.append((len(agent_traj_raw), p if isinstance(p, str) else ""))
+                follow_up_splits.append((len(agent_traj_raw), p if isinstance(p, str) else "", i_abs))
                 human_traj.append({
                     "type": "follow_up",
                     "round_index": len(follow_up_splits) - 1,
                     "prompt": p if isinstance(p, str) else "",
+                    "environment": _env_at(i_abs),
                 })
                 continue
 
@@ -2715,6 +2934,7 @@ def build_weight_based_session(
                 agent_traj_raw.append({"raw": raw_clean})
                 snap = m.get("state_snapshot")
                 agent_traj_snapshots.append(snap if isinstance(snap, dict) else None)
+                agent_msg_indices.append(i_abs)
                 if t == "system" and m.get("subtype") == "init":
                     round_counter += 1
                 if t == "system_init":
@@ -2727,6 +2947,7 @@ def build_weight_based_session(
                 agent_traj_raw.append({"raw": raw_clean})
                 snap = m.get("state_snapshot")
                 agent_traj_snapshots.append(snap if isinstance(snap, dict) else None)
+                agent_msg_indices.append(i_abs)
                 if isinstance(snap, dict):
                     last_snapshot_msg = m
 
@@ -2742,6 +2963,7 @@ def build_weight_based_session(
                     "path": fe_path,
                     "original": original_content,
                     "edited": edited_content,
+                    "environment": _env_at(i_abs),
                 })
 
             elif t == "edit_workflow":
@@ -2749,6 +2971,7 @@ def build_weight_based_session(
                 entry = {"type": "edit_workflow", "round_index": None}
                 if wf_after is not None:
                     entry["workflow_tree_after"] = wf_after
+                entry["environment"] = _env_at(i_abs)
                 human_traj.append(entry)
 
             elif t == "edit_verifier":
@@ -2765,10 +2988,13 @@ def build_weight_based_session(
                         entry["verifiers_after"] = after_node.get("verifiers", [])
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
+                entry["environment"] = _env_at(i_abs)
                 human_traj.append(entry)
 
             elif t == "brain_edit":
-                human_traj.append(_brain_edit_human_entry(m))
+                be_entry = _brain_edit_human_entry(m)
+                be_entry["environment"] = _env_at(i_abs)
+                human_traj.append(be_entry)
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
 
@@ -2795,7 +3021,7 @@ def build_weight_based_session(
 
         # ── Split agent_trajectory into per-trajectory segments ──
         # ``follow_up_splits`` was populated during the message loop:
-        # each entry is (index_in_agent_traj_raw, prompt_text).
+        # each entry is (index_in_agent_traj_raw, prompt_text, abs_msg_idx).
         # Since merging / slimming preserves ordering and count for Pi
         # (no merging) and approximately for Legacy, the indices still
         # align with agent_traj.
@@ -2811,19 +3037,28 @@ def build_weight_based_session(
         # time window before building entries. Track each segment's [start, end)
         # range over ``agent_traj_raw`` so the parallel ``agent_traj_snapshots``
         # array (Pi only) and tool_use scan can be sliced consistently.
+        # ``seg_prompt_indices[i]`` is the absolute ``all_msgs`` index of the user
+        # prompt that opened segment ``i`` (the node's first ``Proceed with: …`` row
+        # for segment 0, and each follow-up's user_prompt for later segments). This
+        # lets the synthetic leading user message in each ``messages`` list carry the
+        # carried-forward environment as it stood when the human typed that prompt.
         raw_segments: List[Tuple[str, List[dict]]] = []
         seg_ranges: List[Tuple[int, int]] = []
+        seg_prompt_indices: List[int] = []
         if not follow_up_splits:
             raw_segments.append((node_first_turn_prompt or "", agent_traj))
             seg_ranges.append((0, len(agent_traj)))
+            seg_prompt_indices.append(node_first_turn_idx if node_first_turn_idx is not None else start_i)
         else:
             first_end = follow_up_splits[0][0]
             raw_segments.append((node_first_turn_prompt or "", agent_traj[:first_end]))
             seg_ranges.append((0, first_end))
-            for si, (split_idx, follow_prompt) in enumerate(follow_up_splits):
+            seg_prompt_indices.append(node_first_turn_idx if node_first_turn_idx is not None else start_i)
+            for si, (split_idx, follow_prompt, fu_abs_idx) in enumerate(follow_up_splits):
                 next_end = follow_up_splits[si + 1][0] if si + 1 < len(follow_up_splits) else len(agent_traj)
                 raw_segments.append((follow_prompt, agent_traj[split_idx:next_end]))
                 seg_ranges.append((split_idx, next_end))
+                seg_prompt_indices.append(fu_abs_idx)
 
         # For each segment, compute the max Pi ``timestamp`` among its
         # assistant / tool_result entries.  This is the real LLM call time
@@ -2876,13 +3111,31 @@ def build_weight_based_session(
                 if 0 <= idx < M:
                     vl_for_segment[k] = vl_snaps_for_node[idx]
 
-        def _build_traj_entry(prompt: str, seg: List[dict], vl_snap: Optional[dict]) -> Dict[str, Any]:
+        def _build_traj_entry(
+            prompt: str,
+            seg: List[dict],
+            vl_snap: Optional[dict],
+            *,
+            seg_msg_indices: List[int],
+            prompt_msg_idx: int,
+        ) -> Dict[str, Any]:
+            # Synthetic leading user message: state at the moment the human posted ``prompt``.
+            leading_msg: Dict[str, Any] = {"role": "user", "content": prompt}
+            leading_env = _env_at(prompt_msg_idx)
+            if isinstance(leading_env, dict):
+                leading_msg["environment"] = leading_env
             if is_pi:
-                pi_raw = [e["raw"] for e in seg
-                          if e["raw"].get("type") in ("assistant", "tool_result", "user_prompt")]
-                messages = [{"role": "user", "content": prompt}] + pi_messages_to_openai(pi_raw)
+                # Pi: ``seg`` aligns with ``seg_msg_indices`` one-for-one (no merging upstream).
+                pi_pairs: List[Tuple[dict, dict]] = []
+                for k, e in enumerate(seg):
+                    raw = e["raw"]
+                    if raw.get("type") not in ("assistant", "tool_result", "user_prompt"):
+                        continue
+                    idx_abs = seg_msg_indices[k] if k < len(seg_msg_indices) else -1
+                    pi_pairs.append((raw, _env_at(idx_abs)))
+                messages = [leading_msg] + pi_messages_to_openai_with_envs(pi_pairs)
             else:
-                messages = [{"role": "user", "content": prompt}]
+                messages = [leading_msg]
             entry: Dict[str, Any] = {"prompt": prompt, "messages": messages}
             v = _verifiers_from_snapshot(vl_snap, node_id)
             if v is not None:
@@ -2892,7 +3145,15 @@ def build_weight_based_session(
         agent_trajectories: List[dict] = []
         prev_seg_snap: Optional[dict] = None  # end-of-previous-segment snapshot for diff
         for i, (prompt, seg) in enumerate(raw_segments):
-            entry = _build_traj_entry(prompt, seg, vl_for_segment[i])
+            s_start_i, s_end_i = seg_ranges[i]
+            seg_indices_slice = agent_msg_indices[s_start_i:s_end_i]
+            entry = _build_traj_entry(
+                prompt,
+                seg,
+                vl_for_segment[i],
+                seg_msg_indices=seg_indices_slice,
+                prompt_msg_idx=seg_prompt_indices[i],
+            )
             # Artifact-only completion support (Pi only — Legacy merge shifts
             # ``agent_traj`` indices relative to the snapshot array). For each
             # segment:
@@ -2976,8 +3237,15 @@ def main() -> int:
         "--format",
         type=str,
         choices=["default", "weight"],
-        default="default",
-        help='Export format: "default" (human-readable trajectory) or "weight" (OAI messages + human_trajectories for training).',
+        default="weight",
+        help=(
+            'Export format: "default" (human-readable trajectory) or "weight" '
+            "(OAI messages + human_trajectories for training; every OAI message in "
+            "agent_trajectories[].messages and every human_trajectories entry carries "
+            "an `environment` dict of {workflow,file,memory,skill} so REINFORCE rewards "
+            "can read final verifier statuses and memory/skill induction can diff "
+            "successive environment.file snapshots)."
+        ),
     )
     args = parser.parse_args()
 
