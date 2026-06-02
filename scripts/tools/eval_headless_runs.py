@@ -10,8 +10,10 @@ then rebuilds summary.json and scores.csv for every touched run directory.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -57,6 +59,37 @@ def run_command(args: list[str], *, log_path: Path | None = None) -> int:
     return proc.returncode
 
 
+def should_include_failed_only(task_dir: Path) -> bool:
+    ratings_path = task_dir / "ratings.json"
+    if not ratings_path.exists():
+        return True
+    try:
+        ratings = json.loads(ratings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return True
+    if not isinstance(ratings, dict):
+        return True
+    if isinstance(ratings.get("average_success_rate"), (int, float)):
+        return False
+
+    log_path = task_dir / "logs" / "eval.log"
+    if not log_path.exists():
+        return True
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return True
+    failure_markers = (
+        "Traceback (most recent call last):",
+        "No rubric match",
+        "No JSON object found in model response",
+        "Unable to parse JSON object in model response",
+        "Connection error",
+        "APIConnectionError",
+    )
+    return any(marker in log_text for marker in failure_markers)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path, help="runs root, run directory, task_XXX directory, or session.json")
@@ -67,8 +100,16 @@ def main() -> int:
     parser.add_argument("--api-key", help="OpenAI backend API key override")
     parser.add_argument("--request-timeout", type=float)
     parser.add_argument("--max-retries", type=int)
+    parser.add_argument("--attempts", type=int, default=1, help="Retry each failed grading up to this many attempts")
+    parser.add_argument("--retry-delay", type=float, default=1.0, help="Seconds to wait between failed attempts")
+    parser.add_argument("--failed-only", action="store_true", help="Only process tasks with missing or previously failed ratings")
+    parser.add_argument("--min-overlap", type=float, help="Override grade_redo.py rubric match threshold")
     parser.add_argument("--no-rebuild-summary", action="store_true")
     args = parser.parse_args()
+    if args.attempts <= 0:
+        raise SystemExit("--attempts must be a positive integer")
+    if args.retry_delay < 0:
+        raise SystemExit("--retry-delay must be non-negative")
 
     verifiers = args.verifiers.resolve()
     if not verifiers.exists():
@@ -89,6 +130,12 @@ def main() -> int:
 
     if not sessions:
         raise SystemExit("No task_*/session.json files found.")
+
+    if args.failed_only:
+        sessions = [session for session in sessions if should_include_failed_only(session.parent)]
+        if not sessions:
+            print("No failed task sessions found.")
+            return 0
 
     run_dirs = sorted({session.parent.parent for session in sessions})
     failures: list[tuple[Path, int]] = []
@@ -119,9 +166,19 @@ def main() -> int:
             command.extend(["--request-timeout", str(args.request_timeout)])
         if args.max_retries is not None:
             command.extend(["--max-retries", str(args.max_retries)])
+        if args.min_overlap is not None:
+            command.extend(["--min-overlap", str(args.min_overlap)])
 
         print(f"[{index}/{len(sessions)}] grading {session}")
-        code = run_command(command, log_path=log_path)
+        code = 1
+        for attempt in range(1, args.attempts + 1):
+            code = run_command(command, log_path=log_path)
+            if code == 0:
+                break
+            if attempt < args.attempts:
+                print(f"  attempt {attempt}/{args.attempts} failed; retrying...")
+                if args.retry_delay > 0:
+                    time.sleep(args.retry_delay)
         if code != 0:
             failures.append((session, code))
             print(f"  failed with exit code {code}; see {log_path}")

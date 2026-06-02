@@ -91,6 +91,13 @@ Use `eval_headless_runs.py` when outputs already exist and you only want to re-g
   --verifiers scripts/verifiers.json \
   --backend openai \
   --model gpt-4.1-mini
+
+# Retry only previously failed tasks, up to 3 attempts each (default)
+.venv/bin/python scripts/tools/eval_headless_runs.py runs \
+  --failed-only \
+  --verifiers scripts/verifiers.json \
+  --backend openai \
+  --model gpt-4.1-mini
 ```
 
 ## Rate file versions against workflow rubrics

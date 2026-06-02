@@ -126,7 +126,16 @@ def instruction_overlap(a: str, b: str) -> float:
         i = s.find(_PLAN_SUFFIX)
         return s[:i].strip() if i >= 0 else s
 
-    return max(SequenceMatcher(None, a, b).ratio(), SequenceMatcher(None, core(a), core(b)).ratio())
+    def normalize(s: str) -> str:
+        return re.sub(r"\s+", " ", s.strip())
+
+    pairs = [
+        (a, b),
+        (core(a), core(b)),
+        (normalize(a), normalize(b)),
+        (normalize(core(a)), normalize(core(b))),
+    ]
+    return max(SequenceMatcher(None, left, right).ratio() for left, right in pairs if left and right)
 
 
 def match_rubrics(catalog: list[dict[str, Any]], instruction: str, min_overlap: float) -> tuple[dict[str, Any], float]:
@@ -321,17 +330,84 @@ def build_message_content(criteria: list[str], file_blocks: list[tuple[str, str]
     return content
 
 
-def _parse_json_from_model_text(text: str) -> dict[str, Any]:
+def _parse_json_from_model_text(text: str) -> Any:
+    def scan_candidates(source: str) -> list[str]:
+        candidates: list[str] = []
+        start: int | None = None
+        opener: str | None = None
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(source):
+            if start is None:
+                if ch in "{[":
+                    start = i
+                    opener = ch
+                    depth = 1
+                    in_string = False
+                    escape = False
+                continue
+
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif opener == "{" and ch == "{":
+                depth += 1
+            elif opener == "[" and ch == "[":
+                depth += 1
+            elif (opener == "{" and ch == "}") or (opener == "[" and ch == "]"):
+                depth -= 1
+                if depth == 0:
+                    candidates.append(source[start : i + 1])
+                    start = None
+                    opener = None
+        return candidates
+
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    raw = (fence.group(1) if fence else text).strip()
-    start, end = raw.find("{"), raw.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError("No JSON object found in model response")
-    return json.loads(raw[start : end + 1])
+    sources: list[str] = []
+    if fence and fence.group(1):
+        sources.append(fence.group(1).strip())
+    sources.append(text.strip())
+
+    last_error: Exception | None = None
+    seen: set[str] = set()
+    for source in sources:
+        for candidate in reversed(scan_candidates(source)):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(parsed, (dict, list)):
+                return parsed
+
+    if last_error is not None:
+        raise ValueError(f"Unable to parse JSON object in model response: {last_error}") from last_error
+    preview = text.strip()
+    if len(preview) > 400:
+        preview = preview[:400] + "... [truncated]"
+    raise ValueError(f"No JSON object found in model response. Raw preview: {preview!r}")
 
 
 def interpret_results(text: str, n: int) -> list[bool | None]:
-    arr = _parse_json_from_model_text(text).get("results")
+    parsed = _parse_json_from_model_text(text)
+    if isinstance(parsed, dict):
+        arr = parsed.get("results")
+    elif isinstance(parsed, list):
+        arr = parsed
+    else:
+        arr = None
     if not isinstance(arr, list):
         raise ValueError("Missing results array")
     out: list[bool | None] = [None] * n
