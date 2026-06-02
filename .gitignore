@@ -36,6 +36,7 @@ trash/*
 **/__pycache__/
 scripts/**/*.json
 scripts/runs
+runs/*
 
 # Local Tinker bridge environment
 tinker-bridge/.venv/

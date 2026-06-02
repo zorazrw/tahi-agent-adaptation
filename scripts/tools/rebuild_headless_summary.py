@@ -21,6 +21,10 @@ def load_json(path: Path) -> Any:
 
 
 def compute_task_score(ratings: dict[str, Any]) -> float | None:
+    average_success_rate = ratings.get("average_success_rate")
+    if isinstance(average_success_rate, (int, float)):
+        return float(average_success_rate) * 100.0
+
     tasks = ratings.get("tasks")
     if not isinstance(tasks, list):
         return None

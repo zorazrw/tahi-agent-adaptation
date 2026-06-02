@@ -474,11 +474,38 @@ function writeTaskSummary(taskDir: string, summary: TaskSummary): void {
   writeFileSync(taskSummaryPath(taskDir), JSON.stringify(summary, null, 2) + "\n", "utf8");
 }
 
-function shouldSkipExistingTask(args: Args, summary: TaskSummary | null): summary is TaskSummary {
+function shouldSkipExistingTask(args: Args, summary: TaskSummary | null): boolean {
   if (!summary || summary.status !== "completed") return false;
   if (!existsSync(summary.session_json)) return false;
   if (!args.eval) return true;
   return Boolean(summary.ratings_json && existsSync(summary.ratings_json));
+}
+
+async function runEvaluation(args: Args, taskDir: string, sessionJson: string, runLog: string): Promise<{ ratingsPath: string; score: number | null }> {
+  const ratingsPath = join(taskDir, "ratings.json");
+  const evalBackend = args.evalBackend ?? "openai";
+  await runChild(
+    args.python,
+    [
+      "scripts/tools/grade_redo.py",
+      "--session-json",
+      sessionJson,
+      "--verifiers",
+      args.verifiersJson ? resolve(args.verifiersJson) : join(repoRoot, "scripts", "verifiers.json"),
+      "--json-out",
+      ratingsPath,
+      "--backend",
+      evalBackend,
+      ...(args.evalModel ? ["--model", args.evalModel] : []),
+      ...(args.evalBaseUrl ? ["--base-url", args.evalBaseUrl] : []),
+      ...(args.evalApiKey ? ["--api-key", args.evalApiKey] : []),
+      ...(args.evalRequestTimeout !== undefined ? ["--request-timeout", String(args.evalRequestTimeout)] : []),
+      ...(args.evalMaxRetries !== undefined ? ["--max-retries", String(args.evalMaxRetries)] : []),
+    ],
+    repoRoot,
+    runLog,
+  );
+  return { ratingsPath, score: scoreFromRatings(ratingsPath) };
 }
 
 function copyUiAuthIfAvailable(sourceUserDataDir: string, targetUserDataDir: string): boolean {
@@ -544,30 +571,7 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
     let ratingsPath: string | undefined;
     let score: number | null | undefined;
     if (args.eval) {
-      ratingsPath = join(taskDir, "ratings.json");
-      const evalBackend = args.evalBackend ?? "openai";
-      await runChild(
-        args.python,
-        [
-          "scripts/tools/grade_redo.py",
-          "--session-json",
-          sessionJson,
-          "--verifiers",
-          args.verifiersJson ? resolve(args.verifiersJson) : join(repoRoot, "scripts", "verifiers.json"),
-          "--json-out",
-          ratingsPath,
-          "--backend",
-          evalBackend,
-          ...(args.evalModel ? ["--model", args.evalModel] : []),
-          ...(args.evalBaseUrl ? ["--base-url", args.evalBaseUrl] : []),
-          ...(args.evalApiKey ? ["--api-key", args.evalApiKey] : []),
-          ...(args.evalRequestTimeout !== undefined ? ["--request-timeout", String(args.evalRequestTimeout)] : []),
-          ...(args.evalMaxRetries !== undefined ? ["--max-retries", String(args.evalMaxRetries)] : []),
-        ],
-        repoRoot,
-        runLog,
-      );
-      score = scoreFromRatings(ratingsPath);
+      ({ ratingsPath, score } = await runEvaluation(args, taskDir, sessionJson, runLog));
     }
 
     const nodes = flattenNodes(finalSession.workflowTree ?? []);
@@ -695,7 +699,7 @@ async function main(): Promise<void> {
         const existing = loadTaskSummary(taskDir);
         if (shouldSkipExistingTask(args, existing)) {
           console.log(`[headless] skip completed task ${i + 1}/${selected.length}: ${task.id}`);
-          summaries.push(existing);
+          if (existing) summaries.push(existing);
           writeSummary(outDir, summaries);
           continue;
         }

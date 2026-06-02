@@ -12,73 +12,14 @@ function messagesApiUrl(baseURL: string): string {
 }
 
 function parseJsonFromModelText(text: string): unknown {
-  const scanCandidates = (source: string): string[] => {
-    const candidates: string[] = [];
-    let start: number | null = null;
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    for (let i = 0; i < source.length; i++) {
-      const ch = source[i]!;
-      if (start === null) {
-        if (ch === "{") {
-          start = i;
-          depth = 1;
-          inString = false;
-          escape = false;
-        }
-        continue;
-      }
-
-      if (inString) {
-        if (escape) {
-          escape = false;
-        } else if (ch === "\\") {
-          escape = true;
-        } else if (ch === '"') {
-          inString = false;
-        }
-        continue;
-      }
-
-      if (ch === '"') {
-        inString = true;
-      } else if (ch === "{") {
-        depth += 1;
-      } else if (ch === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          candidates.push(source.slice(start, i + 1));
-          start = null;
-        }
-      }
-    }
-    return candidates;
-  };
-
-  const sources: string[] = [];
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence?.[1]) sources.push(fence[1].trim());
-  sources.push(text.trim());
-
-  let lastError: unknown;
-  const seen = new Set<string>();
-  for (const source of sources) {
-    for (const candidate of [...scanCandidates(source)].reverse()) {
-      if (seen.has(candidate)) continue;
-      seen.add(candidate);
-      try {
-        return JSON.parse(candidate) as unknown;
-      } catch (err) {
-        lastError = err;
-      }
-    }
+  const raw = (fence ? fence[1] : text).trim();
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("No JSON object in model response");
   }
-
-  if (lastError instanceof Error) {
-    throw new Error(`Unable to parse JSON object in model response: ${lastError.message}`);
-  }
-  throw new Error("No JSON object in model response");
+  return JSON.parse(raw.slice(start, end + 1)) as unknown;
 }
 
 /**
