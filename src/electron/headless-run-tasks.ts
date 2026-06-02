@@ -658,6 +658,15 @@ async function main(): Promise<void> {
 
   const args = parseArgs(process.argv.slice(2));
   const outDir = resolve(args.out);
+  if (args.eval) {
+    const verifiersPath = args.verifiersJson ? resolve(args.verifiersJson) : join(repoRoot, "scripts", "verifiers.json");
+    if (!existsSync(verifiersPath)) {
+      throw new Error(
+        `Verifier catalog not found: ${verifiersPath}. Create it first, for example: ` +
+          "python scripts/tools/extract_verifiers.py out.json -o scripts/verifiers.json",
+      );
+    }
+  }
   const uiUserDataDir = app.getPath("userData");
   if (existsSync(outDir) && args.force) rmSync(outDir, { recursive: true, force: true });
   if (existsSync(outDir) && !args.force && !args.resume) {

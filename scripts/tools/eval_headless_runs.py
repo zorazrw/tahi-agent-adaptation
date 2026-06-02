@@ -70,6 +70,15 @@ def main() -> int:
     parser.add_argument("--no-rebuild-summary", action="store_true")
     args = parser.parse_args()
 
+    verifiers = args.verifiers.resolve()
+    if not verifiers.exists():
+        raise SystemExit(
+            "Verifier catalog not found: "
+            f"{verifiers}\n"
+            "Create it first, for example:\n"
+            "  python scripts/tools/extract_verifiers.py out.json -o scripts/verifiers.json"
+        )
+
     sessions: list[Path] = []
     seen: set[Path] = set()
     for path in args.paths:
@@ -83,8 +92,6 @@ def main() -> int:
 
     run_dirs = sorted({session.parent.parent for session in sessions})
     failures: list[tuple[Path, int]] = []
-    verifiers = args.verifiers.resolve()
-
     print(f"Found {len(sessions)} session(s) across {len(run_dirs)} run dir(s).")
     for index, session in enumerate(sessions, start=1):
         task_dir = session.parent
