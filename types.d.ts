@@ -14,7 +14,8 @@ type UnsubscribeFunction = () => void;
 
 type PreviewFileResult =
     | { kind: "txt"; content: string }
-    | { kind: "xlsx"; sheets: { name: string; html: string }[] }
+    | { kind: "xlsx"; model: import("./src/lib/xlsx-model").XlsxModel }
+    | { kind: "xls"; sheets: { name: string; html: string }[] }
     | { kind: "docx"; data: string }
     | { kind: "image"; dataUrl: string }
     | { kind: "pdf"; data: string }
@@ -151,6 +152,7 @@ type EventPayloadMapping = {
     "logout-provider": { success: boolean; error?: string };
     "preview-file": PreviewFileResult;
     "write-file": { success: boolean; error?: string };
+    "write-xlsx": { success: boolean; error?: string };
     "list-skills": SkillInfo[];
     "remove-skill": { success: boolean; error?: string };
     "get-skill-content": { content: string } | { error: string };
@@ -172,8 +174,8 @@ interface Window {
         subscribeStatistics: (callback: (statistics: Statistics) => void) => UnsubscribeFunction;
         getStaticData: () => Promise<StaticData>;
         // Claude Agent IPC APIs
-        sendClientEvent: (event: any) => void;
-        onServerEvent: (callback: (event: any) => void) => UnsubscribeFunction;
+        sendClientEvent: (event: import("./src/lib/runtime-types").ClientEvent) => void;
+        onServerEvent: (callback: (event: import("./src/lib/runtime-types").ServerEvent) => void) => UnsubscribeFunction;
         generateSessionTitle: (userInput: string | null) => Promise<string>;
         getRecentCwds: (limit?: number) => Promise<string[]>;
         selectDirectory: () => Promise<string | null>;
@@ -196,6 +198,12 @@ interface Window {
             filePath: string,
             cwd?: string | null,
             content?: string,
+            sessionId?: string | null
+        ) => Promise<{ success: boolean; error?: string }>;
+        writeXlsx: (
+            filePath: string,
+            cwd?: string | null,
+            model?: import("./src/lib/xlsx-model").XlsxModel,
             sessionId?: string | null
         ) => Promise<{ success: boolean; error?: string }>;
         listSkills: () => Promise<SkillInfo[]>;

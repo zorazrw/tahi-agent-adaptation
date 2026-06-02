@@ -588,8 +588,8 @@ export function attachHtmlTextEdit(
 
   let dirtyFlush = 0;
   const flushDirty = () => {
-    globalThis.clearTimeout(dirtyFlush);
-    dirtyFlush = globalThis.setTimeout(() => onChange(), 0);
+    window.clearTimeout(dirtyFlush);
+    dirtyFlush = window.setTimeout(() => onChange(), 0);
   };
 
   const onUserEdit = () => {
@@ -628,7 +628,7 @@ export function attachHtmlTextEdit(
   }
 
   return () => {
-    globalThis.clearTimeout(dirtyFlush);
+    window.clearTimeout(dirtyFlush);
     obs.disconnect();
     doc.removeEventListener("input", onUserEdit);
     doc.removeEventListener("keyup", onUserEdit);
