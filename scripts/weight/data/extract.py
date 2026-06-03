@@ -49,6 +49,7 @@ from .reward import (
     _merged_files_after_round,
     compute_llm_rubric_file_scores,
     round_output_files_change_only,
+    unit_has_meaningful_rubric_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -1298,15 +1299,9 @@ def extract_reinforce_rollout_seeds(
 # REINFORCE extraction
 # ---------------------------------------------------------------------------
 # TODO (future): migrate to the file-centric approach used by DPO and OPD.
-#   The main challenge is that each example's reward comes from
-#   `compute_per_traj_rewards(unit)` which is keyed by (unit, round_idx).
-#   To migrate, extend `_build_file_version_index` to also return the
-#   (unit_idx, round_idx) coordinates of each version (already added),
-#   then look up the verifier pass-rate for that specific (unit, round) as
-#   the reward signal. The advantage is a cross-unit context-aware prompt;
-#   the risk is that verifier criteria in one unit may not apply to a file
-#   that was polished in a different unit.
-#   For now, REINFORCE stays on the unit-local per-round path.
+#   Per-round rewards keyed by (unit, round_idx) would better match each training
+#   row's artifact delta. For now, REINFORCE uses one LLM rubric grade per included
+#   execution unit, grading the cumulative session file snapshot at unit end.
 
 def _reward_cache_is_binary_rubric_row(values: list[Any]) -> bool:
     """Each entry must be exactly 0 or 1 (float or int), not bool subtype quirks."""
@@ -1336,17 +1331,6 @@ def _reinforce_prompt_cache_valid(value: Any) -> bool:
     return all(isinstance(m, dict) and isinstance(m.get("role"), str) for m in value)
 
 
-def _reinforce_exec_unit_sample_indices(n_exec: int) -> set[int]:
-    """0-based execution-unit indices to train on: first, 50th percentile, last.
-
-    At most three units per session (fewer when indices coincide, e.g. n_exec == 1).
-    The percentile index is ``int((n_exec - 1) * 0.5)`` along execution order.
-    """
-    if n_exec <= 0:
-        return set()
-    return {0, int((n_exec - 1) * 0.5), n_exec - 1}
-
-
 def extract_reinforce_examples(
     sessions: list[dict],
     renderer: Any | None = None,
@@ -1361,7 +1345,8 @@ def extract_reinforce_examples(
     :func:`_build_file_version_index` so later units see full prior agent
     traffic, not only the current unit's slice.
 
-    The **completion** is still artifact-only from ``rounds[k].output_files``.
+    The **completion** is artifact-only from ``rounds[k].output_files`` when present,
+    else from write/edit tool_calls in ``messages`` (see ``round_output_files_change_only``).
 
     If a task_unit already has a ``reward`` list of length ``len(session rubrics)``
     (the last task_unit's verifier criteria) with only ``0.0`` / ``1.0`` entries, it is
@@ -1376,14 +1361,13 @@ def extract_reinforce_examples(
     Each extracted training row still carries scalar ``reward`` = mean of the unit's
     rubric 0/1 scores (same for every trajectory index in that unit under LLM grading).
 
-    At most **three** execution task_units per session emit training data (first,
-    50th-percentile, and last in execution order; deduped when n_exec ≤ 3).
-    Planning units are pre-seeded into
-    the prompt context and are not emitted as REINFORCE training examples.
-    Other execution units still advance ``accumulated`` but do not call the
-    rubric LLM, write ``reward`` / ``reinforce_prompt``, or append examples.
+    Every non-planning execution task_unit is eligible. A unit is included only when it
+    changes the session file snapshot (writes or edits under ``prior_files``), so the
+    rubric LLM grades non-empty cumulative artifacts. Units that only run bash or read
+    files still advance ``accumulated`` but do not call the rubric LLM, write
+    ``reward`` / ``reinforce_prompt``, or append examples.
 
-    Rounds without ``output_files`` (no artifact produced) are skipped.
+    Rounds without a trainable artifact completion are skipped.
 
     Returns ``(examples, session_dirty)`` where ``session_dirty`` is True if any
     ``reward`` and/or ``reinforce_prompt`` cache was newly written (caller may persist
@@ -1399,7 +1383,7 @@ def extract_reinforce_examples(
     for session in sessions:
         system_prompt = session.get("system_prompt", "")
         tool_schemas = session.get("tool_schemas")
-        # Rubrics: last task_unit's verifiers. Reward LLM runs only on sampled execution units.
+        # Rubrics: last task_unit's verifiers.
         rubrics = session.get("task_units", [])[-1].get("verifiers", [])
         rubrics = [v["criterion"] for v in rubrics]  # list[str]
 
@@ -1408,25 +1392,19 @@ def extract_reinforce_examples(
         )
 
         task_units_list = session.get("task_units", [])
-        n_exec_units = sum(1 for u in task_units_list if u.get("intent") != "planning")
-        # Train on first, 50th-percentile, and last non-planning units only (not every unit).
-        exec_unit_keep = _reinforce_exec_unit_sample_indices(n_exec_units)
-        print(f"exec_unit_keep: {exec_unit_keep}")
-        exec_unit_idx = -1
         session_files: dict[str, str] = {}
 
         for unit in task_units_list:
             if unit.get("intent") == "planning":
                 # Planning has already been included in the session head.
                 continue
-            else:
-                exec_unit_idx += 1
-                include_unit = exec_unit_idx in exec_unit_keep
             rounds = unit.get("agent_trajectories", [])
             human_traj = unit.get("human_trajectories", [])
             if not rounds:
                 continue
 
+            files_before_unit = dict(session_files)
+            include_unit = unit_has_meaningful_rubric_files(files_before_unit, unit)
             n_rubrics = len(rubrics)
             if include_unit:
                 if _unit_reward_cache_valid(unit, n_rubrics):
@@ -1436,7 +1414,10 @@ def extract_reinforce_examples(
                     logger.debug("Using cached rubric 0/1 scores (%d criteria)", len(rubric_scores))
                 else:
                     mean_r, rubric_scores = compute_llm_rubric_file_scores(
-                        unit, rubrics, model="claude-haiku-4-5-20251001",
+                        unit,
+                        rubrics,
+                        prior_files=files_before_unit,
+                        model="claude-haiku-4-5-20251001",
                     )
                     per_traj_rewards = [mean_r] * len(rounds)
                     unit["reward"] = [float(x) for x in rubric_scores]

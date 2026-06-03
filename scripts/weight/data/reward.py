@@ -290,15 +290,36 @@ def round_output_files_change_only(
     return out
 
 
+def _dict_files_to_blocks(files: dict[str, str]) -> list[tuple[str, str]]:
+    return sorted(files.items(), key=lambda kv: kv[0])
+
+
+def _merged_files_after_unit(
+    prior_files: dict[str, str],
+    unit: dict[str, Any],
+) -> dict[str, str]:
+    """Cumulative file snapshot after all trajectory rounds in *unit*."""
+    merged = dict(prior_files)
+    for rnd in unit.get("agent_trajectories", []) or []:
+        if isinstance(rnd, dict):
+            merged = _merged_files_after_round(merged, rnd)
+    return merged
+
+
 def _unit_files_to_blocks(unit: dict[str, Any]) -> list[tuple[str, str]]:
     """Build ``(path, content)`` blocks for rubric grading across all rounds in *unit*."""
-    merged: dict[str, str] = {}
-    for rnd in unit.get("agent_trajectories", []) or []:
-        if not isinstance(rnd, dict):
-            continue
-        merged = _merged_files_after_round(merged, rnd)
+    return _dict_files_to_blocks(_merged_files_after_unit({}, unit))
 
-    return sorted(merged.items(), key=lambda kv: kv[0])
+
+def unit_has_meaningful_rubric_files(
+    prior_files: dict[str, str],
+    unit: dict[str, Any],
+) -> bool:
+    """True when *unit* leaves non-empty gradable files that differ from *prior_files*."""
+    after = _merged_files_after_unit(prior_files, unit)
+    if not after:
+        return False
+    return not prior_files or after != prior_files
 
 
 def _truncate_file_text(text: str, max_len: int) -> str:
@@ -456,12 +477,17 @@ def compute_llm_rubric_file_scores(
     unit: dict[str, Any],
     rubrics: list[str],
     *,
+    prior_files: dict[str, str] | None = None,
     client: Any | None = None,
     model: str | None = None,
     max_tokens: int = 1024,
     max_file_chars: int = 14_000,
 ) -> tuple[float, list[float]]:
-    """Grade unit file text (see ``_unit_files_to_blocks``) against ``rubrics`` with one LLM call.
+    """Grade file text against ``rubrics`` with one LLM call.
+
+    When ``prior_files`` is set, grades the cumulative snapshot after all rounds in
+    *unit* (session files before the unit plus this unit's writes/edits). Otherwise
+    grades only files produced inside *unit* (see ``_unit_files_to_blocks``).
 
     Returns ``(mean_pass, rubric_scores)`` where ``rubric_scores`` has length
     ``len(rubrics)``, each entry ``0.0`` or ``1.0`` (fail/pass per criterion).
@@ -472,9 +498,13 @@ def compute_llm_rubric_file_scores(
     Uses Anthropic Messages API via ``induce.anthropic_user_text`` when ``client`` /
     ``model`` are omitted (resolves credentials like ``scripts/induce.py``).
     """
+    if prior_files is not None:
+        file_blocks = _dict_files_to_blocks(_merged_files_after_unit(prior_files, unit))
+    else:
+        file_blocks = _unit_files_to_blocks(unit)
     return compute_llm_rubric_file_blocks(
         rubrics,
-        _unit_files_to_blocks(unit),
+        file_blocks,
         client=client,
         model=model,
         max_tokens=max_tokens,
