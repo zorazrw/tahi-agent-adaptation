@@ -144,7 +144,7 @@ class TinkerAutoUpdateWatcher {
         }
       }
     } finally {
-      try { reader.cancel(); } catch { /* noop */ }
+      void reader.cancel().catch(() => {});
     }
   }
 
