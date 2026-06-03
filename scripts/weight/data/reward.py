@@ -6,8 +6,9 @@ Per-trajectory variant uses each trajectory's own verifiers (finer-grained signa
 and positional decay via follow-ups-after-round-k instead of a flat efficiency term.
 
 LLM rubric variant (``compute_llm_rubric_file_scores`` / ``compute_llm_rubric_file_reward``):
-grades file text merged from ``agent_trajectories[*].output_files`` (``path`` + ``content``),
-in round order (later rounds win per path). Uses Anthropic (``scripts/induce.py``); requires ``anthropic``.
+grades file text merged from each round's ``output_files`` when present, otherwise
+from assistant ``write`` / ``edit`` tool_calls in ``messages`` (server-exported sessions).
+Later rounds win per path. Uses Anthropic (``scripts/induce.py``); requires ``anthropic``.
 """
 
 from __future__ import annotations
@@ -194,25 +195,108 @@ def _ensure_scripts_on_path() -> None:
         sys.path.insert(0, s)
 
 
-def _unit_files_to_blocks(unit: dict[str, Any]) -> list[tuple[str, str]]:
-    """Build ``(path, content)`` blocks for rubric grading from ``output_files`` only.
+def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
-    Each round's ``output_files`` entries use weight shape ``{"path": "...", "content": "..."}``.
-    Rounds are walked in order; the same ``path`` in a later round overwrites earlier
-    snapshots. Returns ``[]`` when there are no usable files (grader sees no file body).
+
+def _apply_messages_to_files(files: dict[str, str], messages: list[Any]) -> None:
+    """Update *files* in place from assistant write/edit tool_calls in *messages*."""
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if not isinstance(fn, dict):
+                continue
+            name = str(fn.get("name") or "")
+            args = _parse_tool_arguments(fn.get("arguments"))
+            path = args.get("path")
+            if not isinstance(path, str) or not path.strip():
+                continue
+            path = path.strip()
+            if name == "write":
+                content = args.get("content")
+                if isinstance(content, str):
+                    files[path] = content
+            elif name == "edit" and path in files:
+                text = files[path]
+                for ed in args.get("edits") or []:
+                    if not isinstance(ed, dict):
+                        continue
+                    old, new = ed.get("oldText"), ed.get("newText")
+                    if isinstance(old, str) and isinstance(new, str):
+                        text = text.replace(old, new, 1)
+                files[path] = text
+
+
+def _merged_files_after_round(prior: dict[str, str], rnd: dict[str, Any]) -> dict[str, str]:
+    """Cumulative file snapshot after one trajectory round."""
+    out = dict(prior)
+    for f in rnd.get("output_files") or []:
+        if not isinstance(f, dict):
+            continue
+        path = str(f.get("path", "") or "").strip()
+        content = f.get("content")
+        if path and isinstance(content, str):
+            out[path] = content
+    messages = rnd.get("messages") or []
+    if messages:
+        _apply_messages_to_files(out, messages[1:])
+    return out
+
+
+def round_output_files_change_only(
+    rnd: dict[str, Any],
+    prior_files: dict[str, str] | None = None,
+    *,
+    skip_path: Any | None = None,
+) -> list[dict[str, str]]:
+    """Pi-shaped ``output_files`` for one round: stored field or message-derived deltas.
+
+    When ``rnd['output_files']`` is non-empty, returns those entries (Pi export).
+    Otherwise derives files whose content changed vs *prior_files* from write/edit
+    tool_calls in this round's ``messages`` (skipping assistant index 0 user msg).
     """
+    stored: list[dict[str, str]] = []
+    for f in rnd.get("output_files") or []:
+        if not isinstance(f, dict):
+            continue
+        path = str(f.get("path", "") or "").strip()
+        content = f.get("content")
+        if path and isinstance(content, str):
+            stored.append({"path": path, "content": content})
+    if stored:
+        return stored
+
+    prior = dict(prior_files or {})
+    after = _merged_files_after_round(prior, rnd)
+    out: list[dict[str, str]] = []
+    for path, content in after.items():
+        if prior.get(path) == content:
+            continue
+        if skip_path is not None and skip_path(path):
+            continue
+        out.append({"path": path, "content": content})
+    return out
+
+
+def _unit_files_to_blocks(unit: dict[str, Any]) -> list[tuple[str, str]]:
+    """Build ``(path, content)`` blocks for rubric grading across all rounds in *unit*."""
     merged: dict[str, str] = {}
     for rnd in unit.get("agent_trajectories", []) or []:
         if not isinstance(rnd, dict):
             continue
-        for f in rnd.get("output_files") or []:
-            if not isinstance(f, dict):
-                continue
-            path = str(f.get("path", "") or "").strip()
-            content = f.get("content")
-            if not path or not isinstance(content, str):
-                continue
-            merged[path] = content
+        merged = _merged_files_after_round(merged, rnd)
 
     return sorted(merged.items(), key=lambda kv: kv[0])
 
@@ -346,6 +430,7 @@ def compute_llm_rubric_file_blocks(
         )
     scored = [1.0 if p is True else 0.0 for p in passes]
     mean = sum(scored) / len(rubrics)
+    print(f"Mean: {mean}, Scored: {scored}")
     return mean, scored
 
 

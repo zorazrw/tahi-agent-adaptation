@@ -11,9 +11,9 @@ Weight JSON structure (output of ``export_task_sessions.py --format weight``):
       .agent_trajectories[j]:       → round j of agent execution
         .prompt                     → user prompt text for this round
         .messages                   → [user, assistant+tool_calls, tool, assistant, ...]
-        .output_files               → (Pi only) artifacts the agent wrote/edited
-                                       this round; used for artifact-only
-                                       completion construction
+        .output_files               → (Pi export) artifacts changed this round; when
+                                       absent, derived from write/edit tool_calls in
+                                       ``messages`` for completion construction
         .reinforce_prompt (optional)→ cached full REINFORCE prompt (cross-unit accumulated
                                        context + this round's opening user); written on first extract
       .human_trajectories           → [{type, round_index, prompt}, ...]
@@ -45,7 +45,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .reward import compute_llm_rubric_file_scores
+from .reward import (
+    _merged_files_after_round,
+    compute_llm_rubric_file_scores,
+    round_output_files_change_only,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +403,13 @@ _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".zip", ".tar", ".gz",
 })
 
+
+def _artifact_path_skipped_for_training(path: str) -> bool:
+    key = path.split("/")[-1].split("\\")[-1]
+    ext = ("." + key.rsplit(".", 1)[-1].lower()) if "." in key else ""
+    return ext in _SKIP_EXTENSIONS
+
+
 def _build_file_version_index(
     session: dict,
     system_prompt: str,
@@ -435,6 +446,7 @@ def _build_file_version_index(
         session, system_prompt, tool_schemas, renderer,
     )
     file_index: dict[str, list[dict]] = {}
+    unit_files: dict[str, str] = {}
 
     for unit_idx, unit in enumerate(session.get("task_units", [])):
         if unit.get("intent") == "planning":
@@ -450,19 +462,12 @@ def _build_file_version_index(
             # prompt = everything accumulated so far + this round's user message
             prompt_for_round = accumulated + [dict(messages[0])]
 
-            for f in rnd.get("output_files") or []:
-                if not isinstance(f, dict):
-                    continue
-                path = str(f.get("path", "") or "").strip()
-                content = f.get("content")
-                if not path or not isinstance(content, str):
-                    continue
-                # Key by basename so cross-unit edits to the same file are grouped.
+            for f in round_output_files_change_only(
+                rnd, unit_files, skip_path=_artifact_path_skipped_for_training,
+            ):
+                path = f["path"]
+                content = f["content"]
                 key = path.split("/")[-1].split("\\")[-1]
-                # Skip data files and binaries — not useful as training completions.
-                ext = ("." + key.rsplit(".", 1)[-1].lower()) if "." in key else ""
-                if ext in _SKIP_EXTENSIONS:
-                    continue
                 if key not in file_index:
                     file_index[key] = []
                 file_index[key].append({
@@ -473,6 +478,7 @@ def _build_file_version_index(
                     "unit_idx": unit_idx,
                     "round_idx": round_idx,
                 })
+            unit_files = _merged_files_after_round(unit_files, rnd)
 
             # Advance context: append this round's assistant+tool messages.
             accumulated.extend(messages[1:])
@@ -1331,17 +1337,14 @@ def _reinforce_prompt_cache_valid(value: Any) -> bool:
 
 
 def _reinforce_exec_unit_sample_indices(n_exec: int) -> set[int]:
-    """Indices (0-based) of execution task_units to keep for REINFORCE: first, middle, last.
+    """0-based execution-unit indices to train on: first, 50th percentile, last.
 
-    With fewer than three execution units, keeps all that exist (one or two).
+    At most three units per session (fewer when indices coincide, e.g. n_exec == 1).
+    The percentile index is ``int((n_exec - 1) * 0.5)`` along execution order.
     """
     if n_exec <= 0:
         return set()
-    if n_exec == 1:
-        return {0}
-    if n_exec == 2:
-        return {0, 1}
-    return {0, n_exec // 2, n_exec - 1}
+    return {0, int((n_exec - 1) * 0.5), n_exec - 1}
 
 
 def extract_reinforce_examples(
@@ -1373,8 +1376,9 @@ def extract_reinforce_examples(
     Each extracted training row still carries scalar ``reward`` = mean of the unit's
     rubric 0/1 scores (same for every trajectory index in that unit under LLM grading).
 
-    Only **three** execution task_units per session emit training data (first,
-    middle, and last in execution order). Planning units are pre-seeded into
+    At most **three** execution task_units per session emit training data (first,
+    50th-percentile, and last in execution order; deduped when n_exec ≤ 3).
+    Planning units are pre-seeded into
     the prompt context and are not emitted as REINFORCE training examples.
     Other execution units still advance ``accumulated`` but do not call the
     rubric LLM, write ``reward`` / ``reinforce_prompt``, or append examples.
@@ -1395,7 +1399,7 @@ def extract_reinforce_examples(
     for session in sessions:
         system_prompt = session.get("system_prompt", "")
         tool_schemas = session.get("tool_schemas")
-        # Rubrics: last task_unit's verifiers. Reward LLM runs for planning + sampled execution units.
+        # Rubrics: last task_unit's verifiers. Reward LLM runs only on sampled execution units.
         rubrics = session.get("task_units", [])[-1].get("verifiers", [])
         rubrics = [v["criterion"] for v in rubrics]  # list[str]
 
@@ -1405,8 +1409,11 @@ def extract_reinforce_examples(
 
         task_units_list = session.get("task_units", [])
         n_exec_units = sum(1 for u in task_units_list if u.get("intent") != "planning")
+        # Train on first, 50th-percentile, and last non-planning units only (not every unit).
         exec_unit_keep = _reinforce_exec_unit_sample_indices(n_exec_units)
+        print(f"exec_unit_keep: {exec_unit_keep}")
         exec_unit_idx = -1
+        session_files: dict[str, str] = {}
 
         for unit in task_units_list:
             if unit.get("intent") == "planning":
@@ -1449,7 +1456,12 @@ def extract_reinforce_examples(
                         prompt = accumulated + [dict(messages[0])]
                         rnd["reinforce_prompt"] = json.loads(json.dumps(prompt))
                         session_dirty = True
-                    completion, is_agent = _build_artifact_completion(rnd.get("output_files"))
+                    round_files = round_output_files_change_only(
+                        rnd,
+                        session_files,
+                        skip_path=_artifact_path_skipped_for_training,
+                    )
+                    completion, is_agent = _build_artifact_completion(round_files)
                     if completion:
                         examples.append({
                             "prompt": prompt,
@@ -1458,6 +1470,7 @@ def extract_reinforce_examples(
                             "reward": per_traj_rewards[k],
                         })
 
+                session_files = _merged_files_after_round(session_files, rnd)
                 accumulated.extend(messages[1:])
                 for h in human_traj:
                     if h.get("type") == "follow_up" and h.get("round_index") == k:
