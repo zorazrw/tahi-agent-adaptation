@@ -139,12 +139,12 @@ class REINFORCETrainer(Trainer):
             self.renderer = renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
             self.logger.info("REINFORCE trainer: online agentic rollout mode")
 
-        self.rolling_mgr = checkpoint_utils.RollingCheckpointManager(
+        self.rolling_mgr = checkpoint_utils.CheckpointManager(
             training_client=training_client,
             service_client=service_client,
             log_path=config.log_path,
+            save_every=0,
             rolling_save_every=config.rolling_save_every,
-            save_every=config.save_every,
             rolling_ttl_seconds=config.rolling_ttl_seconds,
         )
 
@@ -252,8 +252,9 @@ class REINFORCETrainer(Trainer):
             # Mid-step Tinker checkpoints omitted (same as OPDTrainer); only the
             # end-of-round save below is used for model swap.
 
-            if self.rolling_mgr is not None:
-                self.rolling_mgr.maybe_save(step=step, loop_state={"epoch": epoch_idx, "batch": batch_idx})
+            await self.rolling_mgr.maybe_save_rolling_async(
+                step, {"epoch": epoch_idx, "batch": batch_idx},
+            )
 
             if self.is_online:
                 assert self.sampling_client is not None
@@ -346,7 +347,7 @@ class REINFORCETrainer(Trainer):
         self.step_idx += 1
 
     async def stop(self):
-        self.rolling_mgr.finalize()
+        await self.rolling_mgr.finalize_async()
         self.ml_logger.close()
         self.logger.info("REINFORCE trainer terminated")
 
@@ -380,7 +381,7 @@ class DPOTrainer(Trainer):
         self.log_path = config.log_path
         self.tokenizer = get_tokenizer(config.model_name)
 
-        self.rolling_mgr = checkpoint_utils.RollingCheckpointManager(
+        self.rolling_mgr = make_rolling_checkpoint_manager(
             training_client=training_client,
             service_client=service_client,
             log_path=config.log_path,
@@ -388,7 +389,7 @@ class DPOTrainer(Trainer):
             save_every=config.save_every,
             rolling_ttl_seconds=config.rolling_ttl_seconds,
         )
-        
+
         # Global counters that persist across do_update calls. step_idx is
         # used for LR scheduling, checkpoint cadence, and W&B x-axis; round_idx
         # bumps once per do_update and is useful for naming final saves so
@@ -513,8 +514,9 @@ class DPOTrainer(Trainer):
                 if "state_path" in save_result:
                     metrics["state_path"] = save_result["state_path"]
 
-            if self.rolling_mgr is not None:
-                self.rolling_mgr.maybe_save(step=step, loop_state={"epoch": epoch_idx, "batch": batch_idx})
+            await self.rolling_mgr.maybe_save_rolling_async(
+                step, {"epoch": epoch_idx, "batch": batch_idx},
+            )
 
             learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
                 lr_schedule=self.config.lr_schedule, step=step, total_steps=self.total_steps
@@ -662,7 +664,7 @@ class DPOTrainer(Trainer):
         self.step_idx += 1
         
     async def stop(self):
-        self.rolling_mgr.finalize()
+        await self.rolling_mgr.finalize_async()
         self.ml_logger.close()
         self.logger.info("DPO trainer terminated")
                 

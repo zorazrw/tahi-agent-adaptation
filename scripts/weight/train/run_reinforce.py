@@ -239,7 +239,7 @@ def do_update(
     ml_logger: ml_log.Logger,
     log_path: str,
     tokenizer: Tokenizer,
-    rolling_mgr: checkpoint_utils.RollingCheckpointManager | None = None,
+    rolling_mgr: checkpoint_utils.CheckpointManager | None = None,
 ) -> tuple[dict, float]:
     """Single REINFORCE training step. Returns (metrics, new_baseline)."""
     step = epoch_idx * n_batches + batch_idx
@@ -262,7 +262,9 @@ def do_update(
                 metrics["state_path"] = save_result["state_path"]
 
         if rolling_mgr is not None:
-            rolling_mgr.maybe_save(step=step, loop_state={"epoch": epoch_idx, "batch": batch_idx})
+            rolling_mgr.maybe_save_rolling(
+                step, {"epoch": epoch_idx, "batch": batch_idx},
+            )
 
         learning_rate = learning_rate_base * compute_schedule_lr_multiplier(
             lr_schedule=lr_schedule, step=step, total_steps=total_steps,
@@ -824,12 +826,12 @@ def main() -> None:
         )
 
     tokenizer = get_tokenizer(args.model_name)
-    rolling_mgr = checkpoint_utils.RollingCheckpointManager(
+    rolling_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
         service_client=service_client,
         log_path=log_path,
+        save_every=0,
         rolling_save_every=args.rolling_save_every,
-        save_every=args.save_every,
         rolling_ttl_seconds=args.rolling_ttl_seconds,
     )
 
