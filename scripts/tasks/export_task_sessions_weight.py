@@ -1260,14 +1260,104 @@ def build_full_session_trajectory(
     return traj
 
 
-def extract_initial_task_instruction(action_trajectory: List[dict], fallback: str) -> str:
+# Matches src/electron/libs/runner.ts WORKFLOW_PLAN_APPEND_USER_PROMPT (appended on first turn).
+_WORKFLOW_PLAN_USER_SUFFIX_MARKER = "Before doing anything else, you MUST call the workflow_plan"
+_HEADLESS_USER_SUFFIX_MARKER = "\n\nHeadless execution only:"
+
+
+def strip_interface_user_prompt(prompt: Any) -> str:
+    """Return the human-typed task text without backend-appended planning/headless suffixes."""
+    if not isinstance(prompt, str):
+        return ""
+    text = prompt.strip()
+    if not text:
+        return ""
+
+    idx = text.find(_WORKFLOW_PLAN_USER_SUFFIX_MARKER)
+    if idx >= 0:
+        text = text[:idx].rstrip()
+
+    idx = text.find(_HEADLESS_USER_SUFFIX_MARKER)
+    if idx >= 0:
+        text = text[:idx].rstrip()
+
+    return text.strip()
+
+
+def _extract_pi_jsonl_user_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def load_initial_task_from_pi_session_file(path: Optional[str]) -> str:
+    """First user turn from the Pi session jsonl (when planning user_prompt was not persisted)."""
+    if not path or not isinstance(path, str):
+        return ""
+    p = Path(path.strip())
+    if not p.is_file():
+        return ""
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            stripped = strip_interface_user_prompt(_extract_pi_jsonl_user_text(msg.get("content")))
+            if stripped:
+                return stripped
+    except OSError:
+        pass
+    return ""
+
+
+def resolve_pi_session_file(
+    db_pi_session_file: Optional[str],
+    raw_msgs: Optional[List[dict]] = None,
+) -> Optional[str]:
+    if isinstance(db_pi_session_file, str) and db_pi_session_file.strip():
+        return db_pi_session_file.strip()
+    for m in raw_msgs or []:
+        if m.get("type") == "system_init":
+            sf = m.get("sessionFile")
+            if isinstance(sf, str) and sf.strip():
+                return sf.strip()
+    return None
+
+
+def extract_initial_task_instruction(
+    action_trajectory: List[dict],
+    fallback: str,
+    *,
+    pi_session_file: Optional[str] = None,
+) -> str:
     for m in action_trajectory:
         if m.get("role") == "user" and m.get("type") == "user_prompt":
             prompt = m.get("prompt", "")
             if is_backend_node_user_prompt(prompt):
                 continue
-            return (prompt if isinstance(prompt, str) else "") or fallback or ""
-    return fallback or ""
+            stripped = strip_interface_user_prompt(prompt)
+            if stripped:
+                return stripped
+    from_pi = load_initial_task_from_pi_session_file(pi_session_file)
+    if from_pi:
+        return from_pi
+    fb = strip_interface_user_prompt(fallback)
+    if fb and not is_backend_node_user_prompt(fb):
+        return fb
+    return ""
 
 
 def iter_workflow_nodes_with_path(tree: Any) -> List[tuple[str, dict]]:
@@ -1451,16 +1541,26 @@ def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:
 
 
 def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
-    row = cursor.execute(
-        """SELECT id, title, engine, last_prompt, workflow_tree, steps, output_files, verification_criteria, verifier_marks,
-                  completed_step_indices, status, cwd, created_at, updated_at
-           FROM sessions WHERE id = ?""",
-        (session_id,),
-    ).fetchone()
+    try:
+        row = cursor.execute(
+            """SELECT id, title, engine, last_prompt, workflow_tree, steps, output_files, verification_criteria, verifier_marks,
+                      completed_step_indices, status, cwd, created_at, updated_at, pi_session_file
+               FROM sessions WHERE id = ?""",
+            (session_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = cursor.execute(
+            """SELECT id, title, engine, last_prompt, workflow_tree, steps, output_files, verification_criteria, verifier_marks,
+                      completed_step_indices, status, cwd, created_at, updated_at
+               FROM sessions WHERE id = ?""",
+            (session_id,),
+        ).fetchone()
+        if row:
+            row = (*row, None)
     if not row:
         return None
     (sid, title, engine, last_prompt, workflow_tree_raw, steps_raw, output_files_raw, verification_criteria_raw, verifier_marks_raw,
-     completed_indices_raw, status, cwd, created_at, updated_at) = row
+     completed_indices_raw, status, cwd, created_at, updated_at, pi_session_file_raw) = row
     _ = parse_json_column(completed_indices_raw, [])
     engine = engine or "legacy-claude"
     workflow_tree = parse_json_column(workflow_tree_raw, [])
@@ -1500,7 +1600,17 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
     else:
         action_trajectory = filter_out_stream_events(action_trajectory)
 
-    initial_task_instruction = extract_initial_task_instruction(action_trajectory, last_prompt or "")
+    raw_msgs_for_sf: List[dict] = []
+    for data_str, _, _ in messages_rows:
+        try:
+            raw_msgs_for_sf.append(json.loads(data_str))
+        except json.JSONDecodeError:
+            pass
+    initial_task_instruction = extract_initial_task_instruction(
+        action_trajectory,
+        last_prompt or "",
+        pi_session_file=resolve_pi_session_file(pi_session_file_raw, raw_msgs_for_sf),
+    )
     node_id_to_segment = segment_trajectory_by_persisted_node_prompts(action_trajectory, workflow_tree)
     if engine != "pi" and not node_id_to_segment:
         node_id_to_segment = segment_trajectory_by_resume_points(action_trajectory, workflow_tree)
@@ -2642,7 +2752,7 @@ def build_weight_based_session(
     """Build the weight-based export for a single session."""
     try:
         row = cursor.execute(
-            """SELECT id, title, workflow_tree, last_prompt, cwd, engine
+            """SELECT id, title, workflow_tree, last_prompt, cwd, engine, pi_session_file
                FROM sessions WHERE id = ?""",
             (session_id,),
         ).fetchone()
@@ -2653,10 +2763,10 @@ def build_weight_based_session(
             (session_id,),
         ).fetchone()
         if row:
-            row = (*row, None)
+            row = (*row, None, None)
     if not row:
         return None
-    sid, title, workflow_tree_raw, last_prompt, cwd, db_engine = row
+    sid, title, workflow_tree_raw, last_prompt, cwd, db_engine, pi_session_file_raw = row
     workflow_tree = parse_json_column(workflow_tree_raw, [])
     export_cwd: Optional[str] = None
     if cwd is not None:
@@ -2727,15 +2837,16 @@ def build_weight_based_session(
             skill=sk_timeline_all[idx],
         )
 
-    initial_task_instruction = ""
-    for m in all_msgs:
-        if m.get("type") == "user_prompt":
-            p = m.get("prompt", "")
-            if isinstance(p, str) and not is_backend_node_user_prompt(p):
-                initial_task_instruction = p
-                break
-    if not initial_task_instruction:
-        initial_task_instruction = last_prompt or ""
+    initial_user_msgs = [
+        {"role": "user", "type": "user_prompt", "prompt": m.get("prompt", "")}
+        for m in all_msgs
+        if m.get("type") == "user_prompt"
+    ]
+    initial_task_instruction = extract_initial_task_instruction(
+        initial_user_msgs,
+        last_prompt or "",
+        pi_session_file=resolve_pi_session_file(pi_session_file_raw, all_msgs),
+    )
 
     # ── Segment messages into phases ──
     # Find boundaries: "Proceed with:" prompts mark node execution starts
