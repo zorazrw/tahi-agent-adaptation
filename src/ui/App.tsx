@@ -7,7 +7,7 @@ import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
 import { MemoryModal } from "./components/MemoryModal";
-import { PromptInput } from "./components/PromptInput";
+import { PromptInput, usePromptActions } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
@@ -150,6 +150,7 @@ function App() {
   }, [handleServerEvent, handlePartialMessages, activeSessionId]);
 
   const { connected, sendEvent } = useIPC(onEvent);
+  const { continueWithPrompt } = usePromptActions(sendEvent);
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
@@ -318,6 +319,16 @@ function App() {
     setHasNewMessages(false);
     resetToLatest();
   }, [resetToLatest]);
+
+  const handlePreviewTextComment = useCallback(
+    async (prompt: string) => {
+      await continueWithPrompt(prompt);
+      setShouldAutoScroll(true);
+      setHasNewMessages(false);
+      resetToLatest();
+    },
+    [continueWithPrompt, resetToLatest]
+  );
 
   const triggerBrainContextUpdate = useCallback(() => {
     if (!activeSessionId) return;
@@ -494,6 +505,11 @@ function App() {
                 <ErrorBoundary>
                   <FilePreview
                     sessionId={activeSessionId}
+                    onTextComment={
+                      activeSessionId && activeSession?.status !== "running"
+                        ? handlePreviewTextComment
+                        : undefined
+                    }
                     filePath={(() => {
                       if (!selectedNodeId || !activeSession?.workflowTree) return null;
                       const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {

@@ -28,13 +28,34 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const isRunning = activeSession?.status === "running";
 
+  const continueWithPrompt = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || !activeSessionId) return;
+      if (activeSession?.status === "running") {
+        setGlobalError("Session is still running. Please wait for it to finish.");
+        return;
+      }
+      window.dispatchEvent(new CustomEvent("preview-flush-save"));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      sendEvent({
+        type: "session.continue",
+        payload: {
+          sessionId: activeSessionId,
+          prompt: trimmed,
+          ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
+        },
+      });
+    },
+    [activeSession?.status, activeSessionId, selectedNodeId, sendEvent, setGlobalError]
+  );
+
   const handleSend = useCallback(async () => {
     if (!prompt.trim()) return;
 
-    window.dispatchEvent(new CustomEvent("preview-flush-save"));
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
     if (!activeSessionId) {
+      window.dispatchEvent(new CustomEvent("preview-flush-save"));
+      await new Promise((resolve) => setTimeout(resolve, 200));
       let title = "";
       try {
         setPendingStart(true);
@@ -56,21 +77,10 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
         }
       });
     } else {
-      if (activeSession?.status === "running") {
-        setGlobalError("Session is still running. Please wait for it to finish.");
-        return;
-      }
-      sendEvent({
-        type: "session.continue",
-        payload: {
-          sessionId: activeSessionId,
-          prompt,
-          ...(selectedNodeId ? { verificationNodeId: selectedNodeId } : {}),
-        },
-      });
+      await continueWithPrompt(prompt);
     }
     setPrompt("");
-  }, [activeSession, activeSessionId, cwd, prompt, selectedNodeId, sendEvent, setGlobalError, setPendingStart, setPrompt]);
+  }, [activeSessionId, continueWithPrompt, cwd, prompt, sendEvent, setGlobalError, setPendingStart, setPrompt]);
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return;
@@ -85,7 +95,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
     handleSend();
   }, [cwd, handleSend, setGlobalError]);
 
-  return { prompt, setPrompt, isRunning, handleSend, handleStop, handleStartFromModal };
+  return { prompt, setPrompt, isRunning, handleSend, handleStop, handleStartFromModal, continueWithPrompt };
 }
 
 export function PromptInput({ sendEvent, onSendMessage, disabled = false, rightOffset }: PromptInputProps) {
