@@ -280,12 +280,12 @@ def do_update(
             data = dataset.get_batch(batch_idx)
             rewards = dataset.get_batch_rewards(batch_idx)
 
-        if step == 0:
-            for i in range(min(3, len(data))):
-                int_tokens = list(data[i].model_input.to_ints())
-                weights = data[i].loss_fn_inputs["weights"].data
-                logger.info(f"\nExample {i} (reward={rewards[i]:.3f}):")
-                logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
+        # if step == 0:
+        #     for i in range(min(3, len(data))):
+        #         int_tokens = list(data[i].model_input.to_ints())
+        #         weights = data[i].loss_fn_inputs["weights"].data
+        #         logger.info(f"\nExample {i} (reward={rewards[i]:.3f}):")
+        #         logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
 
         advantages = [r - baseline for r in rewards]
         loss_fn = make_reinforce_loss_fn(advantages)
@@ -660,8 +660,8 @@ async def run_online_training(
                 logger.warning("Skipping step %d: no valid rollout samples", step)
                 continue
 
-            if step == 0:
-                print_example(datums[0], tokenizer, label="Online rollout example 0")
+            # if step == 0:
+            #     print_example(datums[0], tokenizer, label="Online rollout example 0")
 
             step_metrics, baseline = await train_reinforce_batch_async(
                 training_client=training_client,

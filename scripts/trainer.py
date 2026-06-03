@@ -308,11 +308,11 @@ class REINFORCETrainer(Trainer):
                     data = dataset.get_batch(batch_idx)
                     rewards = dataset.get_batch_rewards(batch_idx)
 
-                if step == 0:
-                    for i in range(min(3, len(data))):
-                        _REINFORCE_print_example(
-                            data[i], self.tokenizer, f"Example {i} (reward={rewards[i]:.3f})"
-                        )
+                # if step == 0:
+                #     for i in range(min(3, len(data))):
+                #         _REINFORCE_print_example(
+                #             data[i], self.tokenizer, f"Example {i} (reward={rewards[i]:.3f})"
+                #         )
 
             async with trace.scope_span("step"):
                 train_metrics, self.baseline = await train_reinforce_batch_async(
