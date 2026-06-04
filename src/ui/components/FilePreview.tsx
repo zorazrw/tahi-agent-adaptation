@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { StreamMessage } from "../types";
 import { CopyIcon, FolderOpenIcon, Loader2Icon, RefreshCcwIcon, SaveIcon } from "lucide-react";
 import { getRenderer, type PreviewSaveChrome } from "./file-renderers";
+import { TextSelectionComment } from "./file-renderers/TextSelectionComment";
 import { ZoomControls } from "./file-renderers/DocxRenderer";
 
 const FILE_TOOL_NAMES = new Set(["Read", "Write", "Edit"]);
@@ -70,7 +71,8 @@ export function getPreviewFileForStep(
 
 type PreviewFileResult =
   | { kind: "txt"; content: string }
-  | { kind: "xlsx"; sheets: { name: string; html: string }[] }
+  | { kind: "xlsx"; model: import("../../lib/xlsx-model").XlsxModel }
+  | { kind: "xls"; sheets: { name: string; html: string }[] }
   | { kind: "docx"; data: string }
   | { kind: "image"; dataUrl: string }
   | { kind: "pdf"; data: string }
@@ -107,7 +109,15 @@ function getCopyableContent(result: PreviewFileResult | null): string | null {
 
 function canUseHeaderSave(result: PreviewFileResult | null): boolean {
   if (!result || "error" in result) return false;
-  return result.kind === "txt" || result.kind === "md" || result.kind === "code" || result.kind === "csv" || result.kind === "json" || result.kind === "html";
+  return (
+    result.kind === "txt" ||
+    result.kind === "md" ||
+    result.kind === "code" ||
+    result.kind === "csv" ||
+    result.kind === "json" ||
+    result.kind === "html" ||
+    result.kind === "xlsx"
+  );
 }
 
 type FilePreviewProps = {
@@ -115,13 +125,15 @@ type FilePreviewProps = {
   cwd?: string | null;
   sessionId?: string | null;
   stepCompleted?: boolean;
+  /** Send quoted selection + comment to the agent (user ``message`` action). */
+  onTextComment?: (prompt: string) => void | Promise<void>;
 };
 
 const ZOOM_STEP = 0.1;
 const ZOOM_MIN = 0.3;
 const ZOOM_MAX = 2.0;
 
-export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePreviewProps) {
+export function FilePreview({ filePath, cwd, sessionId, stepCompleted, onTextComment }: FilePreviewProps) {
   const [result, setResult] = useState<PreviewFileResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [zoom, setZoom] = useState(0.6);
@@ -219,6 +231,31 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
       })
     : null;
 
+  const previewBody =
+    Renderer && !loading ? (
+      <Renderer
+        key={`${refreshKey}:${filePath}`}
+        data={result}
+        zoom={showZoom ? zoom : undefined}
+        filePath={filePath}
+        cwd={cwd ?? undefined}
+        sessionId={sessionId ?? undefined}
+        reloadKey={refreshKey}
+        onReload={handleRefresh}
+        onHtmlVisualSaveChromeChange={onPreviewSaveChromeChange}
+        onTextSaveChromeChange={onPreviewSaveChromeChange}
+      />
+    ) : null;
+
+  const wrappedPreview =
+    previewBody && isTextualPreview && onTextComment ? (
+      <TextSelectionComment filePath={filePath ?? undefined} onSendComment={onTextComment}>
+        {previewBody}
+      </TextSelectionComment>
+    ) : (
+      previewBody
+    );
+
   return (
     <div
       className={`flex h-full min-h-0 flex-1 flex-col overflow-hidden border bg-surface-secondary/60 ${
@@ -314,21 +351,8 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted }: FilePre
         {result && "error" in result && !isNotFound && !loading && (
           <p className="text-sm text-error">{result.error}</p>
         )}
-        {Renderer && !loading && (
-          <div className="flex-1 flex flex-col min-h-0 min-w-0 h-full">
-            <Renderer
-              key={`${refreshKey}:${filePath}`}
-              data={result}
-              zoom={showZoom ? zoom : undefined}
-              filePath={filePath}
-              cwd={cwd ?? undefined}
-              sessionId={sessionId ?? undefined}
-              reloadKey={refreshKey}
-              onReload={handleRefresh}
-              onHtmlVisualSaveChromeChange={onPreviewSaveChromeChange}
-              onTextSaveChromeChange={onPreviewSaveChromeChange}
-            />
-          </div>
+        {wrappedPreview && (
+          <div className="flex-1 flex flex-col min-h-0 min-w-0 h-full">{wrappedPreview}</div>
         )}
       </div>
     </div>

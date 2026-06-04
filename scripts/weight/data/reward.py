@@ -6,8 +6,9 @@ Per-trajectory variant uses each trajectory's own verifiers (finer-grained signa
 and positional decay via follow-ups-after-round-k instead of a flat efficiency term.
 
 LLM rubric variant (``compute_llm_rubric_file_scores`` / ``compute_llm_rubric_file_reward``):
-grades file text merged from ``agent_trajectories[*].output_files`` (``path`` + ``content``),
-in round order (later rounds win per path). Uses Anthropic (``scripts/induce.py``); requires ``anthropic``.
+grades file text merged from each round's ``output_files`` when present, otherwise
+from assistant ``write`` / ``edit`` tool_calls in ``messages`` (server-exported sessions).
+Later rounds win per path. Uses Anthropic (``scripts/induce.py``); requires ``anthropic``.
 """
 
 from __future__ import annotations
@@ -194,27 +195,131 @@ def _ensure_scripts_on_path() -> None:
         sys.path.insert(0, s)
 
 
-def _unit_files_to_blocks(unit: dict[str, Any]) -> list[tuple[str, str]]:
-    """Build ``(path, content)`` blocks for rubric grading from ``output_files`` only.
+def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
-    Each round's ``output_files`` entries use weight shape ``{"path": "...", "content": "..."}``.
-    Rounds are walked in order; the same ``path`` in a later round overwrites earlier
-    snapshots. Returns ``[]`` when there are no usable files (grader sees no file body).
-    """
-    merged: dict[str, str] = {}
-    for rnd in unit.get("agent_trajectories", []) or []:
-        if not isinstance(rnd, dict):
+
+def _apply_messages_to_files(files: dict[str, str], messages: list[Any]) -> None:
+    """Update *files* in place from assistant write/edit tool_calls in *messages*."""
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        for f in rnd.get("output_files") or []:
-            if not isinstance(f, dict):
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
                 continue
-            path = str(f.get("path", "") or "").strip()
-            content = f.get("content")
-            if not path or not isinstance(content, str):
+            fn = tc.get("function")
+            if not isinstance(fn, dict):
                 continue
-            merged[path] = content
+            name = str(fn.get("name") or "")
+            args = _parse_tool_arguments(fn.get("arguments"))
+            path = args.get("path")
+            if not isinstance(path, str) or not path.strip():
+                continue
+            path = path.strip()
+            if name == "write":
+                content = args.get("content")
+                if isinstance(content, str):
+                    files[path] = content
+            elif name == "edit" and path in files:
+                text = files[path]
+                for ed in args.get("edits") or []:
+                    if not isinstance(ed, dict):
+                        continue
+                    old, new = ed.get("oldText"), ed.get("newText")
+                    if isinstance(old, str) and isinstance(new, str):
+                        text = text.replace(old, new, 1)
+                files[path] = text
 
-    return sorted(merged.items(), key=lambda kv: kv[0])
+
+def _merged_files_after_round(prior: dict[str, str], rnd: dict[str, Any]) -> dict[str, str]:
+    """Cumulative file snapshot after one trajectory round."""
+    out = dict(prior)
+    for f in rnd.get("output_files") or []:
+        if not isinstance(f, dict):
+            continue
+        path = str(f.get("path", "") or "").strip()
+        content = f.get("content")
+        if path and isinstance(content, str):
+            out[path] = content
+    messages = rnd.get("messages") or []
+    if messages:
+        _apply_messages_to_files(out, messages[1:])
+    return out
+
+
+def round_output_files_change_only(
+    rnd: dict[str, Any],
+    prior_files: dict[str, str] | None = None,
+    *,
+    skip_path: Any | None = None,
+) -> list[dict[str, str]]:
+    """Pi-shaped ``output_files`` for one round: stored field or message-derived deltas.
+
+    When ``rnd['output_files']`` is non-empty, returns those entries (Pi export).
+    Otherwise derives files whose content changed vs *prior_files* from write/edit
+    tool_calls in this round's ``messages`` (skipping assistant index 0 user msg).
+    """
+    stored: list[dict[str, str]] = []
+    for f in rnd.get("output_files") or []:
+        if not isinstance(f, dict):
+            continue
+        path = str(f.get("path", "") or "").strip()
+        content = f.get("content")
+        if path and isinstance(content, str):
+            stored.append({"path": path, "content": content})
+    if stored:
+        return stored
+
+    prior = dict(prior_files or {})
+    after = _merged_files_after_round(prior, rnd)
+    out: list[dict[str, str]] = []
+    for path, content in after.items():
+        if prior.get(path) == content:
+            continue
+        if skip_path is not None and skip_path(path):
+            continue
+        out.append({"path": path, "content": content})
+    return out
+
+
+def _dict_files_to_blocks(files: dict[str, str]) -> list[tuple[str, str]]:
+    return sorted(files.items(), key=lambda kv: kv[0])
+
+
+def _merged_files_after_unit(
+    prior_files: dict[str, str],
+    unit: dict[str, Any],
+) -> dict[str, str]:
+    """Cumulative file snapshot after all trajectory rounds in *unit*."""
+    merged = dict(prior_files)
+    for rnd in unit.get("agent_trajectories", []) or []:
+        if isinstance(rnd, dict):
+            merged = _merged_files_after_round(merged, rnd)
+    return merged
+
+
+def _unit_files_to_blocks(unit: dict[str, Any]) -> list[tuple[str, str]]:
+    """Build ``(path, content)`` blocks for rubric grading across all rounds in *unit*."""
+    return _dict_files_to_blocks(_merged_files_after_unit({}, unit))
+
+
+def unit_has_meaningful_rubric_files(
+    prior_files: dict[str, str],
+    unit: dict[str, Any],
+) -> bool:
+    """True when *unit* leaves non-empty gradable files that differ from *prior_files*."""
+    after = _merged_files_after_unit(prior_files, unit)
+    if not after:
+        return False
+    return not prior_files or after != prior_files
 
 
 def _truncate_file_text(text: str, max_len: int) -> str:
@@ -346,6 +451,7 @@ def compute_llm_rubric_file_blocks(
         )
     scored = [1.0 if p is True else 0.0 for p in passes]
     mean = sum(scored) / len(rubrics)
+    print(f"Mean: {mean}, Scored: {scored}")
     return mean, scored
 
 
@@ -371,12 +477,17 @@ def compute_llm_rubric_file_scores(
     unit: dict[str, Any],
     rubrics: list[str],
     *,
+    prior_files: dict[str, str] | None = None,
     client: Any | None = None,
     model: str | None = None,
     max_tokens: int = 1024,
     max_file_chars: int = 14_000,
 ) -> tuple[float, list[float]]:
-    """Grade unit file text (see ``_unit_files_to_blocks``) against ``rubrics`` with one LLM call.
+    """Grade file text against ``rubrics`` with one LLM call.
+
+    When ``prior_files`` is set, grades the cumulative snapshot after all rounds in
+    *unit* (session files before the unit plus this unit's writes/edits). Otherwise
+    grades only files produced inside *unit* (see ``_unit_files_to_blocks``).
 
     Returns ``(mean_pass, rubric_scores)`` where ``rubric_scores`` has length
     ``len(rubrics)``, each entry ``0.0`` or ``1.0`` (fail/pass per criterion).
@@ -387,9 +498,13 @@ def compute_llm_rubric_file_scores(
     Uses Anthropic Messages API via ``induce.anthropic_user_text`` when ``client`` /
     ``model`` are omitted (resolves credentials like ``scripts/induce.py``).
     """
+    if prior_files is not None:
+        file_blocks = _dict_files_to_blocks(_merged_files_after_unit(prior_files, unit))
+    else:
+        file_blocks = _unit_files_to_blocks(unit)
     return compute_llm_rubric_file_blocks(
         rubrics,
-        _unit_files_to_blocks(unit),
+        file_blocks,
         client=client,
         model=model,
         max_tokens=max_tokens,

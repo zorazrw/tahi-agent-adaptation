@@ -8,7 +8,8 @@ Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 When export JSON includes ``expertise_task`` (e.g. ``data-viz-html``), writes to that stem
 instead of slugifying the session title, and includes existing memory/skill file content in the LM prompt.
 
-Requires: anthropic, python-dotenv. API key resolution matches the Electron app (see below).
+Requires: python-dotenv; provider deps per Pi runtime (tinker bridge, anthropic, or openai).
+LLM calls use the same Pi defaults as in-app task solving (``pi-agent/settings.json``).
 """
 
 from __future__ import annotations
@@ -24,6 +25,14 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+
+from pi_llm import (
+    PiLlmConfigError,
+    ResolvedRuntimeLlm,
+    default_agent_cowork_user_data,
+    resolve_runtime_llm,
+    runtime_llm_text,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -287,10 +296,6 @@ Title: <short task name>
 If nothing fits: NONE"""
 
 
-def _llm_text(client, model: str, system: str, user: str, max_tokens: int = 1024) -> str:
-    return anthropic_user_text(client, model, user, system=system, max_tokens=max_tokens, temperature=0.0)
-
-
 def _strip_outer_fences(text: str) -> str:
     t = text.strip()
     if not t.startswith("```"):
@@ -364,7 +369,7 @@ def _merge_tail_instruction(has_existing: bool, kind: str) -> str:
 
 
 def extract_memories(
-    client, model: str, task: str, log: str, *, existing_memory: str = ""
+    runtime: ResolvedRuntimeLlm, task: str, log: str, *, existing_memory: str = ""
 ) -> list[str]:
     task_block = (task or "").strip() or "(no title)"
     has_existing = bool(existing_memory.strip())
@@ -375,7 +380,7 @@ def extract_memories(
         f"{_merge_tail_instruction(has_existing, 'memory')}"
     )
     try:
-        raw = _llm_text(client, model, MEMORY_SYSTEM, user)
+        raw = runtime_llm_text(runtime, MEMORY_SYSTEM, user)
     except Exception:
         logger.exception("Memory LLM failed")
         return []
@@ -394,7 +399,7 @@ def extract_memories(
 
 
 def extract_skill(
-    client, model: str, task: str, log: str, *, existing_skill: str = ""
+    runtime: ResolvedRuntimeLlm, task: str, log: str, *, existing_skill: str = ""
 ) -> tuple[str, list[str]] | None:
     task_block = (task or "").strip() or "(no title)"
     has_existing = bool(existing_skill.strip())
@@ -406,7 +411,7 @@ def extract_skill(
         "Use Title: plus numbered steps only.\n"
     )
     try:
-        raw = _llm_text(client, model, SKILL_SYSTEM, user, max_tokens=2048)
+        raw = runtime_llm_text(runtime, SKILL_SYSTEM, user, max_tokens=2048)
     except Exception:
         logger.exception("Skill LLM failed")
         return None
@@ -473,22 +478,11 @@ def _slug(name: str, fallback: str) -> str:
     return (s or re.sub(r"[^a-z0-9]+", "-", fallback.lower()).strip("-") or "session")[:100]
 
 
-def default_agent_cowork_user_data() -> Path:
-    if env := os.environ.get("AGENT_COWORK_USER_DATA"):
-        return Path(env).expanduser()
-    home = Path.home()
-    if sys.platform == "darwin":
-        return home / "Library/Application Support/agent-cowork"
-    if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA", home / "AppData/Roaming")) / "agent-cowork"
-    return home / ".config/agent-cowork"
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description="Extract memories & skills from session JSON")
     p.add_argument("--data_path", required=True, help="Path to session JSON")
     p.add_argument("--output_dir", default=None, help="Output root (default: app userData)")
-    p.add_argument("--model", default=None, help="Anthropic model id")
+    p.add_argument("--model", default=None, help="Override Pi default model slug/id")
     args = p.parse_args()
     load_dotenv()
 
@@ -500,13 +494,11 @@ def main() -> None:
         return
 
     try:
-        cfg = resolve_anthropic_config()
-    except AnthropicConfigError as e:
+        runtime = resolve_runtime_llm(model_override=args.model)
+    except PiLlmConfigError as e:
         logger.error("%s", e)
         raise SystemExit(1) from e
-    client = make_anthropic_client(cfg)
-    model = args.model or cfg.model
-    logger.info("Model %s", model)
+    logger.info("Pi runtime: provider=%s model=%s", runtime.provider, runtime.model)
 
     out = (Path(args.output_dir) if args.output_dir else default_agent_cowork_user_data()).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -537,7 +529,7 @@ def main() -> None:
 
         existing_memory, existing_skill = _read_existing_outputs(out, stem)
         memories = extract_memories(
-            client, model, task_for_llm, log, existing_memory=existing_memory
+            runtime, task_for_llm, log, existing_memory=existing_memory
         )
         (mem_dir / f"{stem}.md").write_text(
             ("\n\n".join(memories) + "\n") if memories else "",
@@ -545,7 +537,7 @@ def main() -> None:
         )
 
         skill = extract_skill(
-            client, model, task_for_llm, log, existing_skill=existing_skill
+            runtime, task_for_llm, log, existing_skill=existing_skill
         )
         if skill:
             t, steps = skill

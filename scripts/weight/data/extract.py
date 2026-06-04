@@ -11,9 +11,9 @@ Weight JSON structure (output of ``export_task_sessions.py --format weight``):
       .agent_trajectories[j]:       → round j of agent execution
         .prompt                     → user prompt text for this round
         .messages                   → [user, assistant+tool_calls, tool, assistant, ...]
-        .output_files               → (Pi only) artifacts the agent wrote/edited
-                                       this round; used for artifact-only
-                                       completion construction
+        .output_files               → (Pi export) artifacts changed this round; when
+                                       absent, derived from write/edit tool_calls in
+                                       ``messages`` for completion construction
         .reinforce_prompt (optional)→ cached full REINFORCE prompt (cross-unit accumulated
                                        context + this round's opening user); written on first extract
       .human_trajectories           → [{type, round_index, prompt}, ...]
@@ -45,7 +45,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .reward import compute_llm_rubric_file_scores
+from .reward import (
+    _merged_files_after_round,
+    compute_llm_rubric_file_scores,
+    round_output_files_change_only,
+    unit_has_meaningful_rubric_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +404,13 @@ _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".zip", ".tar", ".gz",
 })
 
+
+def _artifact_path_skipped_for_training(path: str) -> bool:
+    key = path.split("/")[-1].split("\\")[-1]
+    ext = ("." + key.rsplit(".", 1)[-1].lower()) if "." in key else ""
+    return ext in _SKIP_EXTENSIONS
+
+
 def _build_file_version_index(
     session: dict,
     system_prompt: str,
@@ -435,6 +447,7 @@ def _build_file_version_index(
         session, system_prompt, tool_schemas, renderer,
     )
     file_index: dict[str, list[dict]] = {}
+    unit_files: dict[str, str] = {}
 
     for unit_idx, unit in enumerate(session.get("task_units", [])):
         if unit.get("intent") == "planning":
@@ -450,19 +463,12 @@ def _build_file_version_index(
             # prompt = everything accumulated so far + this round's user message
             prompt_for_round = accumulated + [dict(messages[0])]
 
-            for f in rnd.get("output_files") or []:
-                if not isinstance(f, dict):
-                    continue
-                path = str(f.get("path", "") or "").strip()
-                content = f.get("content")
-                if not path or not isinstance(content, str):
-                    continue
-                # Key by basename so cross-unit edits to the same file are grouped.
+            for f in round_output_files_change_only(
+                rnd, unit_files, skip_path=_artifact_path_skipped_for_training,
+            ):
+                path = f["path"]
+                content = f["content"]
                 key = path.split("/")[-1].split("\\")[-1]
-                # Skip data files and binaries — not useful as training completions.
-                ext = ("." + key.rsplit(".", 1)[-1].lower()) if "." in key else ""
-                if ext in _SKIP_EXTENSIONS:
-                    continue
                 if key not in file_index:
                     file_index[key] = []
                 file_index[key].append({
@@ -473,6 +479,7 @@ def _build_file_version_index(
                     "unit_idx": unit_idx,
                     "round_idx": round_idx,
                 })
+            unit_files = _merged_files_after_round(unit_files, rnd)
 
             # Advance context: append this round's assistant+tool messages.
             accumulated.extend(messages[1:])
@@ -1293,15 +1300,9 @@ def extract_reinforce_rollout_seeds(
 # REINFORCE extraction
 # ---------------------------------------------------------------------------
 # TODO (future): migrate to the file-centric approach used by DPO and OPD.
-#   The main challenge is that each example's reward comes from
-#   `compute_per_traj_rewards(unit)` which is keyed by (unit, round_idx).
-#   To migrate, extend `_build_file_version_index` to also return the
-#   (unit_idx, round_idx) coordinates of each version (already added),
-#   then look up the verifier pass-rate for that specific (unit, round) as
-#   the reward signal. The advantage is a cross-unit context-aware prompt;
-#   the risk is that verifier criteria in one unit may not apply to a file
-#   that was polished in a different unit.
-#   For now, REINFORCE stays on the unit-local per-round path.
+#   Per-round rewards keyed by (unit, round_idx) would better match each training
+#   row's artifact delta. For now, REINFORCE uses one LLM rubric grade per included
+#   execution unit, grading the cumulative session file snapshot at unit end.
 
 def _reward_cache_is_binary_rubric_row(values: list[Any]) -> bool:
     """Each entry must be exactly 0 or 1 (float or int), not bool subtype quirks."""
@@ -1331,20 +1332,6 @@ def _reinforce_prompt_cache_valid(value: Any) -> bool:
     return all(isinstance(m, dict) and isinstance(m.get("role"), str) for m in value)
 
 
-def _reinforce_exec_unit_sample_indices(n_exec: int) -> set[int]:
-    """Indices (0-based) of execution task_units to keep for REINFORCE: first, middle, last.
-
-    With fewer than three execution units, keeps all that exist (one or two).
-    """
-    if n_exec <= 0:
-        return set()
-    if n_exec == 1:
-        return {0}
-    if n_exec == 2:
-        return {0, 1}
-    return {0, n_exec // 2, n_exec - 1}
-
-
 def extract_reinforce_examples(
     sessions: list[dict],
     renderer: Any | None = None,
@@ -1359,7 +1346,8 @@ def extract_reinforce_examples(
     :func:`_build_file_version_index` so later units see full prior agent
     traffic, not only the current unit's slice.
 
-    The **completion** is still artifact-only from ``rounds[k].output_files``.
+    The **completion** is artifact-only from ``rounds[k].output_files`` when present,
+    else from write/edit tool_calls in ``messages`` (see ``round_output_files_change_only``).
 
     If a task_unit already has a ``reward`` list of length ``len(session rubrics)``
     (the last task_unit's verifier criteria) with only ``0.0`` / ``1.0`` entries, it is
@@ -1374,13 +1362,13 @@ def extract_reinforce_examples(
     Each extracted training row still carries scalar ``reward`` = mean of the unit's
     rubric 0/1 scores (same for every trajectory index in that unit under LLM grading).
 
-    Only **three** execution task_units per session emit training data (first,
-    middle, and last in execution order). Planning units are pre-seeded into
-    the prompt context and are not emitted as REINFORCE training examples.
-    Other execution units still advance ``accumulated`` but do not call the
-    rubric LLM, write ``reward`` / ``reinforce_prompt``, or append examples.
+    Every non-planning execution task_unit is eligible. A unit is included only when it
+    changes the session file snapshot (writes or edits under ``prior_files``), so the
+    rubric LLM grades non-empty cumulative artifacts. Units that only run bash or read
+    files still advance ``accumulated`` but do not call the rubric LLM, write
+    ``reward`` / ``reinforce_prompt``, or append examples.
 
-    Rounds without ``output_files`` (no artifact produced) are skipped.
+    Rounds without a trainable artifact completion are skipped.
 
     Returns ``(examples, session_dirty)`` where ``session_dirty`` is True if any
     ``reward`` and/or ``reinforce_prompt`` cache was newly written (caller may persist
@@ -1396,7 +1384,7 @@ def extract_reinforce_examples(
     for session in sessions:
         system_prompt = session.get("system_prompt", "")
         tool_schemas = session.get("tool_schemas")
-        # Rubrics: last task_unit's verifiers. Reward LLM runs for planning + sampled execution units.
+        # Rubrics: last task_unit's verifiers.
         rubrics = session.get("task_units", [])[-1].get("verifiers", [])
         rubrics = [v["criterion"] for v in rubrics]  # list[str]
 
@@ -1405,22 +1393,19 @@ def extract_reinforce_examples(
         )
 
         task_units_list = session.get("task_units", [])
-        n_exec_units = sum(1 for u in task_units_list if u.get("intent") != "planning")
-        exec_unit_keep = _reinforce_exec_unit_sample_indices(n_exec_units)
-        exec_unit_idx = -1
+        session_files: dict[str, str] = {}
 
         for unit in task_units_list:
             if unit.get("intent") == "planning":
                 # Planning has already been included in the session head.
                 continue
-            else:
-                exec_unit_idx += 1
-                include_unit = exec_unit_idx in exec_unit_keep
             rounds = unit.get("agent_trajectories", [])
             human_traj = unit.get("human_trajectories", [])
             if not rounds:
                 continue
 
+            files_before_unit = dict(session_files)
+            include_unit = unit_has_meaningful_rubric_files(files_before_unit, unit)
             n_rubrics = len(rubrics)
             if include_unit:
                 if _unit_reward_cache_valid(unit, n_rubrics):
@@ -1430,7 +1415,10 @@ def extract_reinforce_examples(
                     logger.debug("Using cached rubric 0/1 scores (%d criteria)", len(rubric_scores))
                 else:
                     mean_r, rubric_scores = compute_llm_rubric_file_scores(
-                        unit, rubrics, model="claude-haiku-4-5-20251001",
+                        unit,
+                        rubrics,
+                        prior_files=files_before_unit,
+                        model="claude-haiku-4-5-20251001",
                     )
                     per_traj_rewards = [mean_r] * len(rounds)
                     unit["reward"] = [float(x) for x in rubric_scores]
@@ -1450,7 +1438,12 @@ def extract_reinforce_examples(
                         prompt = accumulated + [dict(messages[0])]
                         rnd["reinforce_prompt"] = json.loads(json.dumps(prompt))
                         session_dirty = True
-                    completion, is_agent = _build_artifact_completion(rnd.get("output_files"))
+                    round_files = round_output_files_change_only(
+                        rnd,
+                        session_files,
+                        skip_path=_artifact_path_skipped_for_training,
+                    )
+                    completion, is_agent = _build_artifact_completion(round_files)
                     if completion:
                         examples.append({
                             "prompt": prompt,
@@ -1459,6 +1452,7 @@ def extract_reinforce_examples(
                             "reward": per_traj_rewards[k],
                         })
 
+                session_files = _merged_files_after_round(session_files, rnd)
                 accumulated.extend(messages[1:])
                 for h in human_traj:
                     if h.get("type") == "follow_up" and h.get("round_index") == k:

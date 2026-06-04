@@ -16,6 +16,8 @@ import {
     inferSessionIdForPreviewWrite,
     recordFileEditAfterPreviewSave,
 } from "./ipc-handlers.js";
+import { fileToModel, modelToBytes, modelToText } from "./libs/exceljs-xlsx.js";
+import type { XlsxModel } from "../lib/xlsx-model.js";
 import { generateSessionTitle } from "./libs/util.js";
 import type { ClientEvent } from "./types.js";
 import {
@@ -604,13 +606,23 @@ app.on("ready", () => {
             if (ext === ".pdf") {
                 return { kind: "pdf", data: buffer.toString("base64") };
             }
+            if (ext === ".xlsx") {
+                // Editable path: ExcelJS -> neutral model (rendered by Univer in the UI).
+                try {
+                    const model = await fileToModel(buffer, basename(resolved));
+                    return { kind: "xlsx", model };
+                } catch {
+                    // Fall through to read-only HTML if ExcelJS can't parse it.
+                }
+            }
             if (ext === ".xlsx" || ext === ".xls") {
+                // Legacy / fallback read-only path (.xls has no ExcelJS reader).
                 const workbook = XLSX.read(buffer, { type: "buffer" });
                 const sheets = workbook.SheetNames.map((name) => ({
                     name,
                     html: XLSX.utils.sheet_to_html(workbook.Sheets[name]!),
                 }));
-                return { kind: "xlsx", sheets };
+                return { kind: "xls", sheets };
             }
             if (ext === ".docx") {
                 return { kind: "docx", data: buffer.toString("base64") };
@@ -648,6 +660,46 @@ app.on("ready", () => {
                     /** Always record resolved path so DB/export matches workflow ``outputFiles`` (often absolute). */
                     const pathForRecord = resolved.replace(/\\/g, "/");
                     recordFileEditAfterPreviewSave(sid, pathForRecord, content);
+                }
+                return { success: true };
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                return { success: false, error: message };
+            }
+        }
+    );
+
+    ipcMainHandle(
+        "write-xlsx",
+        async (
+            _: any,
+            filePath: string,
+            cwd?: string | null,
+            model?: XlsxModel,
+            sessionId?: string | null
+        ) => {
+            try {
+                if (!filePath || typeof filePath !== "string") {
+                    return { success: false, error: "Invalid file path" };
+                }
+                if (!model || typeof model !== "object" || !Array.isArray(model.sheets)) {
+                    return { success: false, error: "Invalid workbook model" };
+                }
+                const base = cwd && typeof cwd === "string" ? cwd : process.cwd();
+                const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
+                // ExcelJS writes real .xlsx bytes (binary) and preserves styles/borders/merges/freeze.
+                const bytes = await modelToBytes(model);
+                await writeFile(resolved, bytes);
+                const sidRaw = typeof sessionId === "string" ? sessionId.trim() : "";
+                const sid = sidRaw || inferSessionIdForPreviewWrite(resolved, cwd ?? undefined) || "";
+                if (sid) {
+                    /**
+                     * Record a TEXTUAL rendering (not the binary) so the existing
+                     * text-diff verifier pipeline yields cell-level deltas across
+                     * saves and the agent sees readable content, not an opaque blob.
+                     */
+                    const pathForRecord = resolved.replace(/\\/g, "/");
+                    recordFileEditAfterPreviewSave(sid, pathForRecord, modelToText(model));
                 }
                 return { success: true };
             } catch (err) {

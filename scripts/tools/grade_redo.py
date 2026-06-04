@@ -9,6 +9,8 @@ verifier LM once (Haiku by default) and prints per-criterion PASS/FAIL plus aver
 Examples:
   python scripts/tools/grade_redo.py -j runs/.../session.json --verifiers verifiers.json
   python scripts/tools/grade_redo.py -j session.json --dry-run --log-file grade_report.txt
+  python scripts/tools/grade_redo.py -j session.json --verifiers verifiers.json \
+      --backend openai --model gpt-4.1-mini --json-out ratings.json
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import re
 import sys
 from contextlib import contextmanager
@@ -29,12 +32,16 @@ for p in (_scripts, _tools):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-import induce  # noqa: E402
 import extract_verifiers  # noqa: E402
-from dotenv import load_dotenv  # noqa: E402
+
+try:
+    from dotenv import load_dotenv  # type: ignore[import-not-found]  # noqa: E402
+except ImportError:  # pragma: no cover - optional for dry-run/OpenAI-only environments.
+    load_dotenv = None  # type: ignore[assignment]
 
 _PLAN_SUFFIX = "Before doing anything else, you MUST call the workflow_plan"
 DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 _TRUNCATE_LEN = 14_000
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\n\r]+$")
 
@@ -119,7 +126,16 @@ def instruction_overlap(a: str, b: str) -> float:
         i = s.find(_PLAN_SUFFIX)
         return s[:i].strip() if i >= 0 else s
 
-    return max(SequenceMatcher(None, a, b).ratio(), SequenceMatcher(None, core(a), core(b)).ratio())
+    def normalize(s: str) -> str:
+        return re.sub(r"\s+", " ", s.strip())
+
+    pairs = [
+        (a, b),
+        (core(a), core(b)),
+        (normalize(a), normalize(b)),
+        (normalize(core(a)), normalize(core(b))),
+    ]
+    return max(SequenceMatcher(None, left, right).ratio() for left, right in pairs if left and right)
 
 
 def match_rubrics(catalog: list[dict[str, Any]], instruction: str, min_overlap: float) -> tuple[dict[str, Any], float]:
@@ -314,24 +330,97 @@ def build_message_content(criteria: list[str], file_blocks: list[tuple[str, str]
     return content
 
 
-def _parse_json_from_model_text(text: str) -> dict[str, Any]:
+def _parse_json_from_model_text(text: str) -> Any:
+    def scan_candidates(source: str) -> list[str]:
+        candidates: list[str] = []
+        start: int | None = None
+        opener: str | None = None
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(source):
+            if start is None:
+                if ch in "{[":
+                    start = i
+                    opener = ch
+                    depth = 1
+                    in_string = False
+                    escape = False
+                continue
+
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif opener == "{" and ch == "{":
+                depth += 1
+            elif opener == "[" and ch == "[":
+                depth += 1
+            elif (opener == "{" and ch == "}") or (opener == "[" and ch == "]"):
+                depth -= 1
+                if depth == 0:
+                    candidates.append(source[start : i + 1])
+                    start = None
+                    opener = None
+        return candidates
+
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    raw = (fence.group(1) if fence else text).strip()
-    start, end = raw.find("{"), raw.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError("No JSON object found in model response")
-    return json.loads(raw[start : end + 1])
+    sources: list[str] = []
+    if fence and fence.group(1):
+        sources.append(fence.group(1).strip())
+    sources.append(text.strip())
+
+    last_error: Exception | None = None
+    seen: set[str] = set()
+    for source in sources:
+        for candidate in reversed(scan_candidates(source)):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(parsed, (dict, list)):
+                return parsed
+
+    if last_error is not None:
+        raise ValueError(f"Unable to parse JSON object in model response: {last_error}") from last_error
+    preview = text.strip()
+    if len(preview) > 400:
+        preview = preview[:400] + "... [truncated]"
+    raise ValueError(f"No JSON object found in model response. Raw preview: {preview!r}")
 
 
 def interpret_results(text: str, n: int) -> list[bool | None]:
-    arr = _parse_json_from_model_text(text).get("results")
+    parsed = _parse_json_from_model_text(text)
+    if isinstance(parsed, dict):
+        arr = parsed.get("results")
+    elif isinstance(parsed, list):
+        arr = parsed
+    else:
+        arr = None
     if not isinstance(arr, list):
         raise ValueError("Missing results array")
     out: list[bool | None] = [None] * n
     for i in range(min(n, len(arr))):
         row = arr[i]
-        if isinstance(row, dict) and "pass" in row:
-            out[i] = bool(row["pass"])
+        if isinstance(row, bool):
+            out[i] = row
+        elif isinstance(row, dict) and "pass" in row:
+            value = row["pass"]
+            if isinstance(value, bool):
+                out[i] = value
+            elif isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+                out[i] = value.strip().lower() == "true"
     return out
 
 
@@ -371,12 +460,84 @@ def grade(
     return interpret_results(raw, len(criteria)), raw
 
 
+def build_openai_input(criteria: list[str], file_blocks: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    anthropic_blocks = build_message_content(criteria, file_blocks)
+    content: list[dict[str, Any]] = []
+    for block in anthropic_blocks:
+        if block.get("type") == "text":
+            content.append({"type": "input_text", "text": str(block.get("text") or "")})
+        elif block.get("type") == "image":
+            src = block.get("source")
+            if not isinstance(src, dict):
+                continue
+            media_type = str(src.get("media_type") or "image/png")
+            data = str(src.get("data") or "").strip()
+            if data:
+                content.append({"type": "input_image", "image_url": f"data:{media_type};base64,{data}"})
+    return [{"role": "user", "content": content}]
+
+
+def grade_openai(
+    criteria: list[str],
+    files: list[tuple[str, str]],
+    *,
+    model: str,
+    api_key: str | None,
+    base_url: str | None,
+    request_timeout: float,
+    max_retries: int,
+    max_tokens: int,
+    debug_prompts: bool,
+) -> tuple[list[bool | None], str]:
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise SystemExit("OpenAI backend requires the openai package.") from exc
+
+    resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not resolved_api_key:
+        raise SystemExit("OpenAI backend requires OPENAI_API_KEY or --api-key.")
+
+    client = OpenAI(
+        api_key=resolved_api_key,
+        base_url=base_url,
+        timeout=request_timeout,
+        max_retries=max_retries,
+    )
+    input_payload = build_openai_input(criteria, files)
+    if debug_prompts:
+        print("=== openai verifier request blocks ===", file=sys.stderr)
+        for block in input_payload[0]["content"]:
+            if block["type"] == "input_text":
+                print(f"text:\n{block['text']}\n", file=sys.stderr)
+            elif block["type"] == "input_image":
+                url = str(block["image_url"])
+                print(f"image_url len={len(url)} preview={url[:72]}...", file=sys.stderr)
+        print("=== end request blocks ===", file=sys.stderr)
+
+    response = client.responses.create(
+        model=model,
+        temperature=0.0,
+        max_output_tokens=max_tokens,
+        input=input_payload,
+    )
+    raw = getattr(response, "output_text", None)
+    if not isinstance(raw, str):
+        raw = str(response)
+    return interpret_results(raw, len(criteria)), raw
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-j", "--session-json", type=Path, required=True)
     p.add_argument("--verifiers", type=Path, default=Path("verifiers.json"))
     p.add_argument("--min-overlap", type=float, default=0.55)
-    p.add_argument("--model", help=f"Anthropic model (default: {DEFAULT_MODEL})")
+    p.add_argument("--backend", choices=["anthropic", "openai"], default="anthropic")
+    p.add_argument("--model", help=f"Judge model (default: {DEFAULT_MODEL} for Anthropic, {DEFAULT_OPENAI_MODEL} for OpenAI)")
+    p.add_argument("--api-key", help="OpenAI backend API key override (default: OPENAI_API_KEY)")
+    p.add_argument("--base-url", help="OpenAI-compatible base URL override")
+    p.add_argument("--request-timeout", type=float, default=120.0)
+    p.add_argument("--max-retries", type=int, default=2)
     p.add_argument("--max-tokens", type=int, default=1024)
     p.add_argument("--no-api-config", action="store_true")
     p.add_argument("--no-claude-settings", action="store_true")
@@ -389,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     env_file = args.env_file or (_scripts / ".env")
-    if env_file.is_file():
+    if load_dotenv is not None and env_file.is_file():
         load_dotenv(env_file, override=args.dotenv_override)
 
     session_path = resolve_path(args.session_json)
@@ -427,18 +588,34 @@ def main(argv: list[str] | None = None) -> int:
                 session=session, entry=entry, overlap=overlap, files=files, criteria_count=len(criteria)
             )
         else:
-            cfg = induce.resolve_anthropic_config(
-                skip_api_config=args.no_api_config,
-                skip_claude_settings=args.no_claude_settings,
-            )
-            model = args.model or DEFAULT_MODEL
-            client = induce.make_anthropic_client(cfg)
+            if args.backend == "openai":
+                model = args.model or DEFAULT_OPENAI_MODEL
+                labels, raw_response = grade_openai(
+                    criteria,
+                    files,
+                    model=model,
+                    api_key=args.api_key,
+                    base_url=args.base_url,
+                    request_timeout=args.request_timeout,
+                    max_retries=args.max_retries,
+                    max_tokens=args.max_tokens,
+                    debug_prompts=args.debug_prompts,
+                )
+            else:
+                import induce  # noqa: PLC0415
 
-            if args.debug_prompts:
-                for i, block in enumerate(build_message_content(criteria, files)):
-                    print(f"[{i}] {block.get('type')}", file=sys.stderr)
+                cfg = induce.resolve_anthropic_config(
+                    skip_api_config=args.no_api_config,
+                    skip_claude_settings=args.no_claude_settings,
+                )
+                model = args.model or DEFAULT_MODEL
+                client = induce.make_anthropic_client(cfg)
 
-            labels, raw_response = grade(criteria, files, client=client, model=model, max_tokens=args.max_tokens)
+                if args.debug_prompts:
+                    for i, block in enumerate(build_message_content(criteria, files)):
+                        print(f"[{i}] {block.get('type')}", file=sys.stderr)
+
+                labels, raw_response = grade(criteria, files, client=client, model=model, max_tokens=args.max_tokens)
             results = [{"index": i, "criterion": c, "pass": labels[i]} for i, c in enumerate(criteria)]
 
             n_pass = sum(1 for x in labels if x is True)
@@ -465,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"average_success_rate (scored only): {n_pass}/{n_pass + n_fail} = {n_pass / (n_pass + n_fail):.4f}")
 
             report |= {
+                "backend": args.backend,
                 "model": model,
                 "raw_response": raw_response,
                 "results": results,

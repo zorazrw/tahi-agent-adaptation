@@ -239,7 +239,7 @@ def do_update(
     ml_logger: ml_log.Logger,
     log_path: str,
     tokenizer: Tokenizer,
-    rolling_mgr: checkpoint_utils.RollingCheckpointManager | None = None,
+    rolling_mgr: checkpoint_utils.CheckpointManager | None = None,
 ) -> tuple[dict, float]:
     """Single REINFORCE training step. Returns (metrics, new_baseline)."""
     step = epoch_idx * n_batches + batch_idx
@@ -262,7 +262,9 @@ def do_update(
                 metrics["state_path"] = save_result["state_path"]
 
         if rolling_mgr is not None:
-            rolling_mgr.maybe_save(step=step, loop_state={"epoch": epoch_idx, "batch": batch_idx})
+            rolling_mgr.maybe_save_rolling(
+                step, {"epoch": epoch_idx, "batch": batch_idx},
+            )
 
         learning_rate = learning_rate_base * compute_schedule_lr_multiplier(
             lr_schedule=lr_schedule, step=step, total_steps=total_steps,
@@ -278,12 +280,12 @@ def do_update(
             data = dataset.get_batch(batch_idx)
             rewards = dataset.get_batch_rewards(batch_idx)
 
-        if step == 0:
-            for i in range(min(3, len(data))):
-                int_tokens = list(data[i].model_input.to_ints())
-                weights = data[i].loss_fn_inputs["weights"].data
-                logger.info(f"\nExample {i} (reward={rewards[i]:.3f}):")
-                logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
+        # if step == 0:
+        #     for i in range(min(3, len(data))):
+        #         int_tokens = list(data[i].model_input.to_ints())
+        #         weights = data[i].loss_fn_inputs["weights"].data
+        #         logger.info(f"\nExample {i} (reward={rewards[i]:.3f}):")
+        #         logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
 
         advantages = [r - baseline for r in rewards]
         loss_fn = make_reinforce_loss_fn(advantages)
@@ -658,8 +660,8 @@ async def run_online_training(
                 logger.warning("Skipping step %d: no valid rollout samples", step)
                 continue
 
-            if step == 0:
-                print_example(datums[0], tokenizer, label="Online rollout example 0")
+            # if step == 0:
+            #     print_example(datums[0], tokenizer, label="Online rollout example 0")
 
             step_metrics, baseline = await train_reinforce_batch_async(
                 training_client=training_client,
@@ -824,12 +826,12 @@ def main() -> None:
         )
 
     tokenizer = get_tokenizer(args.model_name)
-    rolling_mgr = checkpoint_utils.RollingCheckpointManager(
+    rolling_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
         service_client=service_client,
         log_path=log_path,
+        save_every=0,
         rolling_save_every=args.rolling_save_every,
-        save_every=args.save_every,
         rolling_ttl_seconds=args.rolling_ttl_seconds,
     )
 
