@@ -1,3 +1,0 @@
-LAST_SESSION=$(sqlite3 "/Users/aspen/Library/Application Support/agent-cowork/sessions.db" "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1;")
-
-python3 scripts/tasks/export_task_sessions_weight.py --db "/Users/aspen/Library/Application Support/agent-cowork/sessions.db" --output '/Users/aspen/Desktop/agent-cowork-opd-artifacts/0003-task16/trail-1/history.json' --format weight --session-id "$LAST_SESSION"
