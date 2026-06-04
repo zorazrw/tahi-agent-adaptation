@@ -1821,20 +1821,27 @@ def _build_agentic_teacher_messages(
     tools_prefix: list[dict[str, Any]],
     redo_message: str = OPD_REDO_MESSAGE,
 ) -> list[dict[str, Any]]:
-    """Teacher conversation: tools_prefix + follow-ups + redo + task + trajectory.
+    """Teacher conversation: tools_prefix + [follow-ups + redo] + task + trajectory.
 
-    Mirrors :func:`_build_teacher_prompt_chat` (``head + golden_chat + [redo] +
-    trailing``): the privileged user follow-ups are spliced ONCE before the
-    restated initial task (and thus before the first assistant token), so they
-    condition every distilled assistant distribution.  ``trajectory_tail`` (the
-    student's assistant/tool messages) is byte-identical to the student datum's,
-    so teacher top-K aligns 1-to-1 onto the student mask.
+    The privileged user follow-ups are collapsed into a SINGLE user message
+    (one follow-up per line, separated by line breaks) with ``redo_message``
+    appended, spliced ONCE before the restated initial task (and thus before
+    the first assistant token), so they condition every distilled assistant
+    distribution.  ``trajectory_tail`` (the student's assistant/tool messages)
+    is byte-identical to the student datum's, so teacher top-K aligns 1-to-1
+    onto the student mask.
     """
     golden_chat = row.get("golden_chat") or []
     prompt_messages = row["prompt_messages"]
+    followup_texts = [
+        str(m.get("content", "")) for m in golden_chat if m.get("content")
+    ]
+    if followup_texts:
+        combined = "\n".join(followup_texts) + "\n\n" + redo_message
+    else:
+        combined = redo_message
     messages: list[dict[str, Any]] = list(tools_prefix)
-    messages.extend(dict(m) for m in golden_chat)
-    messages.append({"role": "user", "content": redo_message})
+    messages.append({"role": "user", "content": combined})
     messages.extend(dict(m) for m in prompt_messages)
     messages.extend(trajectory_tail)
     return messages
@@ -2190,9 +2197,19 @@ async def _build_agentic_topk_datums_async(
     top-K is read at the teacher datum's assistant-mask positions, then mapped
     onto the student datum's assistant-mask positions (1-to-1, in order).
     """
+    # Drop (student, teacher) pairs whose teacher-forced sequence -- or student
+    # datum -- would exceed the model context window. The teacher top-K prefill
+    # below sends the *entire* teacher-forced sequence with ``max_tokens=1``; an
+    # oversized sequence 400s server-side and would otherwise kill the whole
+    # training round. The teacher sequence is the longer of the two (it carries
+    # the privileged follow-up/redo prefix on top of the student trajectory),
+    # but we guard the student datum too since it must still fit
+    # ``forward_backward`` during training.
+    kept_student_datums: list[tinker.Datum] = []
     teacher_forced_seqs: list[tinker.ModelInput] = []
     teacher_mask_indices_list: list[list[int]] = []
-    for td in teacher_datums:
+    n_dropped_oversized = 0
+    for idx, (sd, td) in enumerate(zip(student_datums, teacher_datums)):
         targets = td.loss_fn_inputs["target_tokens"].data
         td_weights = td.loss_fn_inputs["weights"].data
         td_mask = [j for j, w in enumerate(td_weights) if w > 0]
@@ -2200,8 +2217,45 @@ async def _build_agentic_topk_datums_async(
         teacher_forced = td.model_input
         if len(targets) > 0:
             teacher_forced = teacher_forced.append_int(int(targets[-1]))
+        # +1 mirrors the max_tokens=1 prefill request the server validates.
+        teacher_prefill_len = teacher_forced.length + 1
+        student_len = sd.model_input.length
+        if teacher_prefill_len > max_context_length or student_len > max_context_length:
+            n_dropped_oversized += 1
+            logger.warning(
+                "opd agentic topk: dropping oversized pair idx=%d "
+                "(teacher_prefill=%d, student=%d, max_context_length=%d)",
+                idx,
+                teacher_prefill_len,
+                student_len,
+                max_context_length,
+            )
+            continue
+        kept_student_datums.append(sd)
         teacher_forced_seqs.append(teacher_forced)
         teacher_mask_indices_list.append(td_mask)
+
+    if n_dropped_oversized:
+        logger.warning(
+            "opd agentic topk: dropped %d/%d pair(s) exceeding context window "
+            "(max_context_length=%d); proceeding with %d",
+            n_dropped_oversized,
+            len(student_datums),
+            max_context_length,
+            len(kept_student_datums),
+        )
+    if not kept_student_datums:
+        logger.error(
+            "opd agentic topk: all %d pair(s) dropped as oversized "
+            "(max_context_length=%d); returning empty batch",
+            len(student_datums),
+            max_context_length,
+        )
+        return [], {
+            "opd/topk_num_datums": 0.0,
+            "opd/topk_k": float(topk),
+            "opd/topk_dropped_oversized": float(n_dropped_oversized),
+        }
 
     topk_responses = await asyncio.gather(*[
         teacher_client.sample_async(
@@ -2218,7 +2272,7 @@ async def _build_agentic_topk_datums_async(
     total_teacher_entropy = 0.0
     new_datums: list[tinker.Datum] = []
 
-    for i, sd in enumerate(student_datums):
+    for i, sd in enumerate(kept_student_datums):
         weights_1d = sd.loss_fn_inputs["weights"].data
         student_mask = [j for j, w in enumerate(weights_1d) if w > 0]
         td_mask = teacher_mask_indices_list[i]
@@ -2276,8 +2330,9 @@ async def _build_agentic_topk_datums_async(
         ))
 
     metrics: dict[str, float] = {
-        "opd/topk_num_datums": float(len(student_datums)),
+        "opd/topk_num_datums": float(len(kept_student_datums)),
         "opd/topk_k": float(topk),
+        "opd/topk_dropped_oversized": float(n_dropped_oversized),
     }
     if total_completion_tokens > 0:
         metrics["opd/total_completion_tokens"] = total_completion_tokens

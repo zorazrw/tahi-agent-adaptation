@@ -1,19 +1,19 @@
 # -- Mode --
-mode: reinforce  # "dpo", "opd", or "reinforce"
+mode: opd  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
 temperature: 0.3
 logprobs: false
 
 # -- Update --
-update_every_n_sessions: 1
+update_every_n_sessions: 12
 
 # -- Training (shared) --
-lora_rank: 64
+lora_rank: 32
 dry_run: false
-learning_rate: 5.0e-5
-num_epochs: 1
-batch_size: 1
+learning_rate: 1.0e-4
+num_epochs: 8
+batch_size: 4
 lr_schedule: cosine
 max_steps: null
 max_length: null
@@ -26,10 +26,10 @@ dpo_rpo_alpha: 0.0
 dpo_use_ipo: false
 
 # -- OPD-specific --
-opd_max_tokens: 16384
-opd_temperature: 0.7
+opd_max_tokens: 4096
+opd_temperature: 1.0
 opd_topk: 20
-opd_max_context_length: 32768
+opd_max_context_length: 65536
 opd_pair_mode: first_last
 opd_use_gt: true
 opd_use_student: true
@@ -53,11 +53,11 @@ opd_rollout_pipeline: current
 
 # -- OPD agentic mode (only used when opd_extract_version: agentic) --
 opd_agentic_max_turns: 48            # overall safety ceiling on assistant turns per episode
-opd_agentic_max_turns_per_step: 8    # inner agent-loop cap within a single planned step
+opd_agentic_max_turns_per_step: 10    # inner agent-loop cap within a single planned step
 opd_agentic_max_steps: 6             # max planned (leaf) steps replayed as "Proceed with" turns
 opd_agentic_enable_bash: true        # allow the bash tool (runs on the server host)
 opd_agentic_tool_timeout_s: 20       # per-bash-command timeout
-opd_agentic_max_trajectory_tokens:   # null = no cap; else stop the rollout near this many tokens
+opd_agentic_max_trajectory_tokens: 48000   # null = no cap; else stop the rollout near this many tokens
 
 # -- REINFORCE-specific --
 reinforce_version: online  # "offline" (logged trajectories + cached rubric rewards)
@@ -85,7 +85,7 @@ wandb_name: null
 # -- Model lifecycle --
 # Base model (or registry slug) to use when training starts before any
 # /v1/chat/completions call has selected a model. Matches scripts/sessions/*.json.
-preload_model: Qwen/Qwen3.5-4B
+preload_model: Qwen/Qwen3.5-35B-A3B
 
 # -- Proxy Server --
 proxy_host: localhost

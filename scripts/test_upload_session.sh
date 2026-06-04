@@ -16,7 +16,7 @@ if [ "$n" -eq 1 ]; then
 fi
 
 # upload first 12 sessions for training
-last_idx=1
+last_idx=12
 test_session="${sessions[$last_idx]}"
 echo "Holding out test session: $test_session"
 echo "Uploading $last_idx training session(s)..."

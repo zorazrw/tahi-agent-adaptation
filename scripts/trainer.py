@@ -729,6 +729,13 @@ class OPDTrainer(Trainer):
         # because save_checkpoint_and_get_sampling_client is async.
         self.sampling_client: tinker.SamplingClient | None = None
 
+        self.checkpoint_mgr = checkpoint_utils.CheckpointManager(
+            training_client=training_client,
+            service_client=service_client,
+            log_path=config.log_path,
+            save_every=config.save_every,
+        )
+
         # Global counters persisted across do_update calls (see DPOTrainer).
         self.step_idx = 0
         self.round_idx = 0
@@ -750,9 +757,8 @@ class OPDTrainer(Trainer):
         if self.sampling_client is None:
             self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
                 self.training_client,
+                self.checkpoint_mgr,
                 self.step_idx,
-                self.config.log_path,
-                self.config.save_every,
             )
 
     async def do_update(
@@ -933,6 +939,30 @@ class OPDTrainer(Trainer):
                     )
             metrics.update(topk_metrics)
 
+            if not topk_datums:
+                learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
+                    lr_schedule=self.config.lr_schedule,
+                    step=step,
+                    total_steps=total_steps,
+                )
+                metrics.update(
+                    {
+                        "opd_online/no_topk_batch": 1.0,
+                        "learning_rate": learning_rate,
+                        "progress": step / max(total_steps, 1),
+                    }
+                )
+                self.ml_logger.log_metrics(metrics=metrics, step=step)
+                self.logger.warning(
+                    "Skipping OPD step %d: no top-K datums (all %d pair(s) "
+                    "dropped as oversized; dropped=%.0f)",
+                    step,
+                    len(student_datums),
+                    topk_metrics.get("opd/topk_dropped_oversized", 0.0),
+                )
+                self.step_idx += 1
+                return
+
             # if self.config.save_every > 0 and step % self.config.save_every == 0 and step > 0:
             #     save_result = await checkpoint_utils.save_checkpoint_async(
             #         training_client=self.training_client,
@@ -990,11 +1020,13 @@ class OPDTrainer(Trainer):
             )
 
             # Refresh the student sampling client onto the just-updated weights.
+            # log_path/save_every live on the CheckpointManager (see __init__),
+            # matching the new save_checkpoint_and_get_sampling_client signature
+            # already used by _ensure_sampling_client.
             self.sampling_client, sampler_metrics = await save_checkpoint_and_get_sampling_client(
                 self.training_client,
+                self.checkpoint_mgr,
                 step + 1,
-                self.config.log_path,
-                self.config.save_every,
             )
             metrics.update(sampler_metrics)
             self.logger.info(

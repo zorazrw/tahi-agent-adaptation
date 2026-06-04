@@ -769,10 +769,11 @@ _HUMAN_ACTION_TYPES = (
 
 OPD_REDO_MESSAGE = (
     "The user messages above are follow-ups from a previous session based "
-    "on the given chat history. Please think about the reason why the user "
-    "asked these specific follow-ups, and reason through the user "
-    "preferences reflected by them. Then, provide a response to the "
-    "following user request that incorporates the feedback."
+    "on the given chat history."
+    "Infer the reusable preferences behind the feedback: visual style, "
+    "layout constraints, annotation quality, data-faithfulness, writing tone, "
+    "and any domain-specific standards. Apply those reusable preferences "
+    "when judging or improving the current response."
 )
 
 

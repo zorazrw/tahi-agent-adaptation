@@ -125,10 +125,21 @@ class WorkspaceSandbox:
             return f.read()
 
     def run_command(self, command: str, timeout: int | None = None) -> tuple[int, str, str]:
-        """Run a shell command confined to the sandbox root (blocking)."""
+        """Run a shell command confined to the sandbox root (blocking, headless).
+
+        The subprocess is forced into a headless GUI environment so agent code
+        that calls e.g. ``matplotlib.pyplot.show()`` does not pop a real window
+        and block the rollout until a human closes it. ``MPLBACKEND=Agg`` makes
+        matplotlib non-interactive (``show()`` is a no-op; ``savefig()`` still
+        works); ``QT_QPA_PLATFORM=offscreen`` and clearing ``DISPLAY`` cover
+        Qt/X-based GUIs.
+        """
+        env = {**os.environ, "MPLBACKEND": "Agg", "QT_QPA_PLATFORM": "offscreen"}
+        env.pop("DISPLAY", None)
         proc = subprocess.run(
             ["bash", "-lc", command],
             cwd=self.root,
+            env=env,
             capture_output=True,
             text=True,
             timeout=timeout if timeout is not None else self.bash_timeout_s,
