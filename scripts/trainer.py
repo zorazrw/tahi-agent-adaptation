@@ -9,9 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from tinker_cookbook import checkpoint_utils, renderers
-from tinker_cookbook.rl.train import (
-    save_checkpoint_and_get_sampling_client,
-)
 from tinker_cookbook.supervised.train import run_evals
 from tinker_cookbook.supervised.types import SupervisedDataset
 from tinker_cookbook.tokenizer_utils import get_tokenizer
@@ -167,11 +164,8 @@ class REINFORCETrainer(Trainer):
 
     async def _ensure_sampling_client(self) -> None:
         if self.sampling_client is None:
-            self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-                self.training_client,
-                self.step_idx,
-                self.config.log_path,
-                self.config.save_every,
+            self.sampling_client = (
+                await self.training_client.save_weights_and_get_sampling_client_async()
             )
 
     async def do_update(
@@ -327,11 +321,8 @@ class REINFORCETrainer(Trainer):
             metrics.update(train_metrics)
 
             if self.is_online:
-                self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-                    self.training_client,
-                    self.step_idx + 1,
-                    self.config.log_path,
-                    self.config.save_every,
+                self.sampling_client = (
+                    await self.training_client.save_weights_and_get_sampling_client_async()
                 )
 
         # Log timing metrics from trace_iteration window
@@ -381,12 +372,13 @@ class DPOTrainer(Trainer):
         self.log_path = config.log_path
         self.tokenizer = get_tokenizer(config.model_name)
 
-        self.rolling_mgr = make_rolling_checkpoint_manager(
+        self.rolling_mgr = checkpoint_utils.CheckpointManager(
             training_client=training_client,
             service_client=service_client,
             log_path=config.log_path,
-            rolling_save_every=config.rolling_save_every,
             save_every=config.save_every,
+            ttl_seconds=config.ttl_seconds,
+            rolling_save_every=config.rolling_save_every,
             rolling_ttl_seconds=config.rolling_ttl_seconds,
         )
 
@@ -727,8 +719,7 @@ class OPDTrainer(Trainer):
         )
         self.logger.info(f"Created static teacher sampling client for {config.model_name}")
 
-        # Student sampling client is created lazily on the first do_update
-        # because save_checkpoint_and_get_sampling_client is async.
+        # Student sampling client is created lazily on the first do_update.
         self.sampling_client: tinker.SamplingClient | None = None
 
         # Global counters persisted across do_update calls (see DPOTrainer).
@@ -744,17 +735,10 @@ class OPDTrainer(Trainer):
             trace.trace_init(output_file=trace_events_path)
 
     async def _ensure_sampling_client(self) -> None:
-        """Lazily create the initial student sampling client.
-
-        Done here rather than in ``__init__`` because
-        ``save_checkpoint_and_get_sampling_client`` is async.
-        """
+        """Lazily create the initial student sampling client."""
         if self.sampling_client is None:
-            self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-                self.training_client,
-                self.step_idx,
-                self.config.log_path,
-                self.config.save_every,
+            self.sampling_client = (
+                await self.training_client.save_weights_and_get_sampling_client_async()
             )
 
     async def do_update(
@@ -992,13 +976,9 @@ class OPDTrainer(Trainer):
             )
 
             # Refresh the student sampling client onto the just-updated weights.
-            self.sampling_client, sampler_metrics = await save_checkpoint_and_get_sampling_client(
-                self.training_client,
-                step + 1,
-                self.config.log_path,
-                self.config.save_every,
+            self.sampling_client = (
+                await self.training_client.save_weights_and_get_sampling_client_async()
             )
-            metrics.update(sampler_metrics)
             self.logger.info(
                 "Online OPD step %d: valid=%d/%d filter_rate=%.3f loss=%.4f",
                 step,
