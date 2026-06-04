@@ -2,7 +2,7 @@ pyyaml
 uvicorn
 openai
 fastapi
-tinker
-tinker-cookbook
+tinker>=0.22.3
+tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git
 python-dotenv
 orjson
