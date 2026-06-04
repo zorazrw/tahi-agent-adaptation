@@ -38,6 +38,7 @@ export type RunnerOptions = {
   session: Session;
   regenerateWorkflow?: boolean;
   branchEntryId?: string;
+  bashEnv?: Record<string, string>;
   /** When set, compact Pi session context to the last N agent tool actions before prompting. */
   trimExecutionContextToLastActions?: number;
   onEvent: (event: ServerEvent) => void;
@@ -413,6 +414,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     session,
     regenerateWorkflow,
     branchEntryId,
+    bashEnv,
     trimExecutionContextToLastActions,
     onEvent,
     onSessionUpdate,
@@ -451,6 +453,17 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       payload: { sessionId: session.id, prompt: promptToSend },
     });
 
+    const bashTool =
+      bashEnv && Object.keys(bashEnv).length > 0
+        ? createBashTool(cwd, {
+            spawnHook: ({ command, cwd: toolCwd, env }) => ({
+              command,
+              cwd: toolCwd,
+              env: { ...env, ...bashEnv },
+            }),
+          })
+        : createBashTool(cwd);
+
     const { session: piSession, modelFallbackMessage } = await createAgentSession({
       cwd,
       agentDir,
@@ -461,7 +474,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       sessionManager,
       tools: [
         createReadTool(cwd),
-        createBashTool(cwd),
+        bashTool,
         createEditTool(cwd),
         createWriteTool(cwd),
         createGrepTool(cwd),
