@@ -38,6 +38,7 @@ trash/*
 scripts/**/*.json
 scripts/runs
 runs/*
+scripts/eval.sh
 
 # Local Tinker bridge environment
 tinker-bridge/.venv/

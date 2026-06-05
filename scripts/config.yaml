@@ -9,10 +9,10 @@ logprobs: false
 update_every_n_sessions: 12
 
 # -- Training (shared) --
-lora_rank: 32
+lora_rank: 64
 dry_run: false
 learning_rate: 1.0e-4
-num_epochs: 8
+num_epochs: 6
 batch_size: 4
 lr_schedule: cosine
 max_steps: null
