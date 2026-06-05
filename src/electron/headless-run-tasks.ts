@@ -28,6 +28,7 @@ type TaskSpec = {
 type Args = {
   tasks: string;
   limit: number;
+  taskIds?: string[];
   workplaceTemplate: string;
   modelPath: string;
   baseModel: string;
@@ -85,6 +86,7 @@ function parseArgs(argv: string[]): Args {
     };
     if (a === "--tasks") out.tasks = next();
     else if (a === "--limit") out.limit = Number(next());
+    else if (a === "--task-ids") out.taskIds = next().split(",").map((part) => part.trim()).filter(Boolean);
     else if (a === "--workplace-template") out.workplaceTemplate = next();
     else if (a === "--model-path") out.modelPath = next();
     else if (a === "--base-model") out.baseModel = next();
@@ -140,6 +142,12 @@ Simple run example:
     --workplace-template trash/workplace-set/test-0527/dpo \\
     --model-path tinker://... --base-model Qwen/Qwen3.5-35B-A3B \\
     --renderer-name qwen3_5 --out runs/headless_dpo_eval --resume
+
+Run only specific task ids:
+  bun run headless:tasks -- --tasks tasks.json --limit 18 --task-ids 7,13 \\
+    --workplace-template trash/workplace-set/test-0527/dpo \\
+    --model-path tinker://... --base-model Qwen/Qwen3.5-35B-A3B \\
+    --renderer-name qwen3_5 --out runs/headless_dpo_eval --resume --eval
 
 Run with eval:
   bun run headless:tasks -- --tasks tasks.json --limit 18 \\
@@ -697,13 +705,17 @@ async function main(): Promise<void> {
   await ensureTinkerBridgeWarm(tinkerConfigPath(headlessUserDataDir));
 
   const tasks = JSON.parse(readFileSync(resolve(args.tasks), "utf8")) as TaskSpec[];
-  const selected = tasks.slice(0, args.limit);
+  const limited = tasks.slice(0, args.limit);
+  const wantedIds = args.taskIds ? new Set(args.taskIds.map(String)) : null;
+  const selected = limited
+    .map((task, index) => ({ task, index }))
+    .filter(({ task }) => !wantedIds || wantedIds.has(String(task.id)));
   const store = new SessionStore(join(app.getPath("userData"), "sessions.db"));
   const summaries: TaskSummary[] = [];
   try {
     for (let i = 0; i < selected.length; i++) {
-      const task = selected[i]!;
-      const taskDir = join(outDir, `task_${String(i + 1).padStart(3, "0")}`);
+      const { task, index } = selected[i]!;
+      const taskDir = join(outDir, `task_${String(index + 1).padStart(3, "0")}`);
       if (args.resume && existsSync(taskDir)) {
         const existing = loadTaskSummary(taskDir);
         if (shouldSkipExistingTask(args, existing)) {
@@ -716,7 +728,7 @@ async function main(): Promise<void> {
         rmSync(taskDir, { recursive: true, force: true });
       }
       console.log(`[headless] task ${i + 1}/${selected.length}: ${task.id}`);
-      const summary = await runTask(args, store, task, i);
+      const summary = await runTask(args, store, task, index);
       summaries.push(summary);
       writeSummary(outDir, summaries);
     }
