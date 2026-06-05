@@ -147,6 +147,14 @@ class REINFORCETrainer(Trainer):
             rolling_save_every=config.rolling_save_every,
             rolling_ttl_seconds=config.rolling_ttl_seconds,
         )
+        self.sampling_checkpoint_mgr = checkpoint_utils.CheckpointManager(
+            training_client=training_client,
+            service_client=service_client,
+            log_path=config.log_path,
+            save_every=config.save_every,
+            rolling_save_every=0,
+            rolling_ttl_seconds=getattr(config, "rolling_ttl_seconds", 7200),
+        )
 
         # Global counters persisted across do_update calls (see DPOTrainer).
         self.step_idx = 0
@@ -169,9 +177,8 @@ class REINFORCETrainer(Trainer):
         if self.sampling_client is None:
             self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
                 self.training_client,
+                self.sampling_checkpoint_mgr,
                 self.step_idx,
-                self.config.log_path,
-                self.config.save_every,
             )
 
     async def do_update(
@@ -329,9 +336,8 @@ class REINFORCETrainer(Trainer):
             if self.is_online:
                 self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
                     self.training_client,
+                    self.sampling_checkpoint_mgr,
                     self.step_idx + 1,
-                    self.config.log_path,
-                    self.config.save_every,
                 )
 
         # Log timing metrics from trace_iteration window
@@ -381,12 +387,12 @@ class DPOTrainer(Trainer):
         self.log_path = config.log_path
         self.tokenizer = get_tokenizer(config.model_name)
 
-        self.rolling_mgr = make_rolling_checkpoint_manager(
+        self.rolling_mgr = checkpoint_utils.CheckpointManager(
             training_client=training_client,
             service_client=service_client,
             log_path=config.log_path,
+            save_every=0,
             rolling_save_every=config.rolling_save_every,
-            save_every=config.save_every,
             rolling_ttl_seconds=config.rolling_ttl_seconds,
         )
 
@@ -730,6 +736,14 @@ class OPDTrainer(Trainer):
         # Student sampling client is created lazily on the first do_update
         # because save_checkpoint_and_get_sampling_client is async.
         self.sampling_client: tinker.SamplingClient | None = None
+        self.sampling_checkpoint_mgr = checkpoint_utils.CheckpointManager(
+            training_client=training_client,
+            service_client=service_client,
+            log_path=config.log_path,
+            save_every=config.save_every,
+            rolling_save_every=0,
+            rolling_ttl_seconds=getattr(config, "rolling_ttl_seconds", 7200),
+        )
 
         # Global counters persisted across do_update calls (see DPOTrainer).
         self.step_idx = 0
@@ -752,9 +766,8 @@ class OPDTrainer(Trainer):
         if self.sampling_client is None:
             self.sampling_client, _ = await save_checkpoint_and_get_sampling_client(
                 self.training_client,
+                self.sampling_checkpoint_mgr,
                 self.step_idx,
-                self.config.log_path,
-                self.config.save_every,
             )
 
     async def do_update(
@@ -994,9 +1007,8 @@ class OPDTrainer(Trainer):
             # Refresh the student sampling client onto the just-updated weights.
             self.sampling_client, sampler_metrics = await save_checkpoint_and_get_sampling_client(
                 self.training_client,
+                self.sampling_checkpoint_mgr,
                 step + 1,
-                self.config.log_path,
-                self.config.save_every,
             )
             metrics.update(sampler_metrics)
             self.logger.info(
