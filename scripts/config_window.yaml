@@ -1,0 +1,53 @@
+# Rolling-window training proxy (server_window.py).
+# Copy fields from config.yaml as needed; keep state_path separate from the
+# default server experiment so checkpoints do not collide.
+
+# -- Mode --
+mode: reinforce
+reinforce_version: online
+
+# -- Update --
+update_every_n_sessions: 1
+training_window_sessions: 4
+
+# -- Inference --
+temperature: 0.3
+logprobs: false
+
+# -- Training (shared) --
+lora_rank: 64
+dry_run: false
+learning_rate: 5.0e-5
+num_epochs: 1
+batch_size: 4
+lr_schedule: cosine
+max_steps: null
+max_length: null
+save_every: 20
+
+# -- REINFORCE online --
+reward_alpha: 0.05
+initial_baseline: 0.0
+reinforce_rollout_max_tokens: 4096
+reinforce_rollout_temperature: 1.0
+reinforce_agentic_max_turns: 48
+reinforce_agentic_max_turns_per_step: 8
+reinforce_agentic_max_steps: 6
+reinforce_agentic_enable_bash: true
+reinforce_agentic_tool_timeout_s: 20
+# Stop rollout before prompt+max_tokens hits 65k context (4096 reserved for completion).
+reinforce_agentic_max_trajectory_tokens: 60000
+reinforce_log_rollout_samples: true
+reinforce_rollout_sample_log_chars: 4000
+
+# -- Logging --
+wandb_project: null
+wandb_name: null
+
+preload_model: Qwen3.5-35B-A3B
+
+# Separate state from server.py experiments
+proxy_host: localhost
+proxy_port: 8001
+state_path: scripts/state_window.json
+block_during_training: true
