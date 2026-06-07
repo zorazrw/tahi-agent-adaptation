@@ -116,6 +116,14 @@ From the root directory:
 python3 scripts/server.py --config scripts/config.yaml
 ```
 
+**Rolling training window** (latest K submitted sessions per round, separate from the default server):
+
+```bash
+python3 scripts/server_window.py --config scripts/config_window.yaml
+```
+
+Uses `training_window_sessions` and a separate `state_path` / port so it does not overwrite the default experiment state.
+
 `GET /healthz` returns `{"ok": true}` when the process is up.
 
 **Frontend**
