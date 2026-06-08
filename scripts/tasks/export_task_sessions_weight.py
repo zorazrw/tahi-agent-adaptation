@@ -60,6 +60,7 @@ Formats
                           when effective_prompt is persisted; otherwise reconstructed)
     agent_trajectory    : slimmed raw SDK messages (assistant/user/result/system/verifier_label)
     human_trajectories  : follow_up, file_edit, brain_edit, edit_workflow, edit_verifier actions
+                          (non-follow_up entries include a compact per-line ``diff``)
     verifiers           : final verifier criteria + pass/fail status
   Planning unit also has workflow_tree_generated and workflow_tree_final in LLM-native format.
 
@@ -91,8 +92,10 @@ Usage:
 import argparse
 import base64
 import copy
+import difflib
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -1826,18 +1829,196 @@ def _snapshot_workflow_tree(norm: dict) -> Optional[List[dict]]:
 
 
 def _brain_edit_human_entry(m: dict) -> dict:
-    """Weight-format row for Brain dialog save; includes memory/skill maps from the step snapshot."""
-    snap = m.get("state_snapshot")
-    mem: dict = {}
-    sk: dict = {}
-    if isinstance(snap, dict):
-        mp = snap.get("memory")
-        if isinstance(mp, dict):
-            mem = copy.deepcopy(mp)
-        sp = snap.get("skill")
-        if isinstance(sp, dict):
-            sk = copy.deepcopy(sp)
-    return {"type": "brain_edit", "round_index": None, "memory": mem, "skill": sk}
+    """Weight-format row for Brain dialog save (compact payload; use ``diff`` for changes)."""
+    return {"type": "brain_edit", "round_index": None}
+
+
+def _prior_snapshot_message(msgs: List[dict], before_idx: int) -> Optional[dict]:
+    """Latest message before ``before_idx`` that carries a ``state_snapshot``."""
+    for j in range(before_idx - 1, -1, -1):
+        if isinstance(msgs[j].get("state_snapshot"), dict):
+            return msgs[j]
+    return None
+
+
+def _snapshot_brain_map(norm: Optional[dict], key: str) -> Dict[str, str]:
+    """Filename → utf-8 text for ``memory`` or ``skill`` from a message snapshot."""
+    if not isinstance(norm, dict):
+        return {}
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return {}
+    mp = snap.get(key)
+    if not isinstance(mp, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for fn, content in mp.items():
+        name = str(fn).strip()
+        if not name:
+            continue
+        out[name] = content if isinstance(content, str) else ""
+    return out
+
+
+_SENTENCE_BREAK_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _lines_for_diff_sentence_split(text: str) -> List[str]:
+    """Split text into one line per sentence (with trailing ``\\n``) for change alignment."""
+    if not text or not str(text).strip():
+        return []
+    lines_out: List[str] = []
+    for para in re.split(r"\n\s*\n", str(text).strip()):
+        para_flat = " ".join(para.split())
+        if not para_flat:
+            continue
+        for sent in _SENTENCE_BREAK_SPLIT_RE.split(para_flat):
+            s = sent.strip()
+            if s:
+                lines_out.append(s + "\n")
+    return lines_out if lines_out else [str(text).strip() + "\n"]
+
+
+def _trunc_anno(s: str, max_len: int = 160) -> str:
+    t = str(s).strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 3].rstrip() + "..."
+
+
+def _word_change_snippets(before_line: str, after_line: str, *, trunc: int = 100) -> str:
+    """Short token-level edits between two strings (whitespace tokenization)."""
+    wa = before_line.split()
+    wb = after_line.split()
+    if wa == wb:
+        return "(same tokens)"
+    sm = difflib.SequenceMatcher(a=wa, b=wb, autojunk=False)
+    bits: List[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            left = " ".join(wa[i1:i2])
+            right = " ".join(wb[j1:j2])
+            bits.append(f"{_trunc_anno(left, trunc)} → {_trunc_anno(right, trunc)}")
+        elif tag == "delete":
+            left = " ".join(wa[i1:i2])
+            bits.append(f"- {_trunc_anno(left, trunc)}")
+        elif tag == "insert":
+            right = " ".join(wb[j1:j2])
+            bits.append(f"+ {_trunc_anno(right, trunc)}")
+    return ", ".join(bits) if bits else "(no token edits)"
+
+
+def _compact_file_edit_annotation(before_s: str, after_s: str, path_disp: str) -> str:
+    """Localized edit summary: align sentences, then token-level snippets only (no full-file diff)."""
+    if before_s == after_s:
+        return f"(no textual change) path={path_disp}"
+
+    bl = [ln.rstrip("\n\r") for ln in _lines_for_diff_sentence_split(before_s)]
+    al = [ln.rstrip("\n\r") for ln in _lines_for_diff_sentence_split(after_s)]
+
+    sm = difflib.SequenceMatcher(a=bl, b=al, autojunk=False)
+    parts: List[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            b_join = " ".join(bl[i1:i2])
+            a_join = " ".join(al[j1:j2])
+            if b_join.strip() == a_join.strip():
+                continue
+            ws = _word_change_snippets(b_join, a_join)
+            if ws == "(same tokens)":
+                continue
+            parts.append(f"• {_trunc_anno(ws, 700)}")
+        elif tag == "delete":
+            b_join = " ".join(bl[i1:i2])
+            parts.append(f"• removed: {_trunc_anno(b_join, 200)}")
+        elif tag == "insert":
+            a_join = " ".join(al[j1:j2])
+            parts.append(f"• added: {_trunc_anno(a_join, 200)}")
+
+    if not parts:
+        return f"(no localized changes detected) path={path_disp}"
+
+    body = "\n".join(parts)
+    max_out = 8000
+    if len(body) > max_out:
+        body = body[: max_out - 50].rstrip() + f"\n… (annotation truncated, path={path_disp})"
+    return f"path={path_disp}\n{body}"
+
+
+def _file_edit_diff_from_raw_strings(
+    before_raw: Optional[str],
+    after_raw: Optional[str],
+    path: str,
+) -> str:
+    """Compact localized edit annotation (sentence align + token-level snippets), not a full unified diff."""
+    before_s = before_raw if isinstance(before_raw, str) else ""
+    after_s = after_raw if isinstance(after_raw, str) else ""
+    path_disp = str(path).strip() or "(path)"
+    return _compact_file_edit_annotation(before_s, after_s, path_disp)
+
+
+def _brain_edit_map_diff_sections(
+    category: str,
+    before_map: Dict[str, str],
+    after_map: Dict[str, str],
+) -> List[str]:
+    """Per-file compact diffs for a brain map (memory or skill)."""
+    sections: List[str] = []
+    for fn in sorted(set(before_map) | set(after_map)):
+        before_s = before_map.get(fn, "")
+        after_s = after_map.get(fn, "")
+        if before_s == after_s:
+            continue
+        path_disp = f"{category}/{fn}"
+        sections.append(_file_edit_diff_from_raw_strings(before_s, after_s, path_disp))
+    return sections
+
+
+def _brain_edit_memory_skill_diff(
+    prior: Optional[dict],
+    current: dict,
+    *,
+    max_chars: int = 12_000,
+) -> str:
+    """Compact brain-edit summary: memory and skill markdown only (vs prior snapshot)."""
+    mem_before = _snapshot_brain_map(prior, "memory")
+    mem_after = _snapshot_brain_map(current, "memory")
+    sk_before = _snapshot_brain_map(prior, "skill")
+    sk_after = _snapshot_brain_map(current, "skill")
+
+    sections: List[str] = []
+    sections.extend(_brain_edit_map_diff_sections("memory", mem_before, mem_after))
+    sections.extend(_brain_edit_map_diff_sections("skill", sk_before, sk_after))
+
+    if not sections:
+        return "(no textual change) path=brain"
+
+    body = "\n\n".join(sections)
+    if len(body) > max_chars:
+        body = body[: max_chars - 50].rstrip() + "\n… (annotation truncated, path=brain)"
+    return body
+
+
+def _workflow_tree_json_for_diff(wf: Any) -> str:
+    """Stable JSON text for workflow tree diffing (LLM-native step shape)."""
+    if not isinstance(wf, list):
+        return ""
+    return json.dumps(wf, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _edit_workflow_diff_from_trees(wf_before: Any, wf_after: Any) -> str:
+    """Diff serialized workflow steps (plan edit)."""
+    before_native = _to_llm_native_tree(wf_before) if wf_before is not None else []
+    after_native = _to_llm_native_tree(wf_after) if wf_after is not None else []
+    return _file_edit_diff_from_raw_strings(
+        _workflow_tree_json_for_diff(before_native),
+        _workflow_tree_json_for_diff(after_native),
+        "workflow",
+    )
 
 
 def _snapshot_file_content(
@@ -2729,6 +2910,56 @@ def _last_snapshot_in_range(
     return None
 
 
+def _is_pi_raw_noise(msg: dict) -> bool:
+    """Pi rows omitted when running synthetic file-edit detection (raw DB shape)."""
+    t = msg.get("type")
+    if t in ("stream_event", "system_init", "run_result", "node_completed", "llm_debug"):
+        return True
+    if t == "assistant" and msg.get("stopReason") == "error":
+        return True
+    return False
+
+
+def _insert_synthetic_file_edits(
+    msgs: List[dict], cwd: Optional[str], *, is_pi: bool
+) -> List[dict]:
+    """Insert preview ``file_edit`` rows missing from the DB (matches default exporter)."""
+    if not msgs:
+        return msgs
+    try:
+        from export_task_sessions_context import (  # type: ignore
+            inject_synthetic_human_edits,
+            reclassify_auto_verifier_edits,
+        )
+    except ImportError:
+        from tasks.export_task_sessions_context import (  # type: ignore
+            inject_synthetic_human_edits,
+            reclassify_auto_verifier_edits,
+        )
+    if not is_pi:
+        return inject_synthetic_human_edits(filter_out_stream_events(msgs), cwd)
+
+    non_noise_idx = [i for i, m in enumerate(msgs) if not _is_pi_raw_noise(m)]
+    norm_msgs: List[dict] = []
+    for i in non_noise_idx:
+        norm = normalize_pi_message(msgs[i])
+        if "state_snapshot" in msgs[i]:
+            norm["state_snapshot"] = msgs[i]["state_snapshot"]
+        norm_msgs.append(norm)
+    injected = inject_synthetic_human_edits(reclassify_auto_verifier_edits(norm_msgs), cwd)
+    inserts: List[Tuple[int, dict]] = []
+    ni = 0
+    for im in injected:
+        if im.get("_synthetic_before") is not None:
+            inserts.append((non_noise_idx[ni], dict(im)))
+        elif not im.get("_synthetic"):
+            ni += 1
+    out = list(msgs)
+    for idx, row in reversed(inserts):
+        out.insert(idx, row)
+    return out
+
+
 WORKFLOW_PLAN_INSTRUCTION = "\n".join([
     "",
     "IMPORTANT: You MUST call the mcp__workflow__WorkflowPlan tool as your very first action to register a structured plan.",
@@ -2808,6 +3039,7 @@ def build_weight_based_session(
         all_msgs.append(norm)
 
     is_pi = _is_pi_engine(all_msgs)
+    all_msgs = _insert_synthetic_file_edits(all_msgs, export_cwd, is_pi=is_pi)
 
     # ── Per-message timelines (carry-forward state from snapshots) ──
     # ``wf_timeline_all[i]`` / ``file_timeline_all[i]`` / ``mem_timeline_all[i]`` /
@@ -2878,6 +3110,9 @@ def build_weight_based_session(
     planning_msg_indices: List[int] = []
     planning_human_traj: List[dict] = []
     prev_workflow_snapshot: Optional[List[dict]] = None
+    planning_initial_prompt_consumed = False
+    planning_follow_up_counter = 0
+    last_snapshot_msg: Optional[dict] = None
 
     for local_i, m in enumerate(planning_msgs):
         i_abs = local_i  # planning_msgs starts at all_msgs[0]
@@ -2885,6 +3120,44 @@ def build_weight_based_session(
         if t in ALL_AGENT_MSG_TYPES:
             planning_agent_traj_raw.append({"raw": {k: v for k, v in m.items() if k not in ("_ts", "state_snapshot")}})
             planning_msg_indices.append(i_abs)
+            snap = m.get("state_snapshot")
+            if isinstance(snap, dict):
+                last_snapshot_msg = m
+
+        elif t == "user_prompt":
+            p = m.get("prompt", "")
+            if isinstance(p, str) and is_backend_node_user_prompt(p):
+                continue
+            if isinstance(p, str) and not planning_initial_prompt_consumed:
+                if _prompts_equal(strip_interface_user_prompt(p), initial_task_instruction):
+                    planning_initial_prompt_consumed = True
+                    continue
+            planning_human_traj.append({
+                "type": "follow_up",
+                "round_index": planning_follow_up_counter,
+                "prompt": p if isinstance(p, str) else "",
+                "environment": _env_at(i_abs),
+            })
+            planning_follow_up_counter += 1
+
+        elif t == "file_edit":
+            fe_path = m.get("path", "")
+            edited_content = _snapshot_file_content(m, fe_path, export_cwd)
+            original_content = None
+            synthetic_before = m.get("_synthetic_before")
+            if isinstance(synthetic_before, str):
+                original_content = synthetic_before
+            else:
+                prior = _prior_snapshot_message(all_msgs, i_abs)
+                if prior is not None:
+                    original_content = _snapshot_file_content(prior, fe_path, export_cwd)
+            planning_human_traj.append({
+                "type": "file_edit",
+                "round_index": None,
+                "path": fe_path,
+                "diff": _file_edit_diff_from_raw_strings(original_content, edited_content, fe_path),
+                "environment": _env_at(i_abs),
+            })
 
         elif t == "edit_workflow":
             wf_after = _snapshot_workflow_tree(m)
@@ -2892,8 +3165,9 @@ def build_weight_based_session(
                 "type": "edit_workflow",
                 "round_index": None,
             }
-            if prev_workflow_snapshot is not None:
-                entry["workflow_tree_before"] = prev_workflow_snapshot
+            wf_before = prev_workflow_snapshot
+            if wf_before is not None:
+                entry["workflow_tree_before"] = wf_before
             if wf_after is not None:
                 entry["workflow_tree_after"] = wf_after
                 prev_workflow_snapshot = wf_after
@@ -2916,8 +3190,13 @@ def build_weight_based_session(
 
         elif t == "brain_edit":
             be_entry = _brain_edit_human_entry(m)
+            be_entry["diff"] = _brain_edit_memory_skill_diff(
+                _prior_snapshot_message(all_msgs, i_abs), m
+            )
             be_entry["environment"] = _env_at(i_abs)
             planning_human_traj.append(be_entry)
+            if m.get("state_snapshot"):
+                last_snapshot_msg = m
 
     if is_pi:
         planning_agent_traj_merged = planning_agent_traj_raw
@@ -2938,6 +3217,10 @@ def build_weight_based_session(
                 h["workflow_tree_before"] = _to_llm_native_tree(h["workflow_tree_before"])
             if "workflow_tree_after" in h:
                 h["workflow_tree_after"] = _to_llm_native_tree(h["workflow_tree_after"])
+            h["diff"] = _edit_workflow_diff_from_trees(
+                h.get("workflow_tree_before"),
+                h.get("workflow_tree_after"),
+            )
 
     # Reconstruct the planning first-turn prompt:
     # WORKFLOW_PLAN_INSTRUCTION + user's initial task instruction
@@ -3066,22 +3349,31 @@ def build_weight_based_session(
                 fe_path = m.get("path", "")
                 edited_content = _snapshot_file_content(m, fe_path, export_cwd)
                 original_content = None
-                if last_snapshot_msg is not None:
-                    original_content = _snapshot_file_content(last_snapshot_msg, fe_path, export_cwd)
+                synthetic_before = m.get("_synthetic_before")
+                if isinstance(synthetic_before, str):
+                    original_content = synthetic_before
+                else:
+                    prior = _prior_snapshot_message(all_msgs, i_abs)
+                    if prior is not None:
+                        original_content = _snapshot_file_content(prior, fe_path, export_cwd)
                 human_traj.append({
                     "type": "file_edit",
                     "round_index": None,
                     "path": fe_path,
-                    "original": original_content,
-                    "edited": edited_content,
+                    "diff": _file_edit_diff_from_raw_strings(original_content, edited_content, fe_path),
                     "environment": _env_at(i_abs),
                 })
 
             elif t == "edit_workflow":
                 wf_after = _snapshot_workflow_tree(m)
+                prior = _prior_snapshot_message(all_msgs, i_abs)
+                wf_before = _snapshot_workflow_tree(prior) if prior else None
                 entry = {"type": "edit_workflow", "round_index": None}
+                if wf_before is not None:
+                    entry["workflow_tree_before"] = _to_llm_native_tree(wf_before)
                 if wf_after is not None:
-                    entry["workflow_tree_after"] = wf_after
+                    entry["workflow_tree_after"] = _to_llm_native_tree(wf_after)
+                entry["diff"] = _edit_workflow_diff_from_trees(wf_before, wf_after)
                 entry["environment"] = _env_at(i_abs)
                 human_traj.append(entry)
 
@@ -3104,6 +3396,9 @@ def build_weight_based_session(
 
             elif t == "brain_edit":
                 be_entry = _brain_edit_human_entry(m)
+                be_entry["diff"] = _brain_edit_memory_skill_diff(
+                    _prior_snapshot_message(all_msgs, i_abs), m
+                )
                 be_entry["environment"] = _env_at(i_abs)
                 human_traj.append(be_entry)
                 if m.get("state_snapshot"):
