@@ -678,7 +678,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   sessionLastVerificationNodeId.set(sessionId, nodeId);
   sessionContinueVerificationNodeId.delete(sessionId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
-  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd);
+  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd, node);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",

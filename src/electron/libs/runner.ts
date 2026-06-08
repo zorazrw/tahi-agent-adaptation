@@ -12,7 +12,15 @@ import {
   type AgentSessionEvent,
   type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import type { AppPermissionResult, PiAssistantBlock, PiLlmDebugMessage, ServerEvent, StreamMessage } from "../types.js";
+import type {
+  AppPermissionResult,
+  PiAssistantBlock,
+  PiLlmDebugMessage,
+  ServerEvent,
+  StreamMessage,
+  VerifierMark,
+  WorkflowNode,
+} from "../types.js";
 import { runWithLlmDebugContext } from "./llm-debug.js";
 import { createPiManagers, createPiResourceLoader, createPiSessionManager } from "./pi-config.js";
 import { readMemoryForPrompt } from "./memory-store.js";
@@ -86,13 +94,29 @@ function hasExistingWorkflowPlan(session: Session): boolean {
   return Array.isArray(session.workflowTree) && session.workflowTree.length > 0;
 }
 
+function verifierStatusLabel(mark: VerifierMark | undefined): "passed" | "failed" | "unchecked" {
+  if (mark === "check") return "passed";
+  if (mark === "cross") return "failed";
+  return "unchecked";
+}
+
+function formatVerifiersForPrompt(verifiers: string[], verifierMarks: VerifierMark[]): string {
+  if (verifiers.length === 0) return "";
+  const lines = verifiers.map(
+    (criterion, i) => `- [${verifierStatusLabel(verifierMarks[i])}] ${criterion}`
+  );
+  return "\n\nVerifiers for this step:\n" + lines.join("\n");
+}
+
 export function buildPromptForNode(
   nodeDescription: string,
   pathContext: string,
   outputFiles: string[] = [],
   humanEdits?: string,
   /** Session cwd; Read/Write/Edit are resolved under this directory. */
-  sessionCwd?: string
+  sessionCwd?: string,
+  /** When set, verifier criteria and marks for this step are included in the prompt. */
+  verifierSource?: Pick<WorkflowNode, "verifiers" | "verifierMarks">
 ): string {
   const cwd = (sessionCwd ?? "").trim();
   const cwdNote = cwd
@@ -107,13 +131,16 @@ export function buildPromptForNode(
     outputFiles.length > 0
       ? "\n\nRelevant output files for this step:\n" + outputFiles.map((f) => `- ${f}`).join("\n")
       : "";
+  const verifiersNote = verifierSource
+    ? formatVerifiersForPrompt(verifierSource.verifiers ?? [], verifierSource.verifierMarks ?? [])
+    : "";
   const refinementNote =
     "\n\nWhen refining existing outputs, first read the current on-disk contents, then edit on top of that version. Do not recreate files from memory.";
   const editsNote = humanEdits
     ? "\n\nThe human has manually edited previous outputs. Treat the current version as the authoritative base.\n\nHuman-edited files:\n" +
       humanEdits
     : "";
-  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${cwdNote}${filesNote}${formatNote}${refinementNote}${editsNote}`;
+  return `Proceed with: ${pathContext}\n\nTask: ${nodeDescription}${cwdNote}${filesNote}${verifiersNote}${formatNote}${refinementNote}${editsNote}`;
 }
 
 function stringifyToolContent(content: unknown): string {
