@@ -223,8 +223,42 @@ def _normalized_trajectory(blob: dict[str, Any]) -> list[dict[str, Any]]:
     return merged
 
 
-def build_context_inputs(data: Any) -> list[dict[str, Any]]:
-    """Rows: ``name``, ``task`` (long instruction when present), ``actions``, ``source``."""
+def _is_user_message_action(action: str) -> bool:
+    return action.strip().startswith("message(")
+
+
+def _format_action_entry(entry: dict[str, str], *, include_tool_result: bool = False) -> str:
+    action = entry["action"]
+    if not include_tool_result:
+        return action
+    tool_result = entry.get("tool_result")
+    if isinstance(tool_result, str) and tool_result.strip():
+        prefix = "[USER EDIT — infer preferences from these changes]\n" if not _is_user_message_action(action) else ""
+        return f"{action}\n{prefix}tool_result: {tool_result.strip()}"
+    return action
+
+
+def _build_action_log(
+    entries: list[dict[str, str]],
+    *,
+    actors: set[str] | None = None,
+    msg_only: bool = False,
+    include_tool_results: bool = False,
+) -> str:
+    actions: list[str] = []
+    for entry in entries:
+        actor = entry.get("actor") or "user"
+        if actors is not None and actor not in actors:
+            continue
+        action = entry["action"]
+        if msg_only and actor == "user" and not _is_user_message_action(action):
+            continue
+        actions.append(_format_action_entry(entry, include_tool_result=include_tool_results))
+    return "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
+
+
+def build_context_inputs(data: Any, *, msg_only: bool = False) -> list[dict[str, Any]]:
+    """Rows: ``name``, ``task``, ``action_entries`` (``actor``, ``action``, optional ``tool_result``), ``source``."""
     rows: list[dict[str, Any]] = []
     for i, blob in enumerate(_session_blobs(data)):
         if not isinstance(blob, dict):
@@ -236,11 +270,20 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
             continue
         nm = blob.get("name")
         name_str = nm if isinstance(nm, str) else ""
-        actions = [
-            entry["action"]
-            for entry in raw_traj
-            if isinstance(entry, dict) and isinstance(entry.get("action"), str)
-        ]
+        action_entries: list[dict[str, str]] = []
+        for entry in raw_traj:
+            if not isinstance(entry, dict) or not isinstance(entry.get("action"), str):
+                continue
+            row_entry: dict[str, str] = {
+                "actor": str(entry.get("actor") or "user"),
+                "action": entry["action"],
+            }
+            tool_result = entry.get("tool_result")
+            if isinstance(tool_result, str) and tool_result.strip():
+                row_entry["tool_result"] = tool_result
+            action_entries.append(row_entry)
+        if not action_entries:
+            continue
         sid = blob.get("uuid")
         source = sid.strip() if isinstance(sid, str) and sid.strip() else f"session_{i}"
         task_blob = blob.get("task")
@@ -251,7 +294,7 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
             {
                 "name": name_str,
                 "task": task_str,
-                "actions": actions,
+                "action_entries": action_entries,
                 "source": source,
                 "expertise_task": expertise_str,
             }
@@ -263,19 +306,36 @@ MEMORY_SYSTEM = """From the task description and the numbered action log, write 
 
 Your primary job is to extract NEW information from the current session Log (user messages, edits, styling choices, corrections, tools used, preferences). The existing memory file—if any—is background only.
 
+Two kinds of user evidence — weigh both; do not ignore direct edits:
+1. message("...") actions: stated preferences in the user's own words.
+2. Non-message actions (edit(...), brain_edit(), etc.) with tool_result: the user changed files directly. Read tool_result carefully — diffs, removed/added lines, CSS/property changes, deleted memory/skill text — and infer preferences from what they changed, not only what they typed.
+When tool_result shows concrete changes (e.g. font-size 18px → 22px, grid removed, colors changed), turn those into Preference: lines even if no message says it explicitly.
+
+Example:
+  action: edit("chart.html")
+  tool_result: font-size: 18px → font-size: 22px; grid: { display: true } → { display: false }
+→ Preference: User prefers larger chart text and no gridlines.
+
 When an existing memory file is provided:
-- FIRST mine the Log for facts/preferences not already captured (this is mandatory when the log is non-empty).
-- Include at least 2 lines clearly derived from this session when the log has agent actions.
-- Adopt the useful parts from original lines only when they do not duplicate what you add.
+- Mine the facts/preferences not already captured (mandatory).
+- Adopt the useful original lines when they do not duplicate new items.
 - Edit originals when this session refines or contradicts them.
 - Drop obsolete or redundant lines to make room for new learnings.
 Output the full updated memory file (not a diff).
 
 Output rules:
-- One fact per line. Plain text only (no markdown headers like # or ##).
+- One fact per line. Plain text only (NO markdown headers like # or ##).
 - Each line is a single sentence (no numbered lists in the sense of "1." as list markers—use plain sentences).
-- Optional prefixes "Fact:" or "Preference:" on a line are OK.
-- If nothing is worth saving, output exactly the single word NONE (nothing else)."""
+- Add prefixes "Fact:" or "Preference:" to each line.
+- If nothing is worth saving, output exactly the single word NONE (nothing else).
+- Do not include reasoning, analysis, or a thinking process. Start directly with Title: (or NONE).
+
+Reply with:
+Title: <short task name>
+- Fact: <item>
+- Preference: <item>
+...
+"""
 
 SKILL_SYSTEM = """From the task and numbered log, describe the workflow the agent used: ordered steps, generalized (no long paths).
 
@@ -309,35 +369,51 @@ def _strip_outer_fences(text: str) -> str:
 
 
 _NUM_BULLET_RE = re.compile(r"^\s*(?:[-*+•]|\d+[\.)])\s+")
+_MEMORY_ANSWER_LINE_RE = re.compile(
+    r"^\s*(?:[-*+•]|\d+[\.)]\s+)?(?:\*{1,2})?(?:title|fact|preference)\s*:",
+    re.I,
+)
+_LABEL_PREFIX_RE = re.compile(
+    r"^(?:\*{1,2})?(?:preference|fact)(?:\*{1,2}:|:\*{0,2}|\s*:)\s*",
+    re.I,
+)
+
+
+def _strip_memory_preamble(text: str) -> str:
+    """Drop leading thinking/reasoning before the structured memory answer."""
+    t = text.strip()
+    if not t:
+        return t
+    lines = t.replace("\r\n", "\n").split("\n")
+    if not re.match(r"^thinking\s+process\s*:", lines[0].strip(), re.I):
+        return t
+    for i, line in enumerate(lines):
+        if _MEMORY_ANSWER_LINE_RE.match(line):
+            return "\n".join(lines[i:]).strip()
+    return ""
 
 
 def _normalize_memory_line(line: str) -> str | None:
     s = line.strip()
     if not s:
         return None
-    if s.upper().rstrip(".") in ("NONE", "N/A", "NA"):
-        return None
-    if s.startswith("##") or re.match(r"^#\s+\S", s):
-        return None
-    low = s.lower()
-    if (
-        low.startswith(("here are the", "below are the", "the following ", "summary:", "memories:", "facts:"))
-        and len(s) < 140
-    ):
-        return None
     while _NUM_BULLET_RE.match(s):
         s = _NUM_BULLET_RE.sub("", s, count=1).strip()
-    low = s.lower()
-    if low.startswith("fact:"):
-        s = s[5:].strip()
-    elif low.startswith("preference:"):
-        s = s[11:].strip()
-    s = " ".join(s.split())
-    if not s or s.upper().rstrip(".") == "NONE":
+    if not _LABEL_PREFIX_RE.match(s):
         return None
-    if s.startswith("##"):
-        return None
-    return s
+    return s or None
+
+
+def _parse_memory_lines(raw: str) -> list[str]:
+    blob = _strip_memory_preamble(_strip_outer_fences(raw))
+    if not blob or blob.strip().upper() == "NONE":
+        return []
+    out: list[str] = []
+    for line in blob.replace("\r\n", "\n").split("\n"):
+        s = _normalize_memory_line(line)
+        if s:
+            out.append(s)
+    return out
 
 
 def _clip_existing(text: str) -> str:
@@ -376,20 +452,18 @@ def extract_memories(
     user = (
         f"Task / session title:\n{task_block}\n\n"
         f"{_existing_file_block('Existing memory file', existing_memory)}"
-        f"Log (primary source—mine this session for new facts and preferences):\n{log or '(empty)'}\n"
+        "User action log (messages + direct edits; for edit/brain_edit steps, "
+        "mine tool_result diffs for preferences):\n"
+        f"{log or '(empty)'}\n"
         f"{_merge_tail_instruction(has_existing, 'memory')}"
     )
     try:
-        raw = runtime_llm_text(runtime, MEMORY_SYSTEM, user)
+        raw = runtime_llm_text(runtime, MEMORY_SYSTEM, user, max_tokens=2048)
+        print("RAW: ", raw)
     except Exception:
         logger.exception("Memory LLM failed")
         return []
-    raw = _strip_outer_fences(raw)
-    out: list[str] = []
-    for line in raw.replace("\r\n", "\n").split("\n"):
-        s = _normalize_memory_line(line)
-        if s:
-            out.append(s)
+    out = _parse_memory_lines(raw)
     if not out and raw.strip() and raw.strip().upper() not in ("NONE",):
         logger.warning(
             "Memory extraction produced 0 lines after parsing (model returned non-empty text). Preview: %s",
@@ -483,12 +557,17 @@ def main() -> None:
     p.add_argument("--data_path", required=True, help="Path to session JSON")
     p.add_argument("--output_dir", default=None, help="Output root (default: app userData)")
     p.add_argument("--model", default=None, help="Override Pi default model slug/id")
+    p.add_argument(
+        "--msg_only",
+        action="store_true",
+        help="Only include user message(...) actions; drop other user actions (edit, brain_edit, etc.)",
+    )
     args = p.parse_args()
     load_dotenv()
 
     with open(args.data_path, encoding="utf-8") as f:
         raw = json.load(f)
-    inputs = build_context_inputs(raw)
+    inputs = build_context_inputs(raw, msg_only=args.msg_only)
     if not inputs:
         logger.warning("Nothing to extract.")
         return
@@ -498,7 +577,12 @@ def main() -> None:
     except PiLlmConfigError as e:
         logger.error("%s", e)
         raise SystemExit(1) from e
-    logger.info("Pi runtime: provider=%s model=%s", runtime.provider, runtime.model)
+    logger.info(
+        "Pi runtime: provider=%s model=%s msg_only=%s",
+        runtime.provider,
+        runtime.model,
+        args.msg_only,
+    )
 
     out = (Path(args.output_dir) if args.output_dir else default_agent_cowork_user_data()).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -514,8 +598,11 @@ def main() -> None:
         task_for_llm = (row.get("task") or "").strip() if isinstance(row.get("task"), str) else ""
         if not task_for_llm:
             task_for_llm = (name or "").strip() if isinstance(name, str) else ""
-        actions = row.get("actions") or []
-        log = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
+        entries = row.get("action_entries") or []
+        memory_log = _build_action_log(
+            entries, actors={"user"}, msg_only=args.msg_only, include_tool_results=True
+        )
+        skill_log = _build_action_log(entries, msg_only=args.msg_only)
         base = _output_stem(row)
         expertise_stem = _normalize_task_stem(
             row.get("expertise_task") if isinstance(row.get("expertise_task"), str) else ""
@@ -529,7 +616,7 @@ def main() -> None:
 
         existing_memory, existing_skill = _read_existing_outputs(out, stem)
         memories = extract_memories(
-            runtime, task_for_llm, log, existing_memory=existing_memory
+            runtime, task_for_llm, memory_log, existing_memory=existing_memory
         )
         (mem_dir / f"{stem}.md").write_text(
             ("\n\n".join(memories) + "\n") if memories else "",
@@ -537,7 +624,7 @@ def main() -> None:
         )
 
         skill = extract_skill(
-            runtime, task_for_llm, log, existing_skill=existing_skill
+            runtime, task_for_llm, skill_log, existing_skill=existing_skill
         )
         if skill:
             t, steps = skill
