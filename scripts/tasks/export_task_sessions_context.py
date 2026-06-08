@@ -24,7 +24,10 @@ The first trajectory step is always the user ``message({initial query})``; like 
 are omitted — they are LM input, not user chat. Only real follow-ups from the compose box appear
 as later ``message("…")`` steps (the stored prompt is exactly what the user typed).
 
-``brain_edit()`` rows record Brain dialog saves (memory + skill files on disk).
+``brain_edit()`` rows record Brain dialog saves (memory + skill files on disk) and also set
+``tool_result``: memory and skill maps are compared to the prior snapshot per file, and the rest of the
+step ``environment`` (workflow tree + output files) is diffed the same way — compact ``path=…`` /
+``•`` annotations like file ``edit("…")`` tool results.
 ``edit_workflow()``, ``edit_verifier()``, and preview ``edit("…")`` (file save) rows persist the same
 ``environment`` shape: ``workflow`` (nested steps; each node has its own ``verifiers`` with ``status``),
 ``file`` (output paths + content), and ``memory`` / ``skill`` (each a map of ``file-name`` → file text
@@ -1134,7 +1137,9 @@ def build_full_session_trajectory(
                 memory=m_br,
                 skill=s_br,
             )
-            traj.append(trajectory_row("user", "brain_edit()", step_env))
+            prior_br = _prior_snapshot_message(msgs, idx)
+            be_tr = _brain_edit_tool_result_from_snapshots(prior_br, m, cwd=cwd_val)
+            traj.append(trajectory_row("user", "brain_edit()", step_env, tool_result=be_tr))
             idx += 1
             continue
 
@@ -2265,6 +2270,109 @@ def _edit_verifier_tool_result_from_snapshots(
         )
     cap = min(max_chars, 8000)
     return _compact_verifier_lines_annotation(blines, alines, path_disp="verifiers", max_out=cap)
+
+
+def _snapshot_brain_map(norm: Optional[dict], key: str) -> Dict[str, str]:
+    """Filename → utf-8 text for ``memory`` or ``skill`` from a message snapshot."""
+    if not isinstance(norm, dict):
+        return {}
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return {}
+    mp = snap.get(key)
+    if not isinstance(mp, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for fn, content in mp.items():
+        name = str(fn).strip()
+        if not name:
+            continue
+        out[name] = content if isinstance(content, str) else ""
+    return out
+
+
+def _snapshot_workflow_json(norm: Optional[dict]) -> str:
+    """Stable JSON text for workflow tree diffing."""
+    if not isinstance(norm, dict):
+        return ""
+    snap = norm.get("state_snapshot")
+    if not isinstance(snap, dict):
+        return ""
+    wf = snap.get("workflow")
+    if not isinstance(wf, list):
+        return ""
+    return json.dumps(wf, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _brain_edit_map_diff_sections(
+    category: str,
+    before_map: Dict[str, str],
+    after_map: Dict[str, str],
+) -> List[str]:
+    """Per-file compact diffs for a brain map (memory or skill)."""
+    sections: List[str] = []
+    for fn in sorted(set(before_map) | set(after_map)):
+        before_s = before_map.get(fn, "")
+        after_s = after_map.get(fn, "")
+        if before_s == after_s:
+            continue
+        path_disp = f"{category}/{fn}"
+        sections.append(_file_edit_diff_from_raw_strings(before_s, after_s, path_disp))
+    return sections
+
+
+def _brain_edit_environment_diff_sections(
+    prior: Optional[dict],
+    current: dict,
+    *,
+    cwd: Optional[str] = None,
+) -> List[str]:
+    """Diff workflow tree JSON and output file contents between snapshots."""
+    sections: List[str] = []
+    wf_before = _snapshot_workflow_json(prior)
+    wf_after = _snapshot_workflow_json(current)
+    if wf_before != wf_after:
+        sections.append(
+            _file_edit_diff_from_raw_strings(wf_before, wf_after, "environment/workflow")
+        )
+
+    files_before = _snapshot_files_content_map(prior or {}, cwd)
+    files_after = _snapshot_files_content_map(current, cwd)
+    for path_key in sorted(set(files_before) | set(files_after)):
+        before_s = files_before.get(path_key, "")
+        after_s = files_after.get(path_key, "")
+        if before_s == after_s:
+            continue
+        path_disp = f"environment/{_display_path_from_key(path_key)}"
+        sections.append(_file_edit_diff_from_raw_strings(before_s, after_s, path_disp))
+    return sections
+
+
+def _brain_edit_tool_result_from_snapshots(
+    prior: Optional[dict],
+    current: dict,
+    *,
+    cwd: Optional[str] = None,
+    max_chars: int = 12_000,
+) -> str:
+    """Compact brain-edit summary: memory, skill, and environment vs prior snapshot."""
+    mem_before = _snapshot_brain_map(prior, "memory")
+    mem_after = _snapshot_brain_map(current, "memory")
+    sk_before = _snapshot_brain_map(prior, "skill")
+    sk_after = _snapshot_brain_map(current, "skill")
+
+    sections: List[str] = []
+    sections.extend(_brain_edit_map_diff_sections("memory", mem_before, mem_after))
+    sections.extend(_brain_edit_map_diff_sections("skill", sk_before, sk_after))
+    sections.extend(_brain_edit_environment_diff_sections(prior, current, cwd=cwd))
+
+    if not sections:
+        return "(no textual change) path=brain"
+
+    body = "\n\n".join(sections)
+    if len(body) > max_chars:
+        body = body[: max_chars - 50].rstrip() + "\n… (annotation truncated, path=brain)"
+    return body
 
 
 def _snapshot_file_content(
