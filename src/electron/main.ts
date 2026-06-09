@@ -694,12 +694,15 @@ app.on("ready", () => {
                 const sid = sidRaw || inferSessionIdForPreviewWrite(resolved, cwd ?? undefined) || "";
                 if (sid) {
                     /**
-                     * Record a TEXTUAL rendering (not the binary) so the existing
-                     * text-diff verifier pipeline yields cell-level deltas across
-                     * saves and the agent sees readable content, not an opaque blob.
+                     * Record a readable rendering for text diffs and the full neutral
+                     * workbook model for formatting-aware inspection of preview edits.
                      */
                     const pathForRecord = resolved.replace(/\\/g, "/");
-                    recordFileEditAfterPreviewSave(sid, pathForRecord, modelToText(model));
+                    recordFileEditAfterPreviewSave(sid, pathForRecord, modelToText(model), {
+                        kind: "xlsx_model",
+                        version: 1,
+                        model,
+                    });
                 }
                 return { success: true };
             } catch (err) {

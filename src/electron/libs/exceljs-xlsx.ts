@@ -46,6 +46,20 @@ function colLettersToIdx(letters: string): number {
   return n - 1;
 }
 
+function idxToColLetters(idx: number): string {
+  let s = "";
+  let n = idx;
+  do {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return s;
+}
+
+function cellRef(r: number, c: number): string {
+  return `${idxToColLetters(c)}${r + 1}`;
+}
+
 function parseA1Range(s: string): XlsxMerge | null {
   const m = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(s);
   if (!m) return null;
@@ -292,13 +306,14 @@ export async function modelToBytes(model: XlsxModel): Promise<Buffer> {
   return Buffer.isBuffer(out) ? out : Buffer.from(out as ArrayBuffer);
 }
 
-/* CAPTURE: XlsxModel -> TSV text */
+/* CAPTURE: XlsxModel -> deterministic text */
 
 /**
  * Deterministic textual rendering of the workbook. Recorded as the `file_edit`
  * snapshot content so the existing text-diff verifier pipeline
- * (`gatherHumanFileEditDiffs`) yields cell-level deltas across saves, and so
- * the agent sees readable cell content instead of an opaque binary blob.
+ * (`gatherHumanFileEditDiffs`) yields cell-level deltas across saves, including
+ * formatting-only edits such as bolding a cell. The full neutral model is also
+ * stored separately in `structured_content`; this text stays readable.
  */
 export function modelToText(model: XlsxModel): string {
   const parts: string[] = [];
@@ -317,7 +332,70 @@ export function modelToText(model: XlsxModel): string {
       grid[cell.r][cell.c] = display;
     }
     for (const row of grid) parts.push(row.join("\t"));
+
+    const styleLines = sheet.cells
+      .map((cell) => {
+        const style = styleFieldsForCapture(cell);
+        return Object.keys(style).length ? `${cellRef(cell.r, cell.c)}\t${JSON.stringify(style)}` : null;
+      })
+      .filter((line): line is string => line != null)
+      .sort();
+    if (styleLines.length) {
+      parts.push(`# Cell styles: ${sheet.name}`);
+      parts.push(...styleLines);
+    }
+
+    if (sheet.merges.length) {
+      parts.push(`# Merges: ${sheet.name}`);
+      parts.push(
+        ...sheet.merges
+          .map((m) => `${cellRef(m.sr, m.sc)}:${cellRef(m.er, m.ec)}`)
+          .sort()
+      );
+    }
+
+    if (sheet.freeze && (sheet.freeze.xSplit || sheet.freeze.ySplit)) {
+      parts.push(`# Freeze: ${sheet.name}`);
+      parts.push(JSON.stringify(sheet.freeze));
+    }
+
+    const colWidths = sortedNumberRecord(sheet.colWidths);
+    if (colWidths.length) {
+      parts.push(`# Column widths: ${sheet.name}`);
+      parts.push(...colWidths);
+    }
+
+    const rowHeights = sortedNumberRecord(sheet.rowHeights);
+    if (rowHeights.length) {
+      parts.push(`# Row heights: ${sheet.name}`);
+      parts.push(...rowHeights);
+    }
+
     parts.push("");
   }
   return parts.join("\n");
+}
+
+function styleFieldsForCapture(cell: XlsxCell): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (cell.numFmt) out.numFmt = cell.numFmt;
+  if (cell.bold) out.bold = true;
+  if (cell.italic) out.italic = true;
+  if (cell.underline) out.underline = true;
+  if (typeof cell.size === "number") out.size = cell.size;
+  if (cell.fontName) out.fontName = cell.fontName;
+  if (cell.color) out.color = cell.color;
+  if (cell.fill) out.fill = cell.fill;
+  if (cell.wrap) out.wrap = true;
+  if (cell.hAlign) out.hAlign = cell.hAlign;
+  if (cell.vAlign) out.vAlign = cell.vAlign;
+  if (cell.border) out.border = cell.border;
+  return out;
+}
+
+function sortedNumberRecord(record: Record<number, number> | undefined): string[] {
+  if (!record) return [];
+  return Object.entries(record)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([idx, value]) => `${idx}\t${value}`);
 }
