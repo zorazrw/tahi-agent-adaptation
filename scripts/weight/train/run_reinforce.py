@@ -139,7 +139,6 @@ class Config:
     grader_max_tokens: int = 1024
     grader_max_file_chars: int = 14000
     grader_temperature: float = 0.0
-    verifier_path: str | None = None
     grpo_group_size: int = 4
 
 
@@ -345,42 +344,6 @@ def do_update(
 # Online artifact-only rollout + Tinker grader
 # ---------------------------------------------------------------------------
 
-def _load_verifier_catalog(path: str | None) -> dict[str, list[str]]:
-    """Load optional verifiers.json and index by uuid and instruction text."""
-    if not path:
-        return {}
-    p = Path(path).expanduser()
-    if not p.exists():
-        raise FileNotFoundError(f"Verifier catalog not found: {p}")
-    payload = json.loads(p.read_text(encoding="utf-8"))
-    rows = payload if isinstance(payload, list) else payload.get("items", [])
-    out: dict[str, list[str]] = {}
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        rubrics = [str(v) for v in (row.get("verifiers") or []) if str(v).strip()]
-        if not rubrics:
-            continue
-        uuid = row.get("uuid")
-        instruction = row.get("instruction")
-        if isinstance(uuid, str) and uuid.strip():
-            out[uuid.strip()] = rubrics
-        if isinstance(instruction, str) and instruction.strip():
-            out[instruction.strip()] = rubrics
-    return out
-
-
-def _rubrics_for_example(
-    ex: dict[str, Any],
-    verifier_catalog: dict[str, list[str]],
-) -> list[str]:
-    meta = ex.get("meta") or {}
-    for key in (meta.get("session_uuid"), meta.get("instruction")):
-        if isinstance(key, str) and key.strip() in verifier_catalog:
-            return verifier_catalog[key.strip()]
-    return [str(r) for r in (ex.get("rubrics") or []) if str(r).strip()]
-
-
 class ArtifactReinforceRolloutDataset:
     """OPD-style artifact prompts for on-policy REINFORCE/GRPO."""
 
@@ -401,9 +364,7 @@ class ArtifactReinforceRolloutDataset:
         use_gt: bool = True,
         use_student: bool = True,
         artifact_only_instruction: bool = False,
-        verifier_path: str | None = None,
     ) -> "ArtifactReinforceRolloutDataset":
-        verifier_catalog = _load_verifier_catalog(verifier_path)
         examples = extract_opd_examples(
             _load_sessions(path),
             renderer=renderer,
@@ -425,7 +386,7 @@ class ArtifactReinforceRolloutDataset:
             student_prompt_input = renderer.build_generation_prompt(
                 student_prompt_messages
             )
-            rubrics = _rubrics_for_example(ex, verifier_catalog)
+            rubrics = [str(r) for r in (ex.get("rubrics") or []) if str(r).strip()]
             if not rubrics:
                 continue
             rows.append({
@@ -437,9 +398,8 @@ class ArtifactReinforceRolloutDataset:
             })
         logger.info(
             "Loaded %d artifact REINFORCE rollout examples from %s "
-            "(raw=%d, pair_mode=%s, use_gt=%s, use_student=%s, verifiers=%s)",
+            "(raw=%d, pair_mode=%s, use_gt=%s, use_student=%s, verifiers=weight-json)",
             len(rows), path, len(examples), pair_mode, use_gt, use_student,
-            verifier_path or "weight-json",
         )
         dataset = cls(rows, batch_size)
         dataset._max_length = max_length
@@ -566,6 +526,7 @@ async def _sample_one_artifact_candidate(
     attempt_idx: int,
     sample_log_chars: int,
 ) -> dict[str, Any]:
+    rollout_started_at = time.perf_counter()
     result = await sampling_client.sample_async(
         prompt=row["student_prompt_input"],
         num_samples=1,
@@ -591,13 +552,24 @@ async def _sample_one_artifact_candidate(
         step,
         sample_log_chars,
     )
+    rec["rollout_elapsed_s"] = time.perf_counter() - rollout_started_at
     rec["session_uuid"] = (row.get("meta") or {}).get("session_uuid")
     rec["artifact_path"] = (row.get("meta") or {}).get("artifact_path")
     if not ok or canonical_message is None:
-        return {"valid": False, "reason": reason, "record": rec}
+        return {
+            "valid": False,
+            "reason": reason,
+            "record": rec,
+            "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
+        }
     artifact = _artifact_args_from_message(canonical_message)
     if artifact is None:
-        return {"valid": False, "reason": "artifact_args_missing", "record": rec}
+        return {
+            "valid": False,
+            "reason": "artifact_args_missing",
+            "record": rec,
+            "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
+        }
     datum = _datum_from_prompt_and_assistant_message(
         renderer,
         row["student_prompt_messages"],
@@ -605,7 +577,12 @@ async def _sample_one_artifact_candidate(
         max_length,
     )
     if datum is None:
-        return {"valid": False, "reason": "too_long_or_empty", "record": rec}
+        return {
+            "valid": False,
+            "reason": "too_long_or_empty",
+            "record": rec,
+            "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
+        }
     reward, rubric_scores, grader_raw = await _grade_artifact_with_tinker(
         grader_client,
         grader_renderer,
@@ -629,6 +606,7 @@ async def _sample_one_artifact_candidate(
         "reward": float(reward),
         "artifact": artifact,
         "record": rec,
+        "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
     }
 
 
@@ -648,6 +626,7 @@ async def _sample_artifact_reinforce_async(
     rewards: list[float] = []
     reason_counts: dict[str, int] = {}
     total_attempts = 0
+    total_rollout_elapsed_s = 0.0
     records: list[dict[str, Any]] = []
 
     pending = list(enumerate(rows))
@@ -679,6 +658,7 @@ async def _sample_artifact_reinforce_async(
         for (row_idx, row), item in zip(pending, results, strict=True):
             reason = str(item.get("reason") or "unknown")
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            total_rollout_elapsed_s += float(item.get("rollout_elapsed_s", 0.0))
             records.append(item["record"])
             if item.get("valid"):
                 datums.append(item["datum"])
@@ -703,7 +683,12 @@ async def _sample_artifact_reinforce_async(
         "artifact_online/filtered_examples": n_rows - n_valid,
         "artifact_online/filter_rate": (n_rows - n_valid) / max(n_rows, 1.0),
         "artifact_online/attempts": float(total_attempts),
+        "artifact_online/rollout_elapsed_s": total_rollout_elapsed_s,
     }
+    if total_attempts:
+        metrics["artifact_online/mean_rollout_elapsed_s"] = (
+            total_rollout_elapsed_s / float(total_attempts)
+        )
     if rewards:
         metrics["artifact_online/mean_reward"] = sum(rewards) / len(rewards)
     for reason, count in reason_counts.items():
@@ -736,6 +721,7 @@ async def _sample_artifact_grpo_async(
     sample_log_path: Path | None = None,
 ) -> tuple[list[tinker.Datum], list[float], dict[str, float]]:
     group_size = max(1, int(config.grpo_group_size))
+    total_rollout_elapsed_s = 0.0
     indexed = [
         (row_idx, sample_idx, row)
         for row_idx, row in enumerate(rows)
@@ -769,6 +755,7 @@ async def _sample_artifact_grpo_async(
     for (row_idx, sample_idx, _row), item in zip(indexed, results, strict=True):
         rec = item["record"]
         rec["sample_idx"] = sample_idx
+        total_rollout_elapsed_s += float(item.get("rollout_elapsed_s", 0.0))
         records.append(rec)
         if item.get("valid"):
             valid_episodes += 1
@@ -808,9 +795,14 @@ async def _sample_artifact_grpo_async(
         "grpo_artifact/filter_rate": (
             1.0 - valid_episodes / total_episodes if total_episodes else 0.0
         ),
+        "grpo_artifact/rollout_elapsed_s": total_rollout_elapsed_s,
         "grpo_artifact/skipped_small_groups": float(skipped_small),
         "grpo_artifact/skipped_constant_groups": float(skipped_constant),
     }
+    if total_episodes:
+        metrics["grpo_artifact/mean_rollout_elapsed_s"] = (
+            total_rollout_elapsed_s / float(total_episodes)
+        )
     if valid_episodes:
         metrics["grpo_artifact/mean_reward"] = reward_sum / valid_episodes
     if advantages_out:
@@ -1104,7 +1096,6 @@ def _config_from_cli(
         grader_max_tokens=args.grader_max_tokens,
         grader_max_file_chars=args.grader_max_file_chars,
         grader_temperature=args.grader_temperature,
-        verifier_path=args.verifier_path,
         grpo_group_size=args.grpo_group_size,
     )
 
@@ -1228,6 +1219,17 @@ async def run_artifact_policy_training(
                     baseline = sum(rewards) / len(rewards)
                 rollout_metrics["baseline"] = baseline
                 no_valid_key = "artifact_online/no_valid_batch"
+
+            logger.info(
+                "%s step=%d valid=%d avg_rollout_s=%.3f",
+                config.reinforce_version,
+                step,
+                len(datums),
+                float(rollout_metrics.get(
+                    "grpo_artifact/mean_rollout_elapsed_s",
+                    rollout_metrics.get("artifact_online/mean_rollout_elapsed_s", 0.0),
+                )),
+            )
 
             if not datums:
                 ml_logger.log_metrics(
@@ -1489,11 +1491,6 @@ def main() -> None:
     parser.add_argument("--grader-max-tokens", type=int, default=1024)
     parser.add_argument("--grader-max-file-chars", type=int, default=14000)
     parser.add_argument("--grader-temperature", type=float, default=0.0)
-    parser.add_argument(
-        "--verifier-path",
-        default=None,
-        help="Optional verifiers.json catalog; matched by session uuid or instruction.",
-    )
     parser.add_argument("--grpo-group-size", type=int, default=4)
     parser.add_argument("--agentic-max-turns", type=int, default=48)
     parser.add_argument("--agentic-max-turns-per-step", type=int, default=8)
@@ -1530,7 +1527,6 @@ def main() -> None:
                 use_gt=not args.no_use_gt,
                 use_student=not args.no_use_student,
                 artifact_only_instruction=args.artifact_only_rollout_instruction,
-                verifier_path=args.verifier_path,
             ),
         ))
         return
