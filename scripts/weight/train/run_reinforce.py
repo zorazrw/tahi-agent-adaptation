@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -136,7 +137,7 @@ class Config:
     artifact_only_rollout_instruction: bool = False
     grader_model_name: str | None = None
     grader_renderer_name: str | None = None
-    grader_max_tokens: int = 1024
+    grader_max_tokens: int = 4096
     grader_max_file_chars: int = 14000
     grader_temperature: float = 0.0
     grpo_group_size: int = 4
@@ -452,12 +453,14 @@ def _build_artifact_grader_prompt(
 ) -> str:
     numbered = "\n".join(f"{i}. {r}" for i, r in enumerate(rubrics))
     body = _truncate_text(content, max_file_chars)
+    result_template = ",".join('{"pass":false}' for _ in rubrics)
     return "\n".join([
-        "You are grading a Python script that is intended to generate a final image artifact.",
-        "The verifier lines below were originally written to evaluate the generated image, not the source code directly.",
-        "Given only the script, decide whether running it would likely satisfy each verifier.",
-        'Reply with ONLY JSON of this exact shape: {"results":[{"pass":true},{"pass":false},...]}',
-        "The results array must have exactly one object per verifier line, in the same order.",
+        "Grade a Python script that is intended to generate a final image artifact.",
+        "The verifier lines were originally written for the generated image. You only see the script; judge whether running it would likely satisfy each verifier.",
+        "Return JSON only. Do not include reasoning, markdown, code fences, labels, or prose.",
+        "Your first character must be { and your last character must be }.",
+        "Use exactly this schema and exactly one result per verifier, in order:",
+        f'{{"results":[{result_template}]}}',
         "",
         "Verifier lines:",
         numbered,
@@ -466,6 +469,45 @@ def _build_artifact_grader_prompt(
         "Script content:",
         body,
     ])
+
+
+_NUMBERED_VERDICT_RE = re.compile(
+    r"(?ms)^\s*(\d+)[\.\):]\s+(.*?)(?=^\s*\d+[\.\):]\s+|\Z)"
+)
+
+
+def _parse_pass_fail_from_text(text: str, n: int) -> list[bool | None]:
+    """Recover ordered PASS/FAIL judgments from verbose grader text."""
+    out: list[bool | None] = [None] * n
+    matches = list(_NUMBERED_VERDICT_RE.finditer(text))
+    if matches:
+        for m in matches:
+            idx = int(m.group(1))
+            if idx < 0 or idx >= n:
+                continue
+            verdicts = re.findall(r"\b(PASS|FAIL|TRUE|FALSE)\b", m.group(2), re.IGNORECASE)
+            if verdicts:
+                last = verdicts[-1].lower()
+                out[idx] = last in {"pass", "true"}
+        if any(v is not None for v in out):
+            return out
+
+    # Last-resort fallback for models that emit a compact unnumbered list.
+    verdicts = re.findall(r"\b(PASS|FAIL|TRUE|FALSE)\b", text, re.IGNORECASE)
+    for i, verdict in enumerate(verdicts[:n]):
+        out[i] = verdict.lower() in {"pass", "true"}
+    return out
+
+
+def _parse_artifact_grader_results(text: str, n: int) -> tuple[list[bool | None], str]:
+    try:
+        passes, _raw_results = _parse_rubric_results_json(text, n)
+        return passes, "json"
+    except Exception:
+        passes = _parse_pass_fail_from_text(text, n)
+        if any(p is not None for p in passes):
+            return passes, "text_pass_fail"
+        raise
 
 
 async def _grade_artifact_with_tinker(
@@ -477,9 +519,9 @@ async def _grade_artifact_with_tinker(
     max_tokens: int,
     max_file_chars: int,
     temperature: float,
-) -> tuple[float, list[float], str]:
+) -> tuple[float, list[float], str, str]:
     if not rubrics:
-        return 1.0, [], "no_rubrics"
+        return 1.0, [], "no_rubrics", "none"
     prompt = _build_artifact_grader_prompt(
         rubrics,
         artifact["path"],
@@ -487,7 +529,11 @@ async def _grade_artifact_with_tinker(
         max_file_chars=max_file_chars,
     )
     prompt_input = grader_renderer.build_generation_prompt([
-        {"role": "user", "content": prompt}
+        {
+            "role": "system",
+            "content": "You are a strict JSON API. Return only valid JSON and no explanatory text.",
+        },
+        {"role": "user", "content": prompt},
     ])
     result = await grader_client.sample_async(
         prompt=prompt_input,
@@ -500,12 +546,21 @@ async def _grade_artifact_with_tinker(
     )
     raw = str(grader_renderer.tokenizer.decode(list(result.sequences[0].tokens)))
     try:
-        passes, _raw_results = _parse_rubric_results_json(raw, len(rubrics))
+        passes, parse_mode = _parse_artifact_grader_results(raw, len(rubrics))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Artifact grader parse failed (%s); reward=0.0", exc)
-        return 0.0, [0.0] * len(rubrics), raw
+        return 0.0, [0.0] * len(rubrics), raw, "failed"
+    missing_idx = [i for i, p in enumerate(passes) if p is None]
+    if missing_idx:
+        logger.warning(
+            "Artifact grader parse mode=%s recovered %d/%d judgments; missing %s scored as 0.0",
+            parse_mode,
+            len(rubrics) - len(missing_idx),
+            len(rubrics),
+            missing_idx[:20],
+        )
     scores = [1.0 if p is True else 0.0 for p in passes]
-    return sum(scores) / len(rubrics), scores, raw
+    return sum(scores) / len(rubrics), scores, raw, parse_mode
 
 
 async def _sample_one_artifact_candidate(
@@ -583,7 +638,7 @@ async def _sample_one_artifact_candidate(
             "record": rec,
             "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
         }
-    reward, rubric_scores, grader_raw = await _grade_artifact_with_tinker(
+    reward, rubric_scores, grader_raw, grader_parse_mode = await _grade_artifact_with_tinker(
         grader_client,
         grader_renderer,
         [str(r) for r in row.get("rubrics", [])],
@@ -596,6 +651,7 @@ async def _sample_one_artifact_candidate(
         "valid": True,
         "reward": reward,
         "rubric_scores": rubric_scores,
+        "grader_parse_mode": grader_parse_mode,
         "grader_raw_preview": grader_raw[:sample_log_chars],
         "graded_path": artifact["path"],
     })
@@ -1488,7 +1544,7 @@ def main() -> None:
         default=None,
         help="Renderer for --grader-model-name; defaults to --renderer-name.",
     )
-    parser.add_argument("--grader-max-tokens", type=int, default=1024)
+    parser.add_argument("--grader-max-tokens", type=int, default=4096)
     parser.add_argument("--grader-max-file-chars", type=int, default=14000)
     parser.add_argument("--grader-temperature", type=float, default=0.0)
     parser.add_argument("--grpo-group-size", type=int, default=4)
