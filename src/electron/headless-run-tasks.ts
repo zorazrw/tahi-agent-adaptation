@@ -1,6 +1,6 @@
 import { app } from "electron";
 import { spawn } from "child_process";
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { config as loadDotenv } from "dotenv";
@@ -66,6 +66,7 @@ type TaskSummary = {
   output_files: string[];
   workflow_nodes: Array<{ id: string; description: string; status: string; outputFiles: string[] }>;
   error?: string;
+  eval_error?: string;
 };
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -147,7 +148,7 @@ Run only specific task ids:
   bun run headless:tasks -- --tasks tasks.json --limit 18 --task-ids 7,13 \\
     --workplace-template trash/workplace-set/test-0527/dpo \\
     --model-path tinker://... --base-model Qwen/Qwen3.5-35B-A3B \\
-    --renderer-name qwen3_5 --out runs/headless_dpo_eval --resume --eval
+    --renderer-name qwen3_5 --out runs/headless_dpo_eval --force --eval
 
 Run with eval:
   bun run headless:tasks -- --tasks tasks.json --limit 18 \\
@@ -485,8 +486,28 @@ function writeTaskSummary(taskDir: string, summary: TaskSummary): void {
 function shouldSkipExistingTask(args: Args, summary: TaskSummary | null): boolean {
   if (!summary || summary.status !== "completed") return false;
   if (!existsSync(summary.session_json)) return false;
-  if (!args.eval) return true;
-  return Boolean(summary.ratings_json && existsSync(summary.ratings_json));
+  return true;
+}
+
+function backupDirectory(srcDir: string, backupRoot: string): string {
+  mkdirSync(backupRoot, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const baseName = `${srcDir.split(/[\\/]/).pop()}-${stamp}`;
+  let target = join(backupRoot, baseName);
+  let suffix = 1;
+  while (existsSync(target)) {
+    target = join(backupRoot, `${baseName}-${suffix++}`);
+  }
+  renameSync(srcDir, target);
+  return target;
+}
+
+function backupTaskDirBeforeRerun(taskDir: string): string {
+  return backupDirectory(taskDir, join(dirname(taskDir), ".rerun-backups"));
+}
+
+function backupOutDirBeforeForce(outDir: string): string {
+  return backupDirectory(outDir, join(dirname(outDir), ".headless-run-backups"));
 }
 
 async function runEvaluation(args: Args, taskDir: string, sessionJson: string, runLog: string): Promise<{ ratingsPath: string; score: number | null }> {
@@ -535,7 +556,7 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
   const eventsPath = join(logsDir, "events.jsonl");
   const runLog = join(logsDir, "run.log");
   mkdirSync(logsDir, { recursive: true });
-  if (existsSync(taskDir) && args.force) rmSync(taskDir, { recursive: true, force: true });
+  if (existsSync(taskDir) && args.force) backupTaskDirBeforeRerun(taskDir);
   mkdirSync(logsDir, { recursive: true });
   cpSync(resolve(args.workplaceTemplate), workdir, { recursive: true });
   mkdirSync(matplotlibConfigDir, { recursive: true });
@@ -578,8 +599,16 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
 
     let ratingsPath: string | undefined;
     let score: number | null | undefined;
+    let evalError: string | undefined;
     if (args.eval) {
-      ({ ratingsPath, score } = await runEvaluation(args, taskDir, sessionJson, runLog));
+      try {
+        ({ ratingsPath, score } = await runEvaluation(args, taskDir, sessionJson, runLog));
+      } catch (error) {
+        ratingsPath = join(taskDir, "ratings.json");
+        score = null;
+        evalError = error instanceof Error ? error.message : String(error);
+        appendFileSync(runLog, `${evalError}\n`, "utf8");
+      }
     }
 
     const nodes = flattenNodes(finalSession.workflowTree ?? []);
@@ -599,6 +628,7 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
         status: node.status,
         outputFiles: node.outputFiles,
       })),
+      eval_error: evalError,
     };
     writeTaskSummary(taskDir, summary);
     return summary;
@@ -660,6 +690,16 @@ function writeSummary(outDir: string, summaries: TaskSummary[]): void {
   writeFileSync(join(outDir, "scores.csv"), rows.join("\n") + "\n", "utf8");
 }
 
+function loadAllTaskSummaries(outDir: string): TaskSummary[] {
+  if (!existsSync(outDir)) return [];
+  return readdirSync(outDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^task_\d+$/.test(entry.name))
+    .map((entry) => join(outDir, entry.name))
+    .sort((a, b) => a.localeCompare(b))
+    .map((taskDir) => loadTaskSummary(taskDir))
+    .filter((summary): summary is TaskSummary => summary !== null);
+}
+
 async function main(): Promise<void> {
   loadDotenv({ path: join(repoRoot, "scripts", ".env") });
   loadDotenv({ path: join(repoRoot, ".env") });
@@ -676,7 +716,10 @@ async function main(): Promise<void> {
     }
   }
   const uiUserDataDir = app.getPath("userData");
-  if (existsSync(outDir) && args.force) rmSync(outDir, { recursive: true, force: true });
+  if (existsSync(outDir) && args.force && !args.taskIds?.length) {
+    const backupPath = backupOutDirBeforeForce(outDir);
+    console.log(`[headless] backed up previous output dir to ${backupPath}`);
+  }
   if (existsSync(outDir) && !args.force && !args.resume) {
     throw new Error(`Output directory already exists: ${outDir}. Pass --force to replace it.`);
   }
@@ -711,7 +754,6 @@ async function main(): Promise<void> {
     .map((task, index) => ({ task, index }))
     .filter(({ task }) => !wantedIds || wantedIds.has(String(task.id)));
   const store = new SessionStore(join(app.getPath("userData"), "sessions.db"));
-  const summaries: TaskSummary[] = [];
   try {
     for (let i = 0; i < selected.length; i++) {
       const { task, index } = selected[i]!;
@@ -720,17 +762,16 @@ async function main(): Promise<void> {
         const existing = loadTaskSummary(taskDir);
         if (shouldSkipExistingTask(args, existing)) {
           console.log(`[headless] skip completed task ${i + 1}/${selected.length}: ${task.id}`);
-          if (existing) summaries.push(existing);
-          writeSummary(outDir, summaries);
+          writeSummary(outDir, loadAllTaskSummaries(outDir));
           continue;
         }
         console.log(`[headless] rerun incomplete task ${i + 1}/${selected.length}: ${task.id}`);
-        rmSync(taskDir, { recursive: true, force: true });
+        const backupPath = backupTaskDirBeforeRerun(taskDir);
+        console.log(`[headless] backed up previous task dir to ${backupPath}`);
       }
       console.log(`[headless] task ${i + 1}/${selected.length}: ${task.id}`);
-      const summary = await runTask(args, store, task, index);
-      summaries.push(summary);
-      writeSummary(outDir, summaries);
+      await runTask(args, store, task, index);
+      writeSummary(outDir, loadAllTaskSummaries(outDir));
     }
   } finally {
     store.close();
