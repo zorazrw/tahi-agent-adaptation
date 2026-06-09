@@ -1190,7 +1190,8 @@ function fileEditPathForMessage(sess: Session, absNorm: string): string {
 export function recordFileEditAfterPreviewSave(
   sessionId: string,
   editedAbsPath: string,
-  editedContent?: string
+  editedContent?: string,
+  structuredContent?: Parameters<typeof buildExportEnvironmentSnapshotWithPreviewWrittenFile>[3]
 ): void {
   const store = initializeSessions();
   const sess = store.getSession(sessionId);
@@ -1200,7 +1201,7 @@ export function recordFileEditAfterPreviewSave(
   const rowId = store.recordMessage(sessionId, { type: "file_edit", path: pathForMessage });
   const snapshot =
     typeof editedContent === "string"
-      ? buildExportEnvironmentSnapshotWithPreviewWrittenFile(sess, pathNormAbs, editedContent)
+      ? buildExportEnvironmentSnapshotWithPreviewWrittenFile(sess, pathNormAbs, editedContent, structuredContent)
       : buildExportEnvironmentSnapshot(sess);
   store.writeMessageSnapshot(rowId, snapshot);
   broadcast({

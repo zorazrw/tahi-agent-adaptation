@@ -68,7 +68,7 @@ Formats
   ``agent_trajectories[].messages`` and every entry in ``human_trajectories`` carries an
   ``environment`` of the same shape as the default exporter:
       {workflow: [...nested nodes with verifier criterion+status...],
-       file:     [{path, content, content_source, content_encoding, error}, ...],
+       file:     [{path, content, content_source, content_encoding, structured_content, error}, ...],
        memory:   {<filename>: <content>, ...},
        skill:    {<filename>: <content>, ...}}
   The state is carried forward from each message's ``state_snapshot`` (workflow + file +
@@ -2849,10 +2849,10 @@ def _output_files_for_segment(
 
     Two conditions must both hold:
     1. The path is in ``written_paths`` (agent called write/edit on it successfully).
-    2. The file content at segment-end differs from content at segment-start.
+    2. The text content or structured content at segment-end differs from segment-start.
        This excludes corner cases where ``write`` succeeded but wrote the same bytes
-       (content unchanged). Segment-start snapshot is taken from the **previous**
-       segment's end, or None for the first segment.
+       and metadata (content unchanged). Segment-start snapshot is taken from the
+       **previous** segment's end, or None for the first segment.
 
     Matches by exact path or basename to handle cwd-relative vs absolute mix.
     Skips rows without text content.
@@ -2865,6 +2865,7 @@ def _output_files_for_segment(
 
     # Build lookup for start-of-segment content; None means "file didn't exist before"
     start_content: Dict[str, Optional[str]] = {}
+    start_structured: Dict[str, Any] = {}
     if isinstance(snap_start, dict):
         for f in (snap_start.get("file") or []):
             if not isinstance(f, dict):
@@ -2872,6 +2873,7 @@ def _output_files_for_segment(
             fp = str(f.get("path", "")).strip()
             if fp:
                 start_content[fp] = f.get("content") if isinstance(f.get("content"), str) else None
+                start_structured[fp] = f.get("structured_content")
 
     wanted_basenames = {os.path.basename(p.replace("\\", "/")) for p in written_paths}
     out: List[dict] = []
@@ -2886,14 +2888,18 @@ def _output_files_for_segment(
         content = f.get("content")
         if not isinstance(content, str):
             continue
-        # Skip if content is identical to what it was at segment start
+        structured_content = f.get("structured_content")
+        # Skip if content and structured metadata are identical to what they were at segment start
         prev = start_content.get(fp)
-        if prev is not None and prev == content:
+        prev_structured = start_structured.get(fp)
+        if prev is not None and prev == content and prev_structured == structured_content:
             continue
         entry: Dict[str, Any] = {"path": fp, "content": content}
         cs = f.get("content_source")
         if isinstance(cs, str):
             entry["content_source"] = cs
+        if structured_content is not None:
+            entry["structured_content"] = copy.deepcopy(structured_content)
         out.append(entry)
     return out
 

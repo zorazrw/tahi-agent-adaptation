@@ -8,6 +8,7 @@ import type { Session } from "./session-store.js";
 import type { VerifierMark, WorkflowNode } from "../types.js";
 import { readAllMemorySections } from "./memory-store.js";
 import { readAllFlatSkillSections } from "./skill-store.js";
+import type { XlsxModel } from "../../lib/xlsx-model.js";
 
 const MAX_OUTPUT_FILE_BYTES = 500_000;
 
@@ -18,7 +19,14 @@ type OutputFileEntry = {
   content: string | null;
   content_source: string | null;
   content_encoding?: OutputContentEncoding | null;
+  structured_content?: OutputFileStructuredContent | null;
   error: string | null;
+};
+
+type OutputFileStructuredContent = {
+  kind: "xlsx_model";
+  version: 1;
+  model: XlsxModel;
 };
 
 export type ExportEnvironmentSnapshot = {
@@ -256,7 +264,8 @@ export function resolvedFileKey(cwd: string | undefined, filePath: string): stri
 export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
   session: Session,
   editedRelPath: string,
-  editedContent: string
+  editedContent: string,
+  structuredContent?: OutputFileStructuredContent
 ): ExportEnvironmentSnapshot {
   const base = buildExportEnvironmentSnapshot(session);
   const cwd = session.cwd;
@@ -270,6 +279,7 @@ export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
     content,
     content_source: "preview_write",
     content_encoding: "utf8",
+    structured_content: structuredContent ?? null,
     error: null,
   };
   if (idx >= 0) {
