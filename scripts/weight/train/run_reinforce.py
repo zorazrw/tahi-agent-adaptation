@@ -1311,7 +1311,7 @@ async def run_artifact_policy_training(
             ml_logger.log_metrics(metrics=step_metrics, step=step)
 
             if config.save_every > 0 and step % config.save_every == 0 and step > 0:
-                checkpoint_utils.save_checkpoint(
+                await checkpoint_utils.save_checkpoint_async(
                     training_client=training_client,
                     name=f"{step:06d}",
                     log_path=config.log_path,
@@ -1321,7 +1321,7 @@ async def run_artifact_policy_training(
                 )
             sampling_client = training_client.save_weights_and_get_sampling_client()
 
-    checkpoint_utils.save_checkpoint(
+    await checkpoint_utils.save_checkpoint_async(
         training_client=training_client,
         name="final",
         log_path=config.log_path,
@@ -1455,7 +1455,7 @@ async def run_online_training(
             ml_logger.log_metrics(metrics=step_metrics, step=step)
 
             if config.save_every > 0 and step % config.save_every == 0 and step > 0:
-                checkpoint_utils.save_checkpoint(
+                await checkpoint_utils.save_checkpoint_async(
                     training_client=training_client,
                     name=f"{step:06d}",
                     log_path=config.log_path,
@@ -1465,7 +1465,7 @@ async def run_online_training(
                 )
             sampling_client = training_client.save_weights_and_get_sampling_client()
 
-    checkpoint_utils.save_checkpoint(
+    await checkpoint_utils.save_checkpoint_async(
         training_client=training_client,
         name="final",
         log_path=config.log_path,
