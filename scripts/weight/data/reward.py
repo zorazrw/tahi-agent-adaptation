@@ -13,6 +13,7 @@ Later rounds win per path. Uses Anthropic (``scripts/induce.py``); requires ``an
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -395,11 +396,27 @@ def _parse_rubric_results_json(text: str, n: int) -> tuple[list[bool | None], li
     raw = (fence.group(1) if fence else text).strip()
     start, end = raw.find("{"), raw.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object in model response")
-    parsed_json = json.loads(raw[start : end + 1])
+        # No parseable object: degrade to "all unusable" rather than raising,
+        # so a single bad judge reply can't abort the whole training round.
+        return [None] * n, []
+
+    blob = raw[start : end + 1]
+    parsed_json: Any = None
+    try:
+        parsed_json = json.loads(blob)
+    except json.JSONDecodeError:
+        # Lenient fallback for common non-JSON model output (single-quoted
+        # keys/strings, Python literals like True/False/None).
+        try:
+            parsed_json = ast.literal_eval(blob)
+        except (ValueError, SyntaxError):
+            parsed_json = None
+
+    if not isinstance(parsed_json, dict):
+        return [None] * n, []
     results = parsed_json.get("results")
     if not isinstance(results, list):
-        raise ValueError("Missing results array")
+        return [None] * n, []
     out: list[bool | None] = [None] * n
     for i in range(n):
         if i >= len(results):

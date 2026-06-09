@@ -1245,14 +1245,26 @@ def extract_opd_examples_agentic(
         if not golden_chat:
             continue
 
+        # Rubrics (session-final verifiers) are carried for the combined
+        # GRPO+OPD path, which grades the on-policy rollout for reward. The
+        # pure-OPD trainer ignores this field.
+        verifiers = (tasks[-1].get("verifiers") or []) if tasks else []
+        rubrics = [
+            str(v["criterion"])
+            for v in verifiers
+            if isinstance(v, dict) and v.get("criterion")
+        ]
+
         examples.append({
             "prompt_messages": [{"role": "user", "content": initial_task.strip()}],
             "system_prompt": system_prompt,
             "tool_schemas": tool_schemas,
             "golden_chat": golden_chat,
+            "rubrics": rubrics,
             "meta": {
                 "session_uuid": session_uuid,
                 "n_followups": len(golden_chat),
+                "n_rubrics": len(rubrics),
             },
         })
     return examples

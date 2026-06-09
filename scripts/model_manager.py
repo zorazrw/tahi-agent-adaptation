@@ -149,7 +149,7 @@ class ModelManager:
         tinker_api_key: str,
         tinker_base_url: str,
         state_path: str,
-        mode: Literal["dpo", "reinforce", "opd"],
+        mode: Literal["dpo", "reinforce", "opd", "grpo_opd"],
         lora_rank: int = 32,
         preload_model: str | None = None,
         supported_models: Iterable[str] = TINKER_SUPPORTED_MODELS,

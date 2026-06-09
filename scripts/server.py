@@ -33,7 +33,14 @@ from weight.train.run_reinforce import Config as ReinforceConfig, OnlineReinforc
 from weight.train.run_opd import Config as ArtifactOPDConfig, OnlineOPDRolloutDataset
 
 from model_manager import ModelManager, ModelUpdate
-from trainer import DPOTrainer, OPDTrainer, REINFORCETrainer, Trainer, TrainingCheckpoint
+from trainer import (
+    DPOTrainer,
+    GRPOOPDTrainer,
+    OPDTrainer,
+    REINFORCETrainer,
+    Trainer,
+    TrainingCheckpoint,
+)
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -42,7 +49,7 @@ load_dotenv()
 @dataclass
 class Config:
     # -- Mode --
-    mode: Literal["dpo", "opd", "reinforce"] = "reinforce"
+    mode: Literal["dpo", "opd", "reinforce", "grpo_opd"] = "reinforce"
 
     # -- Inference --
     temperature: float = 0.0
@@ -133,6 +140,15 @@ class Config:
     reinforce_agentic_max_trajectory_tokens: int | None = None
     reinforce_log_rollout_samples: bool = True
     reinforce_rollout_sample_log_chars: int = 4000
+
+    # -- Combined GRPO+OPD (mode="grpo_opd") --
+    # Reuses the opd_* agentic rollout / top-K settings. Per session,
+    # grpo_group_size on-policy episodes are sampled once and reused for both
+    # the GRPO importance-sampling loss and the OPD top-K cross-entropy loss;
+    # lambda_grpo / lambda_opd weight the two halves before a single optim step.
+    grpo_group_size: int = 4
+    lambda_grpo: float = 1.0
+    lambda_opd: float = 1.0
 
     # -- Logging --
     wandb_project: str | None = None
@@ -413,8 +429,10 @@ class Server:
                     data = session_data
                 elif self.config.mode == "reinforce":
                     data = session_data
+                elif self.config.mode == "grpo_opd":
+                    data = session_data
                 else:
-                    raise ValueError(f"Unknown training mode: {self.config.mode} (expected one of 'dpo', 'opd', 'reinforce')")
+                    raise ValueError(f"Unknown training mode: {self.config.mode} (expected one of 'dpo', 'opd', 'reinforce', 'grpo_opd')")
 
                 if data:
                     await self.training_queue.put(data)
@@ -590,10 +608,12 @@ class Server:
                 dataset, build = self._prepare_reinforce(train_path, model_name, renderer_name)
             elif self.config.mode == "opd":
                 dataset, build = self._prepare_opd(train_path, model_name, renderer_name)
+            elif self.config.mode == "grpo_opd":
+                dataset, build = self._prepare_combined(train_path, model_name, renderer_name)
             else:
                 raise ValueError(
                     f"Unknown training mode: {self.config.mode} "
-                    f"(expected one of 'dpo', 'reinforce', 'opd')"
+                    f"(expected one of 'dpo', 'reinforce', 'opd', 'grpo_opd')"
                 )
 
             trainer = await self.model_manager.get_trainer(
@@ -601,7 +621,7 @@ class Server:
                 build=build,
                 load_checkpoint_path=load_checkpoint_path,
             )
-            if self.config.mode == "opd":
+            if self.config.mode in ("opd", "grpo_opd"):
                 checkpoint = await trainer.do_update(dataset, num_epochs=self.config.num_epochs)
             else:
                 checkpoint = await trainer.do_update(dataset)
@@ -802,6 +822,94 @@ class Server:
             service_client: tinker.ServiceClient,
         ) -> Trainer:
             return OPDTrainer(
+                logger=log,
+                config=trainer_config,
+                training_client=training_client,
+                service_client=service_client,
+                max_context_length=self.config.opd_max_context_length,
+            )
+
+        return dataset, build
+
+    def _prepare_combined(self, train_path: str, model_name: str, renderer_name: str):
+        """Build the combined GRPO+OPD dataset and trainer.
+
+        Reuses the agentic OPD rollout dataset (which now carries per-session
+        rubrics for GRPO reward grading) and the OPD top-K teacher distillation
+        config, plus GRPO group-rollout / loss-weighting knobs.
+        """
+        tokenizer = get_tokenizer(model_name)
+        renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
+        if hasattr(renderer, "strip_thinking_from_history"):
+            renderer.strip_thinking_from_history = self.config.opd_strip_thinking_from_history
+            log.info(
+                "Dataset renderer %s: strip_thinking_from_history=%s",
+                type(renderer).__name__,
+                self.config.opd_strip_thinking_from_history,
+            )
+        if self.config.opd_extract_version != "agentic":
+            log.warning(
+                "mode=grpo_opd requires opd_extract_version='agentic' (got %r); "
+                "forcing 'agentic' for this combined training run.",
+                self.config.opd_extract_version,
+            )
+        dataset = OnlineOPDRolloutDataset.from_weight_json(
+            path=train_path,
+            renderer=renderer,
+            max_length=self.config.max_length,
+            batch_size=self.config.batch_size,
+            pair_mode=self.config.opd_pair_mode,
+            use_gt=self.config.opd_use_gt,
+            use_student=self.config.opd_use_student,
+            artifact_only_instruction=False,
+            extract_version="agentic",
+        )
+
+        log_path = f"logs/weight_grpo_opd/{int(time.time())}"
+        trainer_config = ArtifactOPDConfig(
+            model_name=model_name,
+            renderer_name=renderer_name,
+            log_path=log_path,
+            lora_rank=self.config.lora_rank,
+            learning_rate=self.config.learning_rate,
+            lr_schedule=self.config.lr_schedule,
+            num_epochs=self.config.num_epochs,
+            save_every=self.config.save_every,
+            max_steps=self.config.max_steps,
+            wandb_project=self.config.wandb_project,
+            wandb_name=self.config.wandb_name,
+            pair_mode=self.config.opd_pair_mode,
+            use_gt=self.config.opd_use_gt,
+            use_student=self.config.opd_use_student,
+            topk=self.config.opd_topk,
+            teacher_temperature=self.config.opd_teacher_temperature,
+            online_rollout=True,
+            rollout_max_tokens=self.config.opd_max_tokens,
+            rollout_temperature=self.config.opd_temperature,
+            rollout_attempts=self.config.opd_rollout_attempts,
+            log_rollout_samples=self.config.opd_log_rollout_samples,
+            rollout_sample_log_chars=self.config.opd_rollout_sample_log_chars,
+            log_teacher_prompts=self.config.opd_log_teacher_prompts,
+            artifact_only_rollout_instruction=False,
+            extract_version="agentic",
+            strip_thinking_from_history=self.config.opd_strip_thinking_from_history,
+            rollout_pipeline=self.config.opd_rollout_pipeline,
+            agentic_max_turns=self.config.opd_agentic_max_turns,
+            agentic_max_turns_per_step=self.config.opd_agentic_max_turns_per_step,
+            agentic_max_steps=self.config.opd_agentic_max_steps,
+            agentic_enable_bash=self.config.opd_agentic_enable_bash,
+            agentic_tool_timeout_s=self.config.opd_agentic_tool_timeout_s,
+            agentic_max_trajectory_tokens=self.config.opd_agentic_max_trajectory_tokens,
+            grpo_group_size=self.config.grpo_group_size,
+            lambda_grpo=self.config.lambda_grpo,
+            lambda_opd=self.config.lambda_opd,
+        )
+
+        def build(
+            training_client: tinker.TrainingClient,
+            service_client: tinker.ServiceClient,
+        ) -> Trainer:
+            return GRPOOPDTrainer(
                 logger=log,
                 config=trainer_config,
                 training_client=training_client,

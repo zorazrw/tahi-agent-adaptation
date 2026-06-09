@@ -54,6 +54,7 @@ from weight.train.run_opd import (
     _build_offline_topk_datums_async,
     _count_topk_supervision_tokens,
     _sample_agentic_opd_datums_async,
+    _sample_combined_grpo_opd_datums_async,
     _sample_online_artifact_datums_async,
 )
 
@@ -68,6 +69,16 @@ class TrainingCheckpoint:
 
     sampler_path: str
     state_path: str
+
+
+def _as_metrics_dict(metrics: Any) -> dict[str, Any]:
+    """Coerce a backward-pass metrics object into a plain dict."""
+    if isinstance(metrics, dict):
+        return dict(metrics)
+    try:
+        return dict(metrics.items())
+    except Exception:
+        return {}
 
 
 class Trainer():
@@ -1036,3 +1047,319 @@ class OPDTrainer(Trainer):
     async def stop(self):
         self.ml_logger.close()
         self.logger.info("OPD trainer terminated")
+
+
+class GRPOOPDTrainer(Trainer):
+    """Combined online trainer: GRPO (importance_sampling) + OPD (cross_entropy).
+
+    Each step runs a single shared agentic group-rollout per session (see
+    ``_sample_combined_grpo_opd_datums_async``). The same trajectories feed both
+    losses: group-centered advantages drive a GRPO importance-sampling update,
+    and a frozen teacher's top-K distribution drives an OPD distillation update.
+    The two losses are combined by gradient accumulation -- two
+    ``forward_backward`` passes followed by a single ``optim_step`` -- weighted
+    via ``lambda_grpo`` / ``lambda_opd`` (folded into the datum payloads by the
+    sampler, so the stock Tinker loss functions are used unchanged).
+    """
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        config: ArtifactOPDConfig,
+        training_client: tinker.TrainingClient,
+        service_client: tinker.ServiceClient,
+        max_context_length: int = 32768,
+    ):
+        self.logger = logger
+        self.total_steps = config.max_steps if config.max_steps is not None else 100_000
+        self.config = config
+        self.training_client = training_client
+        self.service_client = service_client
+        self.max_context_length = max_context_length
+        self.ml_logger = ml_log.setup_logging(
+            log_dir=config.log_path,
+            wandb_project=config.wandb_project,
+            wandb_name=config.wandb_name,
+            config=config,
+        )
+        self.log_path = config.log_path
+        self.tokenizer = get_tokenizer(config.model_name)
+
+        if config.topk <= 0:
+            raise ValueError("Combined GRPO+OPD requires artifact top-K mode; set opd_topk > 0")
+        if config.extract_version != "agentic":
+            raise ValueError(
+                "Combined GRPO+OPD requires opd_extract_version='agentic' "
+                f"(got {config.extract_version!r}); GRPO needs on-policy group rollouts"
+            )
+        assert config.renderer_name is not None, "GRPOOPDTrainer requires config.renderer_name"
+        self.renderer = renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
+
+        # Match OPDTrainer: let the teacher attend to the golden chain-of-thought.
+        if hasattr(self.renderer, "strip_thinking_from_history"):
+            self.renderer.strip_thinking_from_history = config.strip_thinking_from_history
+            self.logger.info(
+                "Renderer %s: strip_thinking_from_history=%s",
+                type(self.renderer).__name__,
+                config.strip_thinking_from_history,
+            )
+
+        # Static frozen teacher (OPD distillation target).
+        self.teacher_client: tinker.SamplingClient = service_client.create_sampling_client(
+            base_model=config.model_name
+        )
+        self.logger.info(f"Created static teacher sampling client for {config.model_name}")
+
+        # Student sampling client is created lazily on the first do_update.
+        self.sampling_client: tinker.SamplingClient | None = None
+
+        self.checkpoint_mgr = checkpoint_utils.CheckpointManager(
+            training_client=training_client,
+            service_client=service_client,
+            log_path=config.log_path,
+            save_every=config.save_every,
+        )
+
+        self.step_idx = 0
+        self.round_idx = 0
+
+        if config.enable_trace:
+            trace_events_path = str(Path(config.log_path) / "trace_events.jsonl")
+            self.logger.info(f"Tracing is enabled. Trace events will be saved to {trace_events_path}")
+            trace.trace_init(output_file=trace_events_path)
+
+    async def _ensure_sampling_client(self) -> None:
+        if self.sampling_client is None:
+            self.sampling_client = (
+                await self.training_client.save_weights_and_get_sampling_client_async()
+            )
+
+    async def do_update(
+        self,
+        dataset: OnlineOPDRolloutDataset,
+        num_epochs: int | None = None,
+    ) -> TrainingCheckpoint:
+        """Run combined GRPO+OPD over the freshly queued session batch."""
+        await self._ensure_sampling_client()
+
+        self.round_idx += 1
+        n_batches = len(dataset)
+        epochs = num_epochs if num_epochs is not None else self.config.num_epochs
+        round_start_step = self.step_idx
+
+        self.logger.info(
+            "Round %d: step_idx=%d, n_batches=%d, epochs=%d, group_size=%d",
+            self.round_idx, self.step_idx, n_batches, epochs, self.config.grpo_group_size,
+        )
+
+        for epoch_idx in range(epochs):
+            dataset.set_epoch(seed=self.round_idx * 1000 + epoch_idx)
+            for batch_idx in range(n_batches):
+                if (
+                    self.config.max_steps is not None
+                    and self.step_idx >= self.config.max_steps
+                ):
+                    break
+                await self.step(
+                    epoch_idx=epoch_idx,
+                    batch_idx=batch_idx,
+                    dataset=dataset,
+                    total_steps=max(1, self.total_steps),
+                )
+
+        save_name = (
+            f"round_{self.round_idx:06d}_grpo_opd_"
+            f"{self.config.model_name.split('/')[-1]}_"
+            f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        paths = await checkpoint_utils.save_checkpoint_async(
+            training_client=self.training_client,
+            name=save_name,
+            log_path=self.config.log_path,
+            kind="both",
+            loop_state={"round": self.round_idx, "step": self.step_idx},
+            ttl_seconds=None,
+        )
+        self.logger.info(
+            "Round %d complete: %d step(s) taken this round, step_idx=%d",
+            self.round_idx, self.step_idx - round_start_step, self.step_idx,
+        )
+
+        sampler_path = paths.get("sampler_path")
+        state_path = paths.get("state_path")
+        if sampler_path is None or state_path is None:
+            raise RuntimeError(
+                f"Round {self.round_idx} produced incomplete checkpoint paths in {self.config.log_path}: {paths}"
+            )
+        return TrainingCheckpoint(sampler_path=sampler_path, state_path=state_path)
+
+    async def step(
+        self,
+        epoch_idx: int,
+        batch_idx: int,
+        dataset: OnlineOPDRolloutDataset,
+        total_steps: int,
+    ) -> None:
+        """Shared group-rollout, then a joint weighted GRPO+OPD update."""
+        assert self.sampling_client is not None, (
+            "step() invoked before _ensure_sampling_client(); call do_update() as the entry point"
+        )
+
+        step = self.step_idx
+        metrics: dict[str, Any] = {
+            "round": self.round_idx,
+            "epoch": epoch_idx,
+            "progress/batch": batch_idx,
+        }
+
+        with trace.trace_iteration(step=step) as window:
+            async with trace.scope_span("sample"):
+                rows = dataset.get_batch(batch_idx)
+                grpo_datums, opd_topk_datums, rollout_metrics = (
+                    await _sample_combined_grpo_opd_datums_async(
+                        rows,
+                        self.renderer,
+                        self.sampling_client,
+                        self.teacher_client,
+                        group_size=self.config.grpo_group_size,
+                        topk=self.config.topk,
+                        max_context_length=self.max_context_length,
+                        vocab_size=len(self.tokenizer),
+                        teacher_temperature=self.config.teacher_temperature,
+                        lambda_grpo=self.config.lambda_grpo,
+                        lambda_opd=self.config.lambda_opd,
+                        max_tokens=self.config.rollout_max_tokens,
+                        temperature=self.config.rollout_temperature,
+                        max_turns=self.config.agentic_max_turns,
+                        max_turns_per_step=self.config.agentic_max_turns_per_step,
+                        max_steps=self.config.agentic_max_steps,
+                        enable_bash=self.config.agentic_enable_bash,
+                        tool_timeout_s=self.config.agentic_tool_timeout_s,
+                        max_trajectory_tokens=self.config.agentic_max_trajectory_tokens,
+                        max_length=dataset._max_length,
+                        step=step,
+                        sample_log_path=(
+                            Path(self.config.log_path) / "combined_rollout_samples.jsonl"
+                            if self.config.log_rollout_samples else None
+                        ),
+                        sample_log_chars=self.config.rollout_sample_log_chars,
+                    )
+                )
+            metrics.update(rollout_metrics)
+
+            learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
+                lr_schedule=self.config.lr_schedule,
+                step=step,
+                total_steps=total_steps,
+            )
+
+            if not grpo_datums and not opd_topk_datums:
+                metrics.update(
+                    {
+                        "combined/no_valid_batch": 1.0,
+                        "learning_rate": learning_rate,
+                        "progress": step / max(total_steps, 1),
+                    }
+                )
+                self.ml_logger.log_metrics(metrics=metrics, step=step)
+                self.logger.warning(
+                    "Skipping combined step %d: no GRPO and no OPD datums produced", step,
+                )
+                self.step_idx += 1
+                return
+
+            adam_params = tinker.AdamParams(
+                learning_rate=learning_rate,
+                beta1=self.config.adam_beta1,
+                beta2=self.config.adam_beta2,
+                eps=self.config.adam_eps,
+            )
+
+            # Joint update: accumulate gradients from both losses across two
+            # forward_backward passes, then apply a single optimizer step.
+            async with trace.scope_span("train"):
+                grpo_result_metrics: dict[str, Any] = {}
+                opd_result_metrics: dict[str, Any] = {}
+
+                if grpo_datums:
+                    grpo_fb = await self.training_client.forward_backward_async(
+                        grpo_datums, loss_fn="importance_sampling",
+                    )
+                    grpo_backward = await grpo_fb.result_async()
+                    grpo_result_metrics = _as_metrics_dict(grpo_backward.metrics)
+
+                if opd_topk_datums:
+                    opd_fb = await self.training_client.forward_backward_async(
+                        opd_topk_datums, loss_fn="cross_entropy",
+                    )
+                    opd_backward = await opd_fb.result_async()
+                    opd_result_metrics = _as_metrics_dict(opd_backward.metrics)
+
+                optim_future = await self.training_client.optim_step_async(adam_params)
+                await optim_future.result_async()
+
+            grpo_loss_sum = float(
+                grpo_result_metrics.get("loss:sum", grpo_result_metrics.get("loss", 0.0))
+            )
+            # Tinker's importance_sampling loss is sum-reduced over the supervised
+            # (non-zero-advantage) positions, so divide by that token count for a
+            # per-token value comparable to the OPD per-token CE. Display only; the
+            # gradient is unchanged.
+            grpo_batch_tokens = 0
+            for d in grpo_datums:
+                adv = d.loss_fn_inputs.get("advantages")
+                if adv is None:
+                    continue
+                grpo_batch_tokens += int(
+                    torch.as_tensor(adv.data).ne(0).sum().item()
+                )
+            grpo_loss = grpo_loss_sum / grpo_batch_tokens if grpo_batch_tokens else 0.0
+            opd_loss_sum = float(
+                opd_result_metrics.get("loss:sum", opd_result_metrics.get("loss", 0.0))
+            )
+            opd_per_token_ce = 0.0
+            if opd_topk_datums:
+                opd_batch_tokens = _count_topk_supervision_tokens(
+                    opd_topk_datums, topk=self.config.topk,
+                )
+                opd_per_token_ce = opd_loss_sum / float(opd_batch_tokens)
+
+            metrics.update(
+                {
+                    "combined/grpo_loss": grpo_loss,
+                    "combined/grpo_loss_sum": grpo_loss_sum,
+                    "combined/opd_loss": opd_per_token_ce,
+                    "combined/opd_loss_sum": opd_loss_sum,
+                    "grpo/num_datums": float(len(grpo_datums)),
+                    "grpo/num_tokens": float(grpo_batch_tokens),
+                    "opd/num_datums": float(len(opd_topk_datums)),
+                    "opd/per_token_ce": opd_per_token_ce,
+                    "learning_rate": learning_rate,
+                    "progress": step / max(total_steps, 1),
+                    **{f"grpo/{k}": v for k, v in grpo_result_metrics.items()},
+                    **{f"opd/{k}": v for k, v in opd_result_metrics.items()},
+                }
+            )
+
+            # Refresh student sampling client onto the just-updated weights.
+            self.sampling_client = (
+                await self.training_client.save_weights_and_get_sampling_client_async()
+            )
+            self.logger.info(
+                "Combined step %d: grpo_datums=%d opd_datums=%d grpo_loss=%.4f opd_ce=%.4f",
+                step, len(grpo_datums), len(opd_topk_datums), grpo_loss, opd_per_token_ce,
+            )
+
+        metrics.update(window.get_timing_metrics())
+        window.write_spans_jsonl(Path(self.log_path) / "timing_spans.jsonl", step=step)
+        if self.config.span_chart_every > 0 and step % self.config.span_chart_every == 0:
+            trace.save_gantt_chart_html(
+                window, step, Path(self.log_path) / f"timing_gantt_{step:06d}.html"
+            )
+        self.ml_logger.log_metrics(metrics, step=step)
+
+        self.step_idx += 1
+
+    async def stop(self):
+        self.ml_logger.close()
+        self.logger.info("Combined GRPO+OPD trainer terminated")

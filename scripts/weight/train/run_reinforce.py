@@ -117,6 +117,10 @@ class Config:
     log_rollout_samples: bool = True
     rollout_sample_log_chars: int = 4000
 
+    # Online GRPO (server ``mode="grpo"`` / ``mode="grpo_opd"``): number of
+    # on-policy episodes to sample for each prompt before group-centering rewards.
+    grpo_group_size: int = 4
+
 
 # ---------------------------------------------------------------------------
 # .env loader
@@ -512,6 +516,119 @@ async def train_reinforce_batch_async(
         **backward_result.metrics,
     }
     return metrics, new_baseline
+
+
+# ---------------------------------------------------------------------------
+# GRPO (grouped on-policy REINFORCE with importance sampling)
+# ---------------------------------------------------------------------------
+
+def compute_grpo_group_advantages(rewards: list[float]) -> list[float] | None:
+    """Return group-centered advantages, or None when the group has no signal."""
+    if len(rewards) < 2:
+        return None
+    mean_reward = sum(rewards) / len(rewards)
+    advantages = [reward - mean_reward for reward in rewards]
+    if all(abs(adv) < 1e-8 for adv in advantages):
+        return None
+    return advantages
+
+
+def build_grpo_importance_sampling_datum(
+    prompt_input: tinker.ModelInput,
+    tokens: list[int],
+    logprobs: list[float],
+    advantage: float,
+    max_length: int | None,
+) -> tinker.Datum | None:
+    """Build one Tinker importance-sampling datum for a sampled assistant turn."""
+    if not tokens or len(tokens) != len(logprobs):
+        return None
+    prompt_tokens = list(prompt_input.to_ints())
+    if not prompt_tokens:
+        return None
+
+    model_input_tokens = prompt_tokens + tokens[:-1]
+    if max_length is not None and len(model_input_tokens) > max_length:
+        return None
+
+    prefix_len = len(prompt_tokens) - 1
+    target_tokens = [0] * prefix_len + [int(t) for t in tokens]
+    old_logprobs = [0.0] * prefix_len + [float(lp) for lp in logprobs]
+    advantages = [0.0] * prefix_len + [float(advantage)] * len(tokens)
+
+    if not (
+        len(model_input_tokens)
+        == len(target_tokens)
+        == len(old_logprobs)
+        == len(advantages)
+    ):
+        return None
+
+    return tinker.Datum(
+        model_input=tinker.ModelInput.from_ints(model_input_tokens),
+        loss_fn_inputs={
+            "target_tokens": tinker.TensorData(
+                data=target_tokens,
+                dtype="int64",
+                shape=[len(target_tokens)],
+            ),
+            "logprobs": tinker.TensorData(
+                data=old_logprobs,
+                dtype="float32",
+                shape=[len(old_logprobs)],
+            ),
+            "advantages": tinker.TensorData(
+                data=advantages,
+                dtype="float32",
+                shape=[len(advantages)],
+            ),
+        },
+    )
+
+
+async def train_grpo_batch_async(
+    *,
+    training_client: tinker.TrainingClient,
+    datums: list[tinker.Datum],
+    config: Config,
+    step: int,
+    total_steps: int,
+    extra_metrics: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """Forward-backward + optim for one GRPO importance-sampling batch."""
+    learning_rate = config.learning_rate * compute_schedule_lr_multiplier(
+        lr_schedule=config.lr_schedule, step=step, total_steps=total_steps,
+    )
+    adam_params = tinker.AdamParams(
+        learning_rate=learning_rate,
+        beta1=config.adam_beta1,
+        beta2=config.adam_beta2,
+        eps=config.adam_eps,
+    )
+    fb_future = await training_client.forward_backward_async(
+        datums,
+        loss_fn="importance_sampling",
+    )
+    backward_result = await fb_future.result_async()
+    optim_future = await training_client.optim_step_async(adam_params)
+    await optim_future.result_async()
+
+    result_metrics = backward_result.metrics
+    if not isinstance(result_metrics, dict):
+        try:
+            result_metrics = dict(result_metrics.items())
+        except Exception:
+            result_metrics = {}
+
+    metrics: dict[str, float] = {
+        "learning_rate": learning_rate,
+        "progress": step / max(total_steps, 1),
+        "num_trajectories": float(len(datums)),
+        "num_tokens": float(sum(d.model_input.length for d in datums)),
+        **(extra_metrics or {}),
+        **result_metrics,
+    }
+    return metrics
 
 
 def _config_from_cli(

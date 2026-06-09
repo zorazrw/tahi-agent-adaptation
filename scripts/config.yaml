@@ -1,5 +1,5 @@
 # -- Mode --
-mode: opd  # "dpo", "opd", or "reinforce"
+mode: grpo_opd  # "dpo", "opd", "reinforce", or "grpo_opd"
 
 # -- Inference --
 temperature: 0.3
@@ -12,7 +12,7 @@ update_every_n_sessions: 12
 lora_rank: 64
 dry_run: false
 learning_rate: 1.0e-4
-num_epochs: 6
+num_epochs: 4
 batch_size: 4
 lr_schedule: cosine
 max_steps: null
@@ -58,6 +58,16 @@ opd_agentic_max_steps: 6             # max planned (leaf) steps replayed as "Pro
 opd_agentic_enable_bash: true        # allow the bash tool (runs on the server host)
 opd_agentic_tool_timeout_s: 20       # per-bash-command timeout
 opd_agentic_max_trajectory_tokens: 48000   # null = no cap; else stop the rollout near this many tokens
+
+# -- Combined GRPO+OPD (mode: grpo_opd) --
+# Reuses the opd_* agentic rollout + top-K settings above. Per session,
+# grpo_group_size on-policy episodes are sampled once and reused for BOTH the
+# GRPO importance-sampling loss and the OPD top-K cross-entropy loss; the two
+# halves are combined in a single optimizer step, weighted by lambda_grpo /
+# lambda_opd. Requires opd_extract_version: agentic.
+grpo_group_size: 4
+lambda_grpo: 1.0
+lambda_opd: 1.0
 
 # -- REINFORCE-specific --
 reinforce_version: online  # "offline" (logged trajectories + cached rubric rewards)

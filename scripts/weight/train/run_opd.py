@@ -67,6 +67,11 @@ except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
         extract_opd_examples_v2,
     )
 
+try:
+    from weight.data.reward import grade_sandbox_rubrics  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
+    from ..data.reward import grade_sandbox_rubrics
+
 from .formatter import OfflineOPDDataset, _hydrate_tool_calls, _load_sessions
 from .tool_rollout_env import (
     FileToolset,
@@ -76,6 +81,40 @@ from .tool_rollout_env import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _sequence_logprobs(sequence: Any, n_tokens: int) -> list[float] | None:
+    """Best-effort extraction of per-sampled-token logprobs from Tinker output.
+
+    Local copy of the helper in ``reinforce_rollout`` to avoid a circular import
+    (``reinforce_rollout`` already imports from this module).
+    """
+    raw = getattr(sequence, "logprobs", None)
+    if raw is None:
+        raw = getattr(sequence, "token_logprobs", None)
+    if raw is None:
+        return None
+
+    values: list[float] = []
+    for item in list(raw):
+        if item is None:
+            values.append(0.0)
+        elif isinstance(item, (int, float)):
+            values.append(float(item))
+        elif isinstance(item, dict):
+            val = item.get("logprob", item.get("log_prob"))
+            if not isinstance(val, (int, float)):
+                return None
+            values.append(float(val))
+        else:
+            val = getattr(item, "logprob", getattr(item, "log_prob", None))
+            if not isinstance(val, (int, float)):
+                return None
+            values.append(float(val))
+
+    if len(values) != n_tokens:
+        return None
+    return values
 
 
 def _metrics_dict_from_result(metrics: Any) -> dict[str, Any]:
@@ -203,6 +242,15 @@ class Config:
     # flattens teacher probs, raises effective teacher entropy, makes KD less
     # like hard-label SFT.  τ=1.5–2.0 recommended when teacher entropy < 0.5 nat.
     teacher_temperature: float = 1.0
+
+    # Combined GRPO+OPD trainer (server ``mode="grpo_opd"``).  ``grpo_group_size``
+    # on-policy episodes are sampled per session and reused for both the GRPO
+    # importance-sampling loss and the OPD top-K cross-entropy loss; ``lambda_*``
+    # weight the two halves before a single optimizer step (applied by scaling
+    # GRPO advantages and OPD top-K weights respectively).
+    grpo_group_size: int = 4
+    lambda_grpo: float = 1.0
+    lambda_opd: float = 1.0
 
     # Online artifact-only rollout.  When enabled, the historical artifact
     # completion is used only to identify the expected output path; student
@@ -1224,6 +1272,7 @@ class OnlineOPDRolloutDataset:
                     "system_prompt": ex.get("system_prompt", "") or "",
                     "tool_schemas": ex.get("tool_schemas"),
                     "golden_chat": _hydrate_tool_calls(ex.get("golden_chat") or []),
+                    "rubrics": ex.get("rubrics") or [],
                     "meta": ex.get("meta") or {},
                 })
             self._rows = rows
@@ -1862,6 +1911,8 @@ async def _rollout_one_agentic_episode(
     max_trajectory_tokens: int | None,
     max_length: int | None,
     collect_transcript: bool = False,
+    collect_sampling_trace: bool = False,
+    grade_reward: bool = False,
     log_field_chars: int = 2000,
 ) -> tuple[
     tinker.Datum | None, tinker.Datum | None, dict[str, float], dict[str, Any] | None
@@ -1880,6 +1931,7 @@ async def _rollout_one_agentic_episode(
     tools_prefix = list(_session_tools_prefix(system_prompt, tool_schemas, renderer))
     prompt_messages = list(row["prompt_messages"])
     initial_messages = tools_prefix + prompt_messages
+    rubrics = [str(r) for r in (row.get("rubrics") or [])]
 
     sandbox = WorkspaceSandbox(bash_timeout_s=tool_timeout_s)
     metrics_local: dict[str, float] = {}
@@ -1902,6 +1954,8 @@ async def _rollout_one_agentic_episode(
         n_tool_calls = 0
         parse_failed = False
         overflow = False
+        missing_logprobs = False
+        sampling_traces: list[dict[str, Any]] = []
 
         async def run_segment() -> None:
             """Drive the current user-turn segment to a no-tool assistant turn.
@@ -1909,7 +1963,7 @@ async def _rollout_one_agentic_episode(
             Sets ``parse_failed`` / ``overflow`` on abort.  Mutates the shared
             ``history`` (== ``msg_env.history``) in place.
             """
-            nonlocal n_turns, n_tool_calls, parse_failed, overflow, history
+            nonlocal n_turns, n_tool_calls, parse_failed, overflow, missing_logprobs, history
             for _ in range(max_turns_per_step):
                 if msg_env._turn_count >= max_turns:
                     return
@@ -1931,7 +1985,20 @@ async def _rollout_one_agentic_episode(
                         temperature=temperature,
                     ),
                 )
-                tokens = list(result.sequences[0].tokens)
+                sequence = result.sequences[0]
+                tokens = list(sequence.tokens)
+                if collect_sampling_trace:
+                    logprobs = _sequence_logprobs(sequence, len(tokens))
+                    if logprobs is None:
+                        missing_logprobs = True
+                        return
+                    sampling_traces.append(
+                        {
+                            "prompt_input": prompt_input,
+                            "tokens": tokens,
+                            "logprobs": logprobs,
+                        }
+                    )
                 message, ok = renderer.parse_response(tokens)
                 if not ok:
                     parse_failed = True
@@ -1965,7 +2032,7 @@ async def _rollout_one_agentic_episode(
         # Derive the step queries from the model's OWN plan and replay them as
         # subsequent user turns in the same sandbox.
         n_steps = 0
-        if not parse_failed and not overflow:
+        if not parse_failed and not overflow and not missing_logprobs:
             tasks = _extract_workflow_plan_tasks(history)
             step_prompts = (
                 _plan_step_prompts(tasks, sandbox.root, max_steps) if tasks else []
@@ -1983,19 +2050,22 @@ async def _rollout_one_agentic_episode(
 
         if overflow:
             metrics_local["agentic/context_overflow"] = 1.0
+        if missing_logprobs:
+            metrics_local["agentic/missing_logprobs"] = 1.0
 
         def _episode_log(drop_reason: str | None, *, valid: bool) -> dict[str, Any] | None:
-            if not collect_transcript:
+            if not collect_transcript and not collect_sampling_trace:
                 return None
             return {
                 "messages": _agentic_messages_to_log(
                     history, max_field_chars=log_field_chars
-                ),
+                ) if collect_transcript else [],
                 "drop_reason": drop_reason,
                 "valid": valid,
                 "n_turns": n_turns,
                 "n_steps": n_steps,
                 "n_tool_calls": n_tool_calls,
+                "sampling_traces": sampling_traces if collect_sampling_trace else [],
             }
 
         trajectory_tail = list(history[len(initial_messages):])
@@ -2008,9 +2078,27 @@ async def _rollout_one_agentic_episode(
             drop_reason = (
                 "parse_failed" if parse_failed
                 else "context_overflow" if overflow
+                else "missing_logprobs" if missing_logprobs
                 else "empty_trajectory"
             )
             return None, None, metrics_local, _episode_log(drop_reason, valid=False)
+        if missing_logprobs:
+            return None, None, metrics_local, _episode_log("missing_logprobs", valid=False)
+
+        if grade_reward:
+            # Isolate grading: a judge/API/parse failure must not abort the whole
+            # training round. On failure leave ``reinforce/reward`` unset so the
+            # episode is simply ineligible for GRPO (OPD is unaffected).
+            try:
+                metrics_local["reinforce/reward"] = await grade_sandbox_rubrics(
+                    sandbox, rubrics,
+                )
+            except Exception as grade_exc:  # noqa: BLE001 - degrade, don't crash
+                logger.warning(
+                    "grading failed (session=%s): %s",
+                    (row.get("meta") or {}).get("session_uuid"),
+                    grade_exc,
+                )
 
         # The env-produced messages already carry renderer-native ToolCall
         # objects (from renderer.parse_response), so they must NOT be re-hydrated.
@@ -2177,6 +2265,276 @@ async def _sample_agentic_opd_datums_async(
         metrics["agentic/mean_tool_calls"] = agg_tool_calls / n_valid
         metrics["agentic/mean_steps"] = agg_steps / n_valid
     return student_datums, teacher_datums, metrics
+
+
+def _scale_topk_weights(
+    datums: list[tinker.Datum], scale: float,
+) -> list[tinker.Datum]:
+    """Return copies of top-K datums with their CE ``weights`` multiplied by ``scale``.
+
+    Scaling the per-token teacher-probability weights scales the cross_entropy
+    loss (and therefore its gradient) linearly, which is how the OPD half is
+    weighted relative to the GRPO half in the combined trainer.
+    """
+    if scale == 1.0:
+        return datums
+    scaled: list[tinker.Datum] = []
+    for d in datums:
+        w = d.loss_fn_inputs["weights"]
+        wt = torch.as_tensor(w.data, dtype=torch.float32) * float(scale)
+        new_inputs = dict(d.loss_fn_inputs)
+        new_inputs["weights"] = tinker.TensorData.from_torch(wt)
+        scaled.append(
+            tinker.Datum(model_input=d.model_input, loss_fn_inputs=new_inputs)
+        )
+    return scaled
+
+
+async def _sample_combined_grpo_opd_datums_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    teacher_client: tinker.SamplingClient,
+    *,
+    group_size: int,
+    topk: int,
+    max_context_length: int,
+    vocab_size: int | None,
+    teacher_temperature: float,
+    lambda_grpo: float,
+    lambda_opd: float,
+    max_tokens: int,
+    temperature: float,
+    max_turns: int,
+    max_turns_per_step: int,
+    max_steps: int,
+    enable_bash: bool,
+    tool_timeout_s: int,
+    max_trajectory_tokens: int | None,
+    max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+    sample_log_chars: int = 4000,
+) -> tuple[list[tinker.Datum], list[tinker.Datum], dict[str, float]]:
+    """One shared agentic group-rollout feeding both GRPO and OPD.
+
+    Samples ``group_size`` on-policy agentic episodes per session. Each valid
+    episode yields (a) per-turn sampling traces + a graded reward for GRPO, and
+    (b) a (student, teacher) datum pair (teacher prompt carries the session
+    follow-ups) for OPD top-K distillation.
+
+    Returns ``(grpo_is_datums, opd_topk_datums, metrics)``.  GRPO advantages are
+    pre-scaled by ``lambda_grpo`` and OPD top-K weights by ``lambda_opd`` so the
+    two stock Tinker loss functions (``importance_sampling`` / ``cross_entropy``)
+    need no modification.
+    """
+    # Lazy import avoids a module-load circular import (run_reinforce imports
+    # _format_agentic_transcript from this module).
+    try:
+        from weight.train.run_reinforce import (  # type: ignore[import-not-found]
+            build_grpo_importance_sampling_datum,
+            compute_grpo_group_advantages,
+        )
+    except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
+        from .run_reinforce import (
+            build_grpo_importance_sampling_datum,
+            compute_grpo_group_advantages,
+        )
+
+    group_size = max(1, int(group_size))
+    indexed: list[tuple[int, int, dict[str, Any]]] = [
+        (row_idx, sample_idx, row)
+        for row_idx, row in enumerate(rows)
+        for sample_idx in range(group_size)
+    ]
+    # ``return_exceptions=True`` so one rollout blowing up (e.g. an unhandled
+    # sandbox/tool error) degrades to dropping that single episode instead of
+    # cancelling every other in-flight rollout and aborting the round.
+    results = await asyncio.gather(*[
+        _rollout_one_agentic_episode(
+            row,
+            renderer,
+            sampling_client,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_turns=max_turns,
+            max_turns_per_step=max_turns_per_step,
+            max_steps=max_steps,
+            enable_bash=enable_bash,
+            tool_timeout_s=tool_timeout_s,
+            max_trajectory_tokens=max_trajectory_tokens,
+            max_length=max_length,
+            collect_transcript=sample_log_path is not None,
+            collect_sampling_trace=True,
+            grade_reward=True,
+            log_field_chars=sample_log_chars,
+        )
+        for _, _, row in indexed
+    ], return_exceptions=True)
+
+    # Bucket per-session episodes. Each item carries everything both halves need.
+    groups: list[list[dict[str, Any]]] = [[] for _ in rows]
+    sample_records: list[dict[str, Any]] = []
+    n_rollout_errors = 0
+    for (row_idx, sample_idx, row), result in zip(indexed, results, strict=True):
+        if isinstance(result, BaseException):
+            n_rollout_errors += 1
+            logger.warning(
+                "combined rollout step=%d session=%s sample=%d/%d failed: %s",
+                step,
+                (row.get("meta") or {}).get("session_uuid"),
+                sample_idx + 1,
+                group_size,
+                result,
+            )
+            continue
+        sd, td, m, episode_log = result
+        reward = m.get("reinforce/reward")
+        traces = (episode_log or {}).get("sampling_traces") or []
+        meta = row.get("meta") or {}
+        drop_reason = (episode_log or {}).get("drop_reason")
+        valid = sd is not None and td is not None
+        if not valid and not drop_reason:
+            drop_reason = "dropped"
+
+        logger.info(
+            "combined rollout step=%d session=%s sample=%d/%d valid=%s reward=%s drop=%s",
+            step,
+            meta.get("session_uuid"),
+            sample_idx + 1,
+            group_size,
+            valid,
+            reward,
+            drop_reason or "-",
+        )
+
+        rec = {
+            "step": step,
+            "session_uuid": meta.get("session_uuid"),
+            "sample_idx": sample_idx,
+            "valid": valid,
+            "reward": reward,
+            "drop_reason": drop_reason,
+            "turns": m.get("agentic/turns"),
+            "steps": m.get("agentic/steps"),
+            "tool_calls": m.get("agentic/tool_calls"),
+            "messages": (episode_log or {}).get("messages") or [],
+        }
+        sample_records.append(rec)
+        if valid:
+            groups[row_idx].append(
+                {
+                    "reward": float(reward) if reward is not None else None,
+                    "traces": traces,
+                    "student_datum": sd,
+                    "teacher_datum": td,
+                }
+            )
+
+    # --- OPD half: collect every valid (student, teacher) pair -------------
+    opd_student_datums: list[tinker.Datum] = []
+    opd_teacher_datums: list[tinker.Datum] = []
+    for group in groups:
+        for item in group:
+            opd_student_datums.append(item["student_datum"])
+            opd_teacher_datums.append(item["teacher_datum"])
+
+    # --- GRPO half: group-centered advantages -> IS datums ----------------
+    grpo_datums: list[tinker.Datum] = []
+    valid_episodes = 0
+    trained_episodes = 0
+    skipped_small = 0
+    skipped_constant = 0
+    reward_sum = 0.0
+    abs_adv_sum = 0.0
+    adv_count = 0
+    for group in groups:
+        grpo_eligible = [it for it in group if it["reward"] is not None and it["traces"]]
+        valid_episodes += len(grpo_eligible)
+        reward_sum += sum(float(it["reward"]) for it in grpo_eligible)
+        if len(grpo_eligible) < 2:
+            skipped_small += 1
+            continue
+        rewards = [float(it["reward"]) for it in grpo_eligible]
+        advantages = compute_grpo_group_advantages(rewards)
+        if advantages is None:
+            skipped_constant += 1
+            continue
+        for item, advantage in zip(grpo_eligible, advantages, strict=True):
+            episode_datums_before = len(grpo_datums)
+            for trace_rec in item["traces"]:
+                datum = build_grpo_importance_sampling_datum(
+                    trace_rec["prompt_input"],
+                    [int(t) for t in trace_rec["tokens"]],
+                    [float(lp) for lp in trace_rec["logprobs"]],
+                    advantage * lambda_grpo,
+                    max_length,
+                )
+                if datum is not None:
+                    grpo_datums.append(datum)
+            if len(grpo_datums) > episode_datums_before:
+                trained_episodes += 1
+                abs_adv_sum += abs(float(advantage))
+                adv_count += 1
+
+    # --- OPD top-K teacher distillation -----------------------------------
+    opd_topk_datums: list[tinker.Datum] = []
+    topk_metrics: dict[str, float] = {}
+    if opd_student_datums:
+        opd_topk_datums, topk_metrics = await _build_agentic_topk_datums_async(
+            opd_student_datums,
+            opd_teacher_datums,
+            teacher_client,
+            topk=topk,
+            max_context_length=max_context_length,
+            vocab_size=vocab_size,
+            teacher_temperature=teacher_temperature,
+        )
+        opd_topk_datums = _scale_topk_weights(opd_topk_datums, lambda_opd)
+
+    # --- Optional sample logging ------------------------------------------
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with sample_log_path.open("a", encoding="utf-8") as sample_log_f:
+            transcript_f = sample_log_path.with_name(
+                "combined_rollout_transcripts.txt"
+            ).open("a", encoding="utf-8")
+            try:
+                for rec in sample_records:
+                    sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    transcript_f.write(_format_agentic_transcript(rec) + "\n")
+                sample_log_f.flush()
+                transcript_f.flush()
+            finally:
+                transcript_f.close()
+
+    total_episodes = len(rows) * group_size
+    metrics: dict[str, float] = {
+        "combined/batch_prompts": float(len(rows)),
+        "combined/group_size": float(group_size),
+        "combined/batch_episodes": float(total_episodes),
+        "combined/rollout_errors": float(n_rollout_errors),
+        "grpo_online/valid_episodes": float(valid_episodes),
+        "grpo_online/trained_episodes": float(trained_episodes),
+        "grpo_online/skipped_small_groups": float(skipped_small),
+        "grpo_online/skipped_constant_groups": float(skipped_constant),
+        "grpo_online/train_datums": float(len(grpo_datums)),
+        "grpo_online/filter_rate": (
+            1.0 - valid_episodes / total_episodes if total_episodes else 0.0
+        ),
+        "opd_online/batch_examples": float(total_episodes),
+        "opd_online/valid_examples": float(len(opd_student_datums)),
+        "opd_online/train_datums": float(len(opd_topk_datums)),
+        "opd_online/filter_rate": (
+            1.0 - len(opd_student_datums) / total_episodes if total_episodes else 0.0
+        ),
+        **topk_metrics,
+    }
+    if valid_episodes:
+        metrics["grpo_online/mean_reward"] = reward_sum / valid_episodes
+    if adv_count:
+        metrics["grpo_online/mean_abs_advantage"] = abs_adv_sum / adv_count
+    return grpo_datums, opd_topk_datums, metrics
 
 
 async def _build_agentic_topk_datums_async(

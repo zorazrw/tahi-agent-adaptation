@@ -40,6 +40,36 @@ from .tool_rollout_env import (
 logger = logging.getLogger(__name__)
 
 
+def _sequence_logprobs(sequence: Any, n_tokens: int) -> list[float] | None:
+    """Best-effort extraction of per-sampled-token logprobs from Tinker output."""
+    raw = getattr(sequence, "logprobs", None)
+    if raw is None:
+        raw = getattr(sequence, "token_logprobs", None)
+    if raw is None:
+        return None
+
+    values: list[float] = []
+    for item in list(raw):
+        if item is None:
+            values.append(0.0)
+        elif isinstance(item, (int, float)):
+            values.append(float(item))
+        elif isinstance(item, dict):
+            val = item.get("logprob", item.get("log_prob"))
+            if not isinstance(val, (int, float)):
+                return None
+            values.append(float(val))
+        else:
+            val = getattr(item, "logprob", getattr(item, "log_prob", None))
+            if not isinstance(val, (int, float)):
+                return None
+            values.append(float(val))
+
+    if len(values) != n_tokens:
+        return None
+    return values
+
+
 async def rollout_one_reinforce_episode(
     row: dict[str, Any],
     renderer: renderers.Renderer,
@@ -55,6 +85,7 @@ async def rollout_one_reinforce_episode(
     max_trajectory_tokens: int | None,
     max_length: int | None,
     collect_transcript: bool = False,
+    collect_sampling_trace: bool = False,
     log_field_chars: int = 2000,
 ) -> tuple[tinker.Datum | None, dict[str, float], dict[str, Any] | None]:
     """One agentic episode → (student datum, metrics, optional transcript log)."""
@@ -84,9 +115,11 @@ async def rollout_one_reinforce_episode(
         n_tool_calls = 0
         parse_failed = False
         overflow = False
+        missing_logprobs = False
+        sampling_traces: list[dict[str, Any]] = []
 
         async def run_segment() -> None:
-            nonlocal n_turns, n_tool_calls, parse_failed, overflow, history
+            nonlocal n_turns, n_tool_calls, parse_failed, overflow, missing_logprobs, history
             for _ in range(max_turns_per_step):
                 if msg_env._turn_count >= max_turns:
                     return
@@ -108,7 +141,20 @@ async def rollout_one_reinforce_episode(
                         temperature=temperature,
                     ),
                 )
-                tokens = list(result.sequences[0].tokens)
+                sequence = result.sequences[0]
+                tokens = list(sequence.tokens)
+                if collect_sampling_trace:
+                    logprobs = _sequence_logprobs(sequence, len(tokens))
+                    if logprobs is None:
+                        missing_logprobs = True
+                        return
+                    sampling_traces.append(
+                        {
+                            "prompt_input": prompt_input,
+                            "tokens": tokens,
+                            "logprobs": logprobs,
+                        }
+                    )
                 message, ok = renderer.parse_response(tokens)
                 if not ok:
                     parse_failed = True
@@ -136,7 +182,7 @@ async def rollout_one_reinforce_episode(
         await run_segment()
 
         n_plan_steps = 0
-        if not parse_failed and not overflow:
+        if not parse_failed and not overflow and not missing_logprobs:
             tasks = _extract_workflow_plan_tasks(history)
             step_prompts = (
                 _plan_step_prompts(tasks, sandbox.root, max_steps) if tasks else []
@@ -154,19 +200,22 @@ async def rollout_one_reinforce_episode(
 
         if overflow:
             metrics_local["agentic/context_overflow"] = 1.0
+        if missing_logprobs:
+            metrics_local["agentic/missing_logprobs"] = 1.0
 
         def _episode_log(drop_reason: str | None, *, valid: bool) -> dict[str, Any] | None:
-            if not collect_transcript:
+            if not collect_transcript and not collect_sampling_trace:
                 return None
             return {
                 "messages": _agentic_messages_to_log(
                     history, max_field_chars=log_field_chars
-                ),
+                ) if collect_transcript else [],
                 "drop_reason": drop_reason,
                 "valid": valid,
                 "n_turns": n_turns,
                 "n_steps": n_plan_steps,
                 "n_tool_calls": n_tool_calls,
+                "sampling_traces": sampling_traces if collect_sampling_trace else [],
             }
 
         trajectory_tail = list(history[len(initial_messages):])
@@ -177,9 +226,12 @@ async def rollout_one_reinforce_episode(
             drop_reason = (
                 "parse_failed" if parse_failed
                 else "context_overflow" if overflow
+                else "missing_logprobs" if missing_logprobs
                 else "empty_trajectory"
             )
             return None, metrics_local, _episode_log(drop_reason, valid=False)
+        if missing_logprobs:
+            return None, metrics_local, _episode_log("missing_logprobs", valid=False)
 
         mean_r = await grade_sandbox_rubrics(sandbox, rubrics)
         metrics_local["reinforce/reward"] = mean_r
