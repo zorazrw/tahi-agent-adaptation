@@ -686,6 +686,16 @@ def extract_opd_examples(
     examples: list[dict[str, Any]] = []
 
     for session in sessions:
+        final_rubrics = []
+        for u in reversed(session.get("task_units", []) or []):
+            final_rubrics = [
+                str(r.get("criterion"))
+                for r in (u.get("verifiers") or [])
+                if isinstance(r, dict) and r.get("criterion")
+            ]
+            if final_rubrics:
+                break
+
         file_index = _build_file_version_index(
             session,
             session.get("system_prompt", ""),
@@ -757,6 +767,15 @@ def extract_opd_examples(
                     "teacher_prompt": teacher_prompt,
                     "completion": completion,
                     "is_agent": is_agent,
+                    "rubrics": final_rubrics,
+                    "meta": {
+                        "session_uuid": session.get("uuid"),
+                        "instruction": session.get("initial_task_instruction"),
+                        "artifact_path": v["path"],
+                        "artifact_key": v["path"].split("/")[-1].split("\\")[-1],
+                        "unit_idx": v_unit,
+                        "round_idx": v_round,
+                    },
                 })
 
     return examples

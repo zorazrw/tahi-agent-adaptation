@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import random
+import time
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -52,12 +53,22 @@ from tinker_cookbook.utils.misc_utils import iteration_dir
 
 from .formatter import WeightReinforceDataBuilder, _hydrate_tool_calls, _load_sessions
 from .reinforce_rollout import rollout_one_reinforce_episode
-from .run_opd import _format_agentic_transcript
+from .run_opd import (
+    _completion_expected_path,
+    _datum_from_prompt_and_assistant_message,
+    _format_agentic_transcript,
+    _parse_valid_artifact_write_message,
+    _summarize_sample,
+    _tool_call_name_and_args,
+    _with_artifact_only_instruction,
+)
 
 try:
-    from weight.data.extract import extract_reinforce_rollout_seeds
+    from weight.data.extract import extract_opd_examples, extract_reinforce_rollout_seeds
+    from weight.data.reward import _parse_rubric_results_json
 except ModuleNotFoundError:
-    from ..data.extract import extract_reinforce_rollout_seeds
+    from ..data.extract import extract_opd_examples, extract_reinforce_rollout_seeds
+    from ..data.reward import _parse_rubric_results_json
 
 logger = logging.getLogger(__name__)
 BASELINE_STATE_FILENAME = "reinforce_baseline_state.json"
@@ -73,7 +84,7 @@ class Config:
 
     # ``offline``: logged trajectories + cached rubric rewards (default).
     # ``online``: on-policy agentic rollout + live sandbox LLM rubric reward.
-    reinforce_version: Literal["offline", "online"] = "offline"
+    reinforce_version: Literal["offline", "online", "artifact", "grpo-artifact"] = "offline"
     max_length: int | None = None
 
     load_checkpoint_path: str | None = None
@@ -116,6 +127,20 @@ class Config:
     agentic_max_trajectory_tokens: int | None = None
     log_rollout_samples: bool = True
     rollout_sample_log_chars: int = 4000
+
+    # Online artifact-only rollout (``artifact`` / ``grpo-artifact``).
+    rollout_attempts: int = 1
+    pair_mode: str = "first_last"
+    use_gt: bool = True
+    use_student: bool = True
+    artifact_only_rollout_instruction: bool = False
+    grader_model_name: str | None = None
+    grader_renderer_name: str | None = None
+    grader_max_tokens: int = 1024
+    grader_max_file_chars: int = 14000
+    grader_temperature: float = 0.0
+    verifier_path: str | None = None
+    grpo_group_size: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +339,520 @@ def do_update(
             trace.save_gantt_chart_html(window, step, iter_dir / "timing_gantt.html")
     ml_logger.log_metrics(metrics=metrics, step=step)
     return metrics, new_baseline
+
+
+# ---------------------------------------------------------------------------
+# Online artifact-only rollout + Tinker grader
+# ---------------------------------------------------------------------------
+
+def _load_verifier_catalog(path: str | None) -> dict[str, list[str]]:
+    """Load optional verifiers.json and index by uuid and instruction text."""
+    if not path:
+        return {}
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise FileNotFoundError(f"Verifier catalog not found: {p}")
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    rows = payload if isinstance(payload, list) else payload.get("items", [])
+    out: dict[str, list[str]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        rubrics = [str(v) for v in (row.get("verifiers") or []) if str(v).strip()]
+        if not rubrics:
+            continue
+        uuid = row.get("uuid")
+        instruction = row.get("instruction")
+        if isinstance(uuid, str) and uuid.strip():
+            out[uuid.strip()] = rubrics
+        if isinstance(instruction, str) and instruction.strip():
+            out[instruction.strip()] = rubrics
+    return out
+
+
+def _rubrics_for_example(
+    ex: dict[str, Any],
+    verifier_catalog: dict[str, list[str]],
+) -> list[str]:
+    meta = ex.get("meta") or {}
+    for key in (meta.get("session_uuid"), meta.get("instruction")):
+        if isinstance(key, str) and key.strip() in verifier_catalog:
+            return verifier_catalog[key.strip()]
+    return [str(r) for r in (ex.get("rubrics") or []) if str(r).strip()]
+
+
+class ArtifactReinforceRolloutDataset:
+    """OPD-style artifact prompts for on-policy REINFORCE/GRPO."""
+
+    def __init__(self, rows: list[dict[str, Any]], batch_size: int):
+        self._rows = rows
+        self._batch_size = batch_size
+        self._indices = list(range(len(rows)))
+
+    @classmethod
+    def from_weight_json(
+        cls,
+        path: str,
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+        *,
+        pair_mode: str = "first_last",
+        use_gt: bool = True,
+        use_student: bool = True,
+        artifact_only_instruction: bool = False,
+        verifier_path: str | None = None,
+    ) -> "ArtifactReinforceRolloutDataset":
+        verifier_catalog = _load_verifier_catalog(verifier_path)
+        examples = extract_opd_examples(
+            _load_sessions(path),
+            renderer=renderer,
+            pair_mode=pair_mode,
+            use_gt=use_gt,
+            use_student=use_student,
+        )
+        rows: list[dict[str, Any]] = []
+        for ex in examples:
+            expected_path = _completion_expected_path(ex.get("completion", []))
+            if expected_path is None:
+                continue
+            student_prompt = ex["student_prompt"]
+            if artifact_only_instruction:
+                student_prompt = _with_artifact_only_instruction(
+                    student_prompt, expected_path,
+                )
+            student_prompt_messages = _hydrate_tool_calls(student_prompt)
+            student_prompt_input = renderer.build_generation_prompt(
+                student_prompt_messages
+            )
+            rubrics = _rubrics_for_example(ex, verifier_catalog)
+            if not rubrics:
+                continue
+            rows.append({
+                "student_prompt_messages": student_prompt_messages,
+                "student_prompt_input": student_prompt_input,
+                "expected_path": expected_path,
+                "rubrics": rubrics,
+                "meta": ex.get("meta") or {},
+            })
+        logger.info(
+            "Loaded %d artifact REINFORCE rollout examples from %s "
+            "(raw=%d, pair_mode=%s, use_gt=%s, use_student=%s, verifiers=%s)",
+            len(rows), path, len(examples), pair_mode, use_gt, use_student,
+            verifier_path or "weight-json",
+        )
+        dataset = cls(rows, batch_size)
+        dataset._max_length = max_length
+        return dataset
+
+    def __len__(self) -> int:
+        if not self._rows:
+            return 0
+        return (len(self._rows) + self._batch_size - 1) // self._batch_size
+
+    def set_epoch(self, seed: int) -> None:
+        rng = random.Random(seed)
+        self._indices = list(range(len(self._rows)))
+        rng.shuffle(self._indices)
+
+    def get_batch(self, index: int) -> list[dict[str, Any]]:
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        return [self._rows[self._indices[i]] for i in range(start, end)]
+
+
+def _artifact_args_from_message(message: dict[str, Any]) -> dict[str, str] | None:
+    tool_calls = message.get("tool_calls") or []
+    if len(tool_calls) != 1:
+        return None
+    name, args_text = _tool_call_name_and_args(tool_calls[0])
+    if name != "write" or not isinstance(args_text, str):
+        return None
+    try:
+        args = json.loads(args_text)
+    except json.JSONDecodeError:
+        return None
+    path = args.get("path")
+    content = args.get("content")
+    if not isinstance(path, str) or not isinstance(content, str) or not content.strip():
+        return None
+    return {"path": path, "content": content}
+
+
+def _truncate_text(text: str, max_len: int) -> str:
+    return text if len(text) <= max_len else text[:max_len] + "\n... [truncated]"
+
+
+def _build_artifact_grader_prompt(
+    rubrics: list[str],
+    path: str,
+    content: str,
+    *,
+    max_file_chars: int,
+) -> str:
+    numbered = "\n".join(f"{i}. {r}" for i, r in enumerate(rubrics))
+    body = _truncate_text(content, max_file_chars)
+    return "\n".join([
+        "You are grading a Python script that is intended to generate a final image artifact.",
+        "The verifier lines below were originally written to evaluate the generated image, not the source code directly.",
+        "Given only the script, decide whether running it would likely satisfy each verifier.",
+        'Reply with ONLY JSON of this exact shape: {"results":[{"pass":true},{"pass":false},...]}',
+        "The results array must have exactly one object per verifier line, in the same order.",
+        "",
+        "Verifier lines:",
+        numbered,
+        "",
+        f"Script path: {path}",
+        "Script content:",
+        body,
+    ])
+
+
+async def _grade_artifact_with_tinker(
+    grader_client: tinker.SamplingClient,
+    grader_renderer: renderers.Renderer,
+    rubrics: list[str],
+    artifact: dict[str, str],
+    *,
+    max_tokens: int,
+    max_file_chars: int,
+    temperature: float,
+) -> tuple[float, list[float], str]:
+    if not rubrics:
+        return 1.0, [], "no_rubrics"
+    prompt = _build_artifact_grader_prompt(
+        rubrics,
+        artifact["path"],
+        artifact["content"],
+        max_file_chars=max_file_chars,
+    )
+    prompt_input = grader_renderer.build_generation_prompt([
+        {"role": "user", "content": prompt}
+    ])
+    result = await grader_client.sample_async(
+        prompt=prompt_input,
+        num_samples=1,
+        sampling_params=tinker.SamplingParams(
+            stop=grader_renderer.get_stop_sequences(),
+            max_tokens=max_tokens,
+            temperature=temperature,
+        ),
+    )
+    raw = str(grader_renderer.tokenizer.decode(list(result.sequences[0].tokens)))
+    try:
+        passes, _raw_results = _parse_rubric_results_json(raw, len(rubrics))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Artifact grader parse failed (%s); reward=0.0", exc)
+        return 0.0, [0.0] * len(rubrics), raw
+    scores = [1.0 if p is True else 0.0 for p in passes]
+    return sum(scores) / len(rubrics), scores, raw
+
+
+async def _sample_one_artifact_candidate(
+    row_idx: int,
+    row: dict[str, Any],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    grader_client: tinker.SamplingClient,
+    grader_renderer: renderers.Renderer,
+    *,
+    max_tokens: int,
+    temperature: float,
+    max_length: int | None,
+    grader_max_tokens: int,
+    grader_max_file_chars: int,
+    grader_temperature: float,
+    step: int,
+    attempt_idx: int,
+    sample_log_chars: int,
+) -> dict[str, Any]:
+    result = await sampling_client.sample_async(
+        prompt=row["student_prompt_input"],
+        num_samples=1,
+        sampling_params=tinker.SamplingParams(
+            stop=renderer.get_stop_sequences(),
+            max_tokens=max_tokens,
+            temperature=temperature,
+        ),
+    )
+    tokens = list(result.sequences[0].tokens)
+    expected_path = row["expected_path"]
+    ok, reason, canonical_message = _parse_valid_artifact_write_message(
+        renderer, tokens, expected_path,
+    )
+    rec = _summarize_sample(
+        renderer,
+        tokens,
+        expected_path,
+        ok,
+        reason,
+        row_idx,
+        attempt_idx,
+        step,
+        sample_log_chars,
+    )
+    rec["session_uuid"] = (row.get("meta") or {}).get("session_uuid")
+    rec["artifact_path"] = (row.get("meta") or {}).get("artifact_path")
+    if not ok or canonical_message is None:
+        return {"valid": False, "reason": reason, "record": rec}
+    artifact = _artifact_args_from_message(canonical_message)
+    if artifact is None:
+        return {"valid": False, "reason": "artifact_args_missing", "record": rec}
+    datum = _datum_from_prompt_and_assistant_message(
+        renderer,
+        row["student_prompt_messages"],
+        canonical_message,
+        max_length,
+    )
+    if datum is None:
+        return {"valid": False, "reason": "too_long_or_empty", "record": rec}
+    reward, rubric_scores, grader_raw = await _grade_artifact_with_tinker(
+        grader_client,
+        grader_renderer,
+        [str(r) for r in row.get("rubrics", [])],
+        artifact,
+        max_tokens=grader_max_tokens,
+        max_file_chars=grader_max_file_chars,
+        temperature=grader_temperature,
+    )
+    rec.update({
+        "valid": True,
+        "reward": reward,
+        "rubric_scores": rubric_scores,
+        "grader_raw_preview": grader_raw[:sample_log_chars],
+        "graded_path": artifact["path"],
+    })
+    return {
+        "valid": True,
+        "reason": reason,
+        "datum": datum,
+        "reward": float(reward),
+        "artifact": artifact,
+        "record": rec,
+    }
+
+
+async def _sample_artifact_reinforce_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    grader_client: tinker.SamplingClient,
+    grader_renderer: renderers.Renderer,
+    config: Config,
+    *,
+    max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+) -> tuple[list[tinker.Datum], list[float], dict[str, float]]:
+    datums: list[tinker.Datum] = []
+    rewards: list[float] = []
+    reason_counts: dict[str, int] = {}
+    total_attempts = 0
+    records: list[dict[str, Any]] = []
+
+    pending = list(enumerate(rows))
+    for attempt_idx in range(max(1, config.rollout_attempts)):
+        if not pending:
+            break
+        total_attempts += len(pending)
+        results = await asyncio.gather(*[
+            _sample_one_artifact_candidate(
+                row_idx,
+                row,
+                renderer,
+                sampling_client,
+                grader_client,
+                grader_renderer,
+                max_tokens=config.rollout_max_tokens,
+                temperature=config.rollout_temperature,
+                max_length=max_length,
+                grader_max_tokens=config.grader_max_tokens,
+                grader_max_file_chars=config.grader_max_file_chars,
+                grader_temperature=config.grader_temperature,
+                step=step,
+                attempt_idx=attempt_idx,
+                sample_log_chars=config.rollout_sample_log_chars,
+            )
+            for row_idx, row in pending
+        ])
+        next_pending: list[tuple[int, dict[str, Any]]] = []
+        for (row_idx, row), item in zip(pending, results, strict=True):
+            reason = str(item.get("reason") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            records.append(item["record"])
+            if item.get("valid"):
+                datums.append(item["datum"])
+                rewards.append(float(item["reward"]))
+            else:
+                next_pending.append((row_idx, row))
+        pending = next_pending
+    if pending:
+        reason_counts["example_filtered"] = reason_counts.get("example_filtered", 0) + len(pending)
+
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with sample_log_path.open("a", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    n_rows = float(len(rows))
+    n_valid = float(len(datums))
+    metrics: dict[str, float] = {
+        "artifact_online/batch_examples": n_rows,
+        "artifact_online/valid_examples": n_valid,
+        "artifact_online/filtered_examples": n_rows - n_valid,
+        "artifact_online/filter_rate": (n_rows - n_valid) / max(n_rows, 1.0),
+        "artifact_online/attempts": float(total_attempts),
+    }
+    if rewards:
+        metrics["artifact_online/mean_reward"] = sum(rewards) / len(rewards)
+    for reason, count in reason_counts.items():
+        safe_reason = reason.replace("/", "_").replace(":", "_")
+        metrics[f"artifact_online/filter_reason/{safe_reason}"] = float(count)
+    return datums, rewards, metrics
+
+
+def compute_grpo_group_advantages(rewards: list[float]) -> list[float] | None:
+    """Return group-centered advantages, or None when the group has no signal."""
+    if len(rewards) < 2:
+        return None
+    mean_reward = sum(rewards) / len(rewards)
+    advantages = [reward - mean_reward for reward in rewards]
+    if all(abs(adv) < 1e-8 for adv in advantages):
+        return None
+    return advantages
+
+
+async def _sample_artifact_grpo_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    grader_client: tinker.SamplingClient,
+    grader_renderer: renderers.Renderer,
+    config: Config,
+    *,
+    max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+) -> tuple[list[tinker.Datum], list[float], dict[str, float]]:
+    group_size = max(1, int(config.grpo_group_size))
+    indexed = [
+        (row_idx, sample_idx, row)
+        for row_idx, row in enumerate(rows)
+        for sample_idx in range(group_size)
+    ]
+    results = await asyncio.gather(*[
+        _sample_one_artifact_candidate(
+            row_idx,
+            row,
+            renderer,
+            sampling_client,
+            grader_client,
+            grader_renderer,
+            max_tokens=config.rollout_max_tokens,
+            temperature=config.rollout_temperature,
+            max_length=max_length,
+            grader_max_tokens=config.grader_max_tokens,
+            grader_max_file_chars=config.grader_max_file_chars,
+            grader_temperature=config.grader_temperature,
+            step=step,
+            attempt_idx=sample_idx,
+            sample_log_chars=config.rollout_sample_log_chars,
+        )
+        for row_idx, sample_idx, row in indexed
+    ])
+
+    groups: list[list[dict[str, Any]]] = [[] for _ in rows]
+    records: list[dict[str, Any]] = []
+    valid_episodes = 0
+    reward_sum = 0.0
+    for (row_idx, sample_idx, _row), item in zip(indexed, results, strict=True):
+        rec = item["record"]
+        rec["sample_idx"] = sample_idx
+        records.append(rec)
+        if item.get("valid"):
+            valid_episodes += 1
+            reward_sum += float(item["reward"])
+            groups[row_idx].append(item)
+
+    datums: list[tinker.Datum] = []
+    advantages_out: list[float] = []
+    skipped_small = 0
+    skipped_constant = 0
+    for group in groups:
+        if len(group) < 2:
+            skipped_small += 1
+            continue
+        rewards = [float(item["reward"]) for item in group]
+        advantages = compute_grpo_group_advantages(rewards)
+        if advantages is None:
+            skipped_constant += 1
+            continue
+        for item, advantage in zip(group, advantages, strict=True):
+            datums.append(item["datum"])
+            advantages_out.append(float(advantage))
+
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with sample_log_path.open("a", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    total_episodes = len(rows) * group_size
+    metrics: dict[str, float] = {
+        "grpo_artifact/batch_prompts": float(len(rows)),
+        "grpo_artifact/group_size": float(group_size),
+        "grpo_artifact/batch_episodes": float(total_episodes),
+        "grpo_artifact/valid_episodes": float(valid_episodes),
+        "grpo_artifact/train_datums": float(len(datums)),
+        "grpo_artifact/filter_rate": (
+            1.0 - valid_episodes / total_episodes if total_episodes else 0.0
+        ),
+        "grpo_artifact/skipped_small_groups": float(skipped_small),
+        "grpo_artifact/skipped_constant_groups": float(skipped_constant),
+    }
+    if valid_episodes:
+        metrics["grpo_artifact/mean_reward"] = reward_sum / valid_episodes
+    if advantages_out:
+        metrics["grpo_artifact/mean_abs_advantage"] = (
+            sum(abs(a) for a in advantages_out) / len(advantages_out)
+        )
+    return datums, advantages_out, metrics
+
+
+async def train_policy_gradient_batch_async(
+    *,
+    training_client: tinker.TrainingClient,
+    datums: list[tinker.Datum],
+    advantages: list[float],
+    config: Config,
+    step: int,
+    total_steps: int,
+    extra_metrics: dict[str, float] | None = None,
+) -> dict[str, float]:
+    loss_fn = make_reinforce_loss_fn(advantages)
+    learning_rate = config.learning_rate * compute_schedule_lr_multiplier(
+        lr_schedule=config.lr_schedule, step=step, total_steps=total_steps,
+    )
+    adam_params = tinker.AdamParams(
+        learning_rate=learning_rate,
+        beta1=config.adam_beta1,
+        beta2=config.adam_beta2,
+        eps=config.adam_eps,
+    )
+    fb_future = await training_client.forward_backward_custom_async(datums, loss_fn)
+    backward_result = await fb_future.result_async()
+    optim_future = await training_client.optim_step_async(adam_params)
+    await optim_future.result_async()
+    metrics: dict[str, float] = {
+        "learning_rate": learning_rate,
+        "progress": step / max(total_steps, 1),
+        "num_trajectories": float(len(datums)),
+        "num_tokens": float(sum(d.model_input.length for d in datums)),
+        **(extra_metrics or {}),
+        **backward_result.metrics,
+    }
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +1056,7 @@ async def train_reinforce_batch_async(
 def _config_from_cli(
     args: argparse.Namespace,
     *,
-    reinforce_version: Literal["offline", "online"],
+    reinforce_version: Literal["offline", "online", "artifact", "grpo-artifact"],
     dataset_builder: ChatDatasetBuilder | None,
 ) -> Config:
     return Config(
@@ -555,7 +1094,189 @@ def _config_from_cli(
         agentic_max_trajectory_tokens=args.agentic_max_trajectory_tokens,
         log_rollout_samples=not args.no_log_rollout_samples,
         rollout_sample_log_chars=args.rollout_sample_log_chars,
+        rollout_attempts=args.rollout_attempts,
+        pair_mode=args.pair_mode,
+        use_gt=not args.no_use_gt,
+        use_student=not args.no_use_student,
+        artifact_only_rollout_instruction=args.artifact_only_rollout_instruction,
+        grader_model_name=args.grader_model_name,
+        grader_renderer_name=args.grader_renderer_name,
+        grader_max_tokens=args.grader_max_tokens,
+        grader_max_file_chars=args.grader_max_file_chars,
+        grader_temperature=args.grader_temperature,
+        verifier_path=args.verifier_path,
+        grpo_group_size=args.grpo_group_size,
     )
+
+
+async def run_artifact_policy_training(
+    config: Config,
+    dataset: ArtifactReinforceRolloutDataset,
+) -> None:
+    """Run artifact-only REINFORCE or GRPO with an external Tinker grader."""
+    if not dataset._rows:
+        raise ValueError("No artifact rollout examples (empty train data or no rubrics).")
+    assert config.renderer_name is not None
+
+    renderer = renderers.get_renderer(config.renderer_name, get_tokenizer(config.model_name))
+    grader_model_name = config.grader_model_name or config.model_name
+    grader_renderer_name = config.grader_renderer_name or config.renderer_name
+    grader_renderer = renderers.get_renderer(
+        grader_renderer_name,
+        get_tokenizer(grader_model_name),
+    )
+    ml_logger = ml_log.setup_logging(
+        log_dir=config.log_path,
+        wandb_project=config.wandb_project,
+        wandb_name=config.wandb_name,
+        config=config,
+        do_configure_logging_module=True,
+    )
+    model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
+    model_info.warn_if_renderer_not_recommended(grader_model_name, grader_renderer_name)
+
+    resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
+    start_batch = resume_info.batch if resume_info else 0
+
+    user_metadata: dict[str, str] = {}
+    if wandb_link := ml_logger.get_logger_url():
+        user_metadata["wandb_link"] = wandb_link
+    checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
+
+    service_client = tinker.ServiceClient(base_url=config.base_url)
+    if resume_info:
+        assert resume_info.state_path is not None
+        training_client = service_client.create_training_client_from_state_with_optimizer(
+            resume_info.state_path, user_metadata=user_metadata,
+        )
+    elif config.load_checkpoint_path:
+        training_client = service_client.create_training_client_from_state(
+            config.load_checkpoint_path, user_metadata=user_metadata,
+        )
+    else:
+        training_client = service_client.create_lora_training_client(
+            base_model=config.model_name, rank=config.lora_rank, user_metadata=user_metadata,
+        )
+
+    sampling_client = training_client.save_weights_and_get_sampling_client()
+    grader_client = service_client.create_sampling_client(base_model=grader_model_name)
+    n_batches = len(dataset)
+    total_steps = n_batches * config.num_epochs
+    if config.max_steps is not None:
+        total_steps = min(total_steps, config.max_steps)
+
+    baseline = _load_baseline_state(config.log_path, resume_info)
+    if baseline is None:
+        baseline = float(config.initial_baseline)
+
+    sample_log_path = None
+    if config.log_rollout_samples:
+        sample_name = (
+            "grpo_artifact_rollout_samples.jsonl"
+            if config.reinforce_version == "grpo-artifact"
+            else "reinforce_artifact_rollout_samples.jsonl"
+        )
+        sample_log_path = Path(config.log_path) / sample_name
+
+    logger.info(
+        "%s: %d examples, %d batches x %d epochs (max_steps=%s, grader=%s)",
+        config.reinforce_version,
+        len(dataset._rows),
+        n_batches,
+        config.num_epochs,
+        config.max_steps,
+        grader_model_name,
+    )
+
+    t0 = time.perf_counter()
+    for epoch_idx in range(config.num_epochs):
+        dataset.set_epoch(seed=epoch_idx)
+        for batch_idx in range(start_batch if epoch_idx == 0 else 0, n_batches):
+            step = epoch_idx * n_batches + batch_idx
+            if config.max_steps is not None and step >= config.max_steps:
+                break
+
+            rows = dataset.get_batch(batch_idx)
+            if config.reinforce_version == "grpo-artifact":
+                datums, advantages, rollout_metrics = await _sample_artifact_grpo_async(
+                    rows,
+                    renderer,
+                    sampling_client,
+                    grader_client,
+                    grader_renderer,
+                    config,
+                    max_length=dataset._max_length,
+                    step=step,
+                    sample_log_path=sample_log_path,
+                )
+                no_valid_key = "grpo_artifact/no_valid_batch"
+            else:
+                _save_baseline_state(config.log_path, epoch_idx, batch_idx, baseline)
+                datums, rewards, rollout_metrics = await _sample_artifact_reinforce_async(
+                    rows,
+                    renderer,
+                    sampling_client,
+                    grader_client,
+                    grader_renderer,
+                    config,
+                    max_length=dataset._max_length,
+                    step=step,
+                    sample_log_path=sample_log_path,
+                )
+                advantages = [r - baseline for r in rewards]
+                if rewards:
+                    baseline = sum(rewards) / len(rewards)
+                rollout_metrics["baseline"] = baseline
+                no_valid_key = "artifact_online/no_valid_batch"
+
+            if not datums:
+                ml_logger.log_metrics(
+                    metrics={
+                        no_valid_key: 1.0,
+                        "progress": step / max(total_steps, 1),
+                        **rollout_metrics,
+                    },
+                    step=step,
+                )
+                logger.warning("Skipping step %d: no trainable artifact samples", step)
+                continue
+
+            step_metrics = await train_policy_gradient_batch_async(
+                training_client=training_client,
+                datums=datums,
+                advantages=advantages,
+                config=config,
+                step=step,
+                total_steps=total_steps,
+                extra_metrics=rollout_metrics,
+            )
+            ml_logger.log_metrics(metrics=step_metrics, step=step)
+
+            if config.save_every > 0 and step % config.save_every == 0 and step > 0:
+                checkpoint_utils.save_checkpoint(
+                    training_client=training_client,
+                    name=f"{step:06d}",
+                    log_path=config.log_path,
+                    kind="both",
+                    loop_state={"epoch": epoch_idx, "batch": batch_idx},
+                    ttl_seconds=config.ttl_seconds,
+                )
+            sampling_client = training_client.save_weights_and_get_sampling_client()
+
+    checkpoint_utils.save_checkpoint(
+        training_client=training_client,
+        name="final",
+        log_path=config.log_path,
+        kind="both",
+        loop_state={"epoch": config.num_epochs, "batch": 0},
+        ttl_seconds=None,
+    )
+    ml_logger.log_metrics(
+        metrics={f"{config.reinforce_version}/elapsed_s": time.perf_counter() - t0},
+        step=max(total_steps - 1, 0),
+    )
+    ml_logger.close()
+    logger.info("%s training completed", config.reinforce_version)
 
 
 async def run_online_training(
@@ -736,12 +1457,44 @@ def main() -> None:
     )
     parser.add_argument(
         "--reinforce-version",
-        choices=("offline", "online"),
+        choices=("offline", "online", "artifact", "grpo-artifact"),
         default="offline",
-        help='Data path: "offline" (logged trajectories) or "online" (agentic rollout).',
+        help=(
+            'Data path: "offline" (logged trajectories), "online" (agentic rollout), '
+            '"artifact" (single write rollout + grader), or "grpo-artifact" '
+            "(grouped write rollouts + grader)."
+        ),
     )
     parser.add_argument("--rollout-max-tokens", type=int, default=4096)
     parser.add_argument("--rollout-temperature", type=float, default=1.0)
+    parser.add_argument("--rollout-attempts", type=int, default=1)
+    parser.add_argument("--pair-mode", choices=("first_last", "adjacent"), default="first_last")
+    parser.add_argument("--no-use-gt", action="store_true")
+    parser.add_argument("--no-use-student", action="store_true")
+    parser.add_argument(
+        "--artifact-only-rollout-instruction",
+        action="store_true",
+        help="Append a rollout-only instruction requiring exactly one write(path, content) call.",
+    )
+    parser.add_argument(
+        "--grader-model-name",
+        default=None,
+        help="External Tinker model used only for artifact reward grading.",
+    )
+    parser.add_argument(
+        "--grader-renderer-name",
+        default=None,
+        help="Renderer for --grader-model-name; defaults to --renderer-name.",
+    )
+    parser.add_argument("--grader-max-tokens", type=int, default=1024)
+    parser.add_argument("--grader-max-file-chars", type=int, default=14000)
+    parser.add_argument("--grader-temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--verifier-path",
+        default=None,
+        help="Optional verifiers.json catalog; matched by session uuid or instruction.",
+    )
+    parser.add_argument("--grpo-group-size", type=int, default=4)
     parser.add_argument("--agentic-max-turns", type=int, default=48)
     parser.add_argument("--agentic-max-turns-per-step", type=int, default=8)
     parser.add_argument("--agentic-max-steps", type=int, default=6)
@@ -758,6 +1511,29 @@ def main() -> None:
     parser.add_argument("--rollout-sample-log-chars", type=int, default=4000)
     args = parser.parse_args()
     log_path = str(Path(args.log_path).expanduser())
+
+    if args.reinforce_version in {"artifact", "grpo-artifact"}:
+        renderer = renderers.get_renderer(args.renderer_name, get_tokenizer(args.model_name))
+        config = _config_from_cli(
+            args,
+            reinforce_version=cast(Literal["artifact", "grpo-artifact"], args.reinforce_version),
+            dataset_builder=None,
+        )
+        asyncio.run(run_artifact_policy_training(
+            config,
+            ArtifactReinforceRolloutDataset.from_weight_json(
+                args.train_path,
+                renderer,
+                args.max_length,
+                args.batch_size,
+                pair_mode=args.pair_mode,
+                use_gt=not args.no_use_gt,
+                use_student=not args.no_use_student,
+                artifact_only_instruction=args.artifact_only_rollout_instruction,
+                verifier_path=args.verifier_path,
+            ),
+        ))
+        return
 
     if args.reinforce_version == "online":
         config = _config_from_cli(args, reinforce_version="online", dataset_builder=None)
