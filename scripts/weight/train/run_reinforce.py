@@ -66,10 +66,8 @@ from .run_opd import (
 
 try:
     from weight.data.extract import extract_opd_examples, extract_reinforce_rollout_seeds
-    from weight.data.reward import _parse_rubric_results_json
 except ModuleNotFoundError:
     from ..data.extract import extract_opd_examples, extract_reinforce_rollout_seeds
-    from ..data.reward import _parse_rubric_results_json
 
 logger = logging.getLogger(__name__)
 BASELINE_STATE_FILENAME = "reinforce_baseline_state.json"
@@ -444,6 +442,13 @@ def _truncate_text(text: str, max_len: int) -> str:
     return text if len(text) <= max_len else text[:max_len] + "\n... [truncated]"
 
 
+def _rubric_json_schema_hint(n: int) -> list[str]:
+    return [
+        'JSON schema example: {"results":[{"pass":true},{"pass":false}]}',
+        f"Your actual results array must contain exactly {n} items.",
+    ]
+
+
 def _build_artifact_grader_prompt(
     rubrics: list[str],
     path: str,
@@ -453,14 +458,13 @@ def _build_artifact_grader_prompt(
 ) -> str:
     numbered = "\n".join(f"{i}. {r}" for i, r in enumerate(rubrics))
     body = _truncate_text(content, max_file_chars)
-    result_template = ",".join('{"pass":false}' for _ in rubrics)
     return "\n".join([
         "Grade a Python script that is intended to generate a final image artifact.",
         "The verifier lines were originally written for the generated image. You only see the script; judge whether running it would likely satisfy each verifier.",
+        "Do not explain your reasoning. Think silently if needed.",
         "Return JSON only. Do not include reasoning, markdown, code fences, labels, or prose.",
         "Your first character must be { and your last character must be }.",
-        "Use exactly this schema and exactly one result per verifier, in order:",
-        f'{{"results":[{result_template}]}}',
+        *_rubric_json_schema_hint(len(rubrics)),
         "",
         "Verifier lines:",
         numbered,
@@ -471,43 +475,213 @@ def _build_artifact_grader_prompt(
     ])
 
 
-_NUMBERED_VERDICT_RE = re.compile(
-    r"(?ms)^\s*(\d+)[\.\):]\s+(.*?)(?=^\s*\d+[\.\):]\s+|\Z)"
+_BLOCK_START_RE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?\s*"
+    r"(?:(?:verifier|rubric|criterion|check|item|line)\s*)?"
+    r"#?\s*(\d+)(?:\*\*)?\s*(?:[):\-]|[–—]|\.(?!\d))\s*"
 )
+_SIMPLE_INDEXED_VERDICT_RE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:verifier|rubric|criterion|check|item|line)?\s*"
+    r"#?\s*(\d+)\s*[:=\-]\s*(pass|fail|true|false|yes|no)\b"
+)
+
+
+def _coerce_pass_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in {"true", "pass", "passed", "yes", "y", "1", "satisfied"}:
+            return True
+        if v in {"false", "fail", "failed", "no", "n", "0", "unsatisfied"}:
+            return False
+    if isinstance(value, dict):
+        for key in ("pass", "passed", "satisfied", "verdict", "result", "score"):
+            if key in value:
+                coerced = _coerce_pass_value(value[key])
+                if coerced is not None:
+                    return coerced
+    return None
+
+
+def _json_passes_from_obj(obj: Any, n: int) -> list[bool | None] | None:
+    if isinstance(obj, dict) and isinstance(obj.get("results"), list):
+        seq = obj["results"]
+    elif isinstance(obj, dict) and isinstance(obj.get("verdicts"), list):
+        seq = obj["verdicts"]
+    elif isinstance(obj, list):
+        seq = obj
+    elif isinstance(obj, dict):
+        out: list[bool | None] = [None] * n
+        recovered = 0
+        for key, value in obj.items():
+            if not str(key).isdigit():
+                continue
+            idx = int(str(key))
+            if 0 <= idx < n:
+                verdict = _coerce_pass_value(value)
+                if verdict is not None:
+                    out[idx] = verdict
+                    recovered += 1
+        return out if recovered else None
+    else:
+        return None
+    if len(seq) != n:
+        return None
+    out = [_coerce_pass_value(item) for item in seq]
+    return out if any(v is not None for v in out) else None
+
+
+def _parse_artifact_grader_json(text: str, n: int) -> list[bool | None]:
+    decoder = json.JSONDecoder()
+    starts = [m.start() for m in re.finditer(r"[\{\[]", text)]
+    for start in starts:
+        try:
+            obj, _end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        passes = _json_passes_from_obj(obj, n)
+        if passes is not None:
+            return passes
+    raise ValueError("No JSON results object in model response")
+
+
+def _indexed_out_from_matches(
+    pairs: list[tuple[int, bool | None]],
+    n: int,
+) -> list[bool | None]:
+    out: list[bool | None] = [None] * n
+    explicit = [(idx, verdict) for idx, verdict in pairs if verdict is not None]
+    if not explicit:
+        return out
+    indices = [idx for idx, _verdict in explicit]
+    offset = 1 if 0 not in indices and min(indices) == 1 and max(indices) <= n else 0
+    for idx, verdict in explicit:
+        mapped = idx - offset
+        if 0 <= mapped < n:
+            out[mapped] = verdict
+    return out
+
+
+def _block_verdict(block: str) -> bool | None:
+    verdicts: list[tuple[int, bool]] = []
+    explicit_patterns = [
+        (r"\bpass(?:ed)?\s*[:=]\s*(true|false|yes|no|pass|fail)\b", 1),
+        (r"\bsatisfied\s*[:=]\s*(true|false|yes|no|pass|fail)\b", 1),
+        (r"\b(?:verdict|result|judg(?:e)?ment)\s*[:=]\s*(pass|fail|true|false|yes|no)\b", 1),
+        (r"\b(pass|fail)\s*[:=]\s*(true|false|yes|no)\b", 2),
+    ]
+    for pattern, group_idx in explicit_patterns:
+        for m in re.finditer(pattern, block, re.IGNORECASE):
+            token = m.group(group_idx)
+            verdict = _coerce_pass_value(token)
+            if verdict is not None:
+                verdicts.append((m.start(), verdict))
+    phrase_patterns = [
+        (r"\b(?:does\s+not|doesn't|cannot|can't|not)\s+pass\b", False),
+        (r"\b(?:should|would|will)\s+fail\b", False),
+        (r"\b(?:this|it|verifier|criterion)\s+fails\b", False),
+        (r"\b(?:should|would|will)\s+pass\b", True),
+        (r"\b(?:this|it|verifier|criterion)\s+passes\b", True),
+    ]
+    for pattern, verdict in phrase_patterns:
+        for m in re.finditer(pattern, block, re.IGNORECASE):
+            verdicts.append((m.start(), verdict))
+    for m in re.finditer(r"(?im)^\s*(?:[-*]\s*)?(pass|fail|true|false)\s*[\.\!]*\s*$", block):
+        verdict = _coerce_pass_value(m.group(1))
+        if verdict is not None:
+            verdicts.append((m.start(), verdict))
+    for m in re.finditer(r"\b(PASS|FAIL|TRUE|FALSE)\b(?!\s*[:=])", block):
+        verdict = _coerce_pass_value(m.group(1))
+        if verdict is not None:
+            verdicts.append((m.start(), verdict))
+    if not verdicts:
+        return None
+    verdicts.sort(key=lambda item: item[0])
+    return verdicts[-1][1]
 
 
 def _parse_pass_fail_from_text(text: str, n: int) -> list[bool | None]:
     """Recover ordered PASS/FAIL judgments from verbose grader text."""
-    out: list[bool | None] = [None] * n
-    matches = list(_NUMBERED_VERDICT_RE.finditer(text))
+    matches = list(_BLOCK_START_RE.finditer(text))
     if matches:
-        for m in matches:
-            idx = int(m.group(1))
-            if idx < 0 or idx >= n:
-                continue
-            verdicts = re.findall(r"\b(PASS|FAIL|TRUE|FALSE)\b", m.group(2), re.IGNORECASE)
-            if verdicts:
-                last = verdicts[-1].lower()
-                out[idx] = last in {"pass", "true"}
+        pairs: list[tuple[int, bool | None]] = []
+        for match_idx, m in enumerate(matches):
+            next_start = matches[match_idx + 1].start() if match_idx + 1 < len(matches) else len(text)
+            pairs.append((int(m.group(1)), _block_verdict(text[m.start():next_start])))
+        out = _indexed_out_from_matches(pairs, n)
         if any(v is not None for v in out):
             return out
 
+    simple_pairs = [
+        (int(m.group(1)), _coerce_pass_value(m.group(2)))
+        for m in _SIMPLE_INDEXED_VERDICT_RE.finditer(text)
+    ]
+    out = _indexed_out_from_matches(simple_pairs, n)
+    if any(v is not None for v in out):
+        return out
+
     # Last-resort fallback for models that emit a compact unnumbered list.
-    verdicts = re.findall(r"\b(PASS|FAIL|TRUE|FALSE)\b", text, re.IGNORECASE)
-    for i, verdict in enumerate(verdicts[:n]):
-        out[i] = verdict.lower() in {"pass", "true"}
+    tokens = re.findall(r"\b(PASS|FAIL|TRUE|FALSE|YES|NO)\b", text)
+    out = [None] * n
+    if len(tokens) == n:
+        for i, verdict in enumerate(tokens):
+            out[i] = _coerce_pass_value(verdict)
     return out
 
 
 def _parse_artifact_grader_results(text: str, n: int) -> tuple[list[bool | None], str]:
     try:
-        passes, _raw_results = _parse_rubric_results_json(text, n)
+        passes = _parse_artifact_grader_json(text, n)
         return passes, "json"
     except Exception:
         passes = _parse_pass_fail_from_text(text, n)
         if any(p is not None for p in passes):
             return passes, "text_pass_fail"
         raise
+
+
+def _parse_artifact_grader_results_best_effort(text: str, n: int) -> tuple[list[bool | None], str]:
+    try:
+        return _parse_artifact_grader_results(text, n)
+    except Exception:
+        return [None] * n, "failed"
+
+
+def _parse_coverage(passes: list[bool | None]) -> int:
+    return sum(p is not None for p in passes)
+
+
+def _build_artifact_grader_retry_prompt(
+    rubrics: list[str],
+    path: str,
+    content: str,
+    previous_response: str,
+    *,
+    max_file_chars: int,
+) -> str:
+    numbered = "\n".join(f"{i}. {r}" for i, r in enumerate(rubrics))
+    body = _truncate_text(content, max_file_chars)
+    previous = _truncate_text(previous_response, 12000)
+    return "\n".join([
+        "Your previous grader response was not machine-parseable or did not contain one judgment per verifier.",
+        "Return only a valid JSON object now. No markdown, no prose, no analysis.",
+        "If the previous response explicitly judged a verifier, preserve that judgment. If it did not, judge the script directly.",
+        "The results array must have exactly one item per verifier, in order, with boolean pass values.",
+        *_rubric_json_schema_hint(len(rubrics)),
+        "",
+        "Verifier lines:",
+        numbered,
+        "",
+        f"Script path: {path}",
+        "Script content:",
+        body,
+        "",
+        "Previous invalid grader response:",
+        previous,
+    ])
 
 
 async def _grade_artifact_with_tinker(
@@ -545,11 +719,43 @@ async def _grade_artifact_with_tinker(
         ),
     )
     raw = str(grader_renderer.tokenizer.decode(list(result.sequences[0].tokens)))
-    try:
-        passes, parse_mode = _parse_artifact_grader_results(raw, len(rubrics))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Artifact grader parse failed (%s); reward=0.0", exc)
-        return 0.0, [0.0] * len(rubrics), raw, "failed"
+    passes, parse_mode = _parse_artifact_grader_results_best_effort(raw, len(rubrics))
+    if _parse_coverage(passes) < len(rubrics):
+        retry_prompt = _build_artifact_grader_retry_prompt(
+            rubrics,
+            artifact["path"],
+            artifact["content"],
+            raw,
+            max_file_chars=max_file_chars,
+        )
+        retry_input = grader_renderer.build_generation_prompt([
+            {
+                "role": "system",
+                "content": "You are a strict JSON repair API. Return only valid JSON and no explanatory text.",
+            },
+            {"role": "user", "content": retry_prompt},
+        ])
+        retry_result = await grader_client.sample_async(
+            prompt=retry_input,
+            num_samples=1,
+            sampling_params=tinker.SamplingParams(
+                stop=grader_renderer.get_stop_sequences(),
+                max_tokens=max(max_tokens, 2048),
+                temperature=0.0,
+            ),
+        )
+        retry_raw = str(grader_renderer.tokenizer.decode(list(retry_result.sequences[0].tokens)))
+        retry_passes, retry_parse_mode = _parse_artifact_grader_results_best_effort(
+            retry_raw,
+            len(rubrics),
+        )
+        if _parse_coverage(retry_passes) >= _parse_coverage(passes):
+            passes = retry_passes
+            parse_mode = f"retry_{retry_parse_mode}"
+            raw = retry_raw
+    if not any(p is not None for p in passes):
+        logger.warning("Artifact grader parse failed; reward=0.0")
+        return 0.0, [0.0] * len(rubrics), raw, parse_mode
     missing_idx = [i for i, p in enumerate(passes) if p is None]
     if missing_idx:
         logger.warning(
