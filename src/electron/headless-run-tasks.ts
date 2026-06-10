@@ -76,8 +76,16 @@ const AUTH_FILE = "auth.json";
 const HEADLESS_EXECUTION_NOTE =
   "Headless execution only: save outputs to files in the working directory. Do not open GUI windows, interactive plot viewers, browser tabs, or commands that wait for manual closing.";
 
+function defaultPythonInterpreter(): string {
+  const unixVenv = join(repoRoot, ".venv", "bin", "python");
+  if (existsSync(unixVenv)) return unixVenv;
+  const winVenv = join(repoRoot, ".venv", "Scripts", "python.exe");
+  if (existsSync(winVenv)) return winVenv;
+  return "python3";
+}
+
 function parseArgs(argv: string[]): Args {
-  const out: Partial<Args> = { limit: 18, eval: false, force: false, resume: false, python: "python3" };
+  const out: Partial<Args> = { limit: 18, eval: false, force: false, resume: false, python: defaultPythonInterpreter() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -510,7 +518,13 @@ function backupOutDirBeforeForce(outDir: string): string {
   return backupDirectory(outDir, join(dirname(outDir), ".headless-run-backups"));
 }
 
-async function runEvaluation(args: Args, taskDir: string, sessionJson: string, runLog: string): Promise<{ ratingsPath: string; score: number | null }> {
+async function runEvaluation(
+  args: Args,
+  taskDir: string,
+  sessionJson: string,
+  runLog: string,
+  artifactNames: string[],
+): Promise<{ ratingsPath: string; score: number | null }> {
   const ratingsPath = join(taskDir, "ratings.json");
   const evalBackend = args.evalBackend ?? "openai";
   await runChild(
@@ -525,6 +539,7 @@ async function runEvaluation(args: Args, taskDir: string, sessionJson: string, r
       ratingsPath,
       "--backend",
       evalBackend,
+      ...artifactNames.flatMap((name) => ["--artifact-name", name]),
       ...(args.evalModel ? ["--model", args.evalModel] : []),
       ...(args.evalBaseUrl ? ["--base-url", args.evalBaseUrl] : []),
       ...(args.evalApiKey ? ["--api-key", args.evalApiKey] : []),
@@ -602,7 +617,7 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
     let evalError: string | undefined;
     if (args.eval) {
       try {
-        ({ ratingsPath, score } = await runEvaluation(args, taskDir, sessionJson, runLog));
+        ({ ratingsPath, score } = await runEvaluation(args, taskDir, sessionJson, runLog, copied));
       } catch (error) {
         ratingsPath = join(taskDir, "ratings.json");
         score = null;
@@ -661,6 +676,8 @@ function writeSummary(outDir: string, summaries: TaskSummary[]): void {
   const scored = summaries
     .map((item) => item.score)
     .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
+  const zeroScoreTaskIds = summaries.filter((item) => item.score === 0).map((item) => item.task_id);
+  const unscoredTaskIds = summaries.filter((item) => item.score == null).map((item) => item.task_id);
   const overall = scored.length > 0 ? scored.reduce((a, b) => a + b, 0) / scored.length : null;
   writeFileSync(
     join(outDir, "summary.json"),
@@ -670,6 +687,8 @@ function writeSummary(outDir: string, summaries: TaskSummary[]): void {
         scored_task_count: scored.length,
         unscored_task_count: summaries.length - scored.length,
         total_task_count: summaries.length,
+        zero_score_task_ids: zeroScoreTaskIds,
+        unscored_task_ids: unscoredTaskIds,
         tasks: summaries,
       },
       null,

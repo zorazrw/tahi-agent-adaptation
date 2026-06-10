@@ -2,9 +2,10 @@
 """
 Grade a redo session's final artifacts against rubrics from ``verifiers.json``.
 
-Matches rubrics by instruction overlap. Sends only the file(s) required by the **last**
-workflow step (walking back one step if that step has no ``outputFiles``). Calls the
-verifier LM once (Haiku by default) and prints per-criterion PASS/FAIL plus average success rate.
+Matches rubrics by instruction overlap. By default it sends only the file(s) required by the
+**last** workflow step (walking back one step if that step has no ``outputFiles``). When explicit
+artifact names are provided, those are used instead. Calls the verifier LM once and prints
+per-criterion PASS/FAIL plus average success rate.
 
 Examples:
   python scripts/tools/grade_redo.py -j runs/.../session.json --verifiers verifiers.json
@@ -42,6 +43,7 @@ except ImportError:  # pragma: no cover - optional for dry-run/OpenAI-only envir
 _PLAN_SUFFIX = "Before doing anything else, you MUST call the workflow_plan"
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+DEFAULT_MAX_TOKENS = 4096
 _TRUNCATE_LEN = 14_000
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\n\r]+$")
 
@@ -231,18 +233,38 @@ def all_artifact_blocks(session: dict[str, Any]) -> dict[str, str]:
     return merged
 
 
-def grading_artifact_blocks(session: dict[str, Any]) -> tuple[list[tuple[str, str]], list[str]]:
+def grading_artifact_blocks(
+    session: dict[str, Any],
+    artifact_names: list[str] | None = None,
+) -> tuple[list[tuple[str, str]], list[str]]:
     """
     File blocks for the LM grader: only artifacts required by the last workflow step
     (walking back if the last step lists no output files).
     """
+    merged = all_artifact_blocks(session)
+    if artifact_names:
+        required = [name for name in artifact_names if isinstance(name, str) and name.strip()]
+        if not required:
+            raise SystemExit("Explicit artifact list is empty after normalization.")
+        order = {_basename(path): i for i, path in enumerate(required)}
+        blocks = sorted(
+            ((path, content) for path, content in merged.items() if _basename(path) in order),
+            key=lambda item: (order[_basename(item[0])], item[0]),
+        )
+        if not blocks:
+            available = ", ".join(sorted(_basename(p) for p in merged)) or "(none)"
+            need = ", ".join(required)
+            raise SystemExit(
+                f"No content for explicit artifact(s) [{need}] in session snapshots (available: {available})."
+            )
+        return blocks, required
+
     nodes = final_workflow_nodes(session)
     required = required_paths_last_workflow_step(nodes)
     if not required:
         raise SystemExit("Could not determine output files for the last workflow step.")
 
     required_names = {_basename(p) for p in required}
-    merged = all_artifact_blocks(session)
     blocks = sorted((p, c) for p, c in merged.items() if _basename(p) in required_names)
     if not blocks:
         available = ", ".join(sorted(_basename(p) for p in merged)) or "(none)"
@@ -538,7 +560,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--base-url", help="OpenAI-compatible base URL override")
     p.add_argument("--request-timeout", type=float, default=120.0)
     p.add_argument("--max-retries", type=int, default=2)
-    p.add_argument("--max-tokens", type=int, default=1024)
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    p.add_argument(
+        "--artifact-name",
+        action="append",
+        default=[],
+        help="Explicit artifact basename/path to grade; may be repeated. Overrides last-step artifact selection.",
+    )
     p.add_argument("--no-api-config", action="store_true")
     p.add_argument("--no-claude-settings", action="store_true")
     p.add_argument("--env-file", type=Path)
@@ -562,7 +590,8 @@ def main(argv: list[str] | None = None) -> int:
 
     entry, overlap = match_rubrics(load_catalog(verifiers_path), instruction, args.min_overlap)
     criteria = criteria_list(entry)
-    files, required_paths = grading_artifact_blocks(session)
+    artifact_names = [name.strip() for name in args.artifact_name if isinstance(name, str) and name.strip()]
+    files, required_paths = grading_artifact_blocks(session, artifact_names=artifact_names or None)
     if not criteria:
         raise SystemExit("Matched rubric entry has no criteria.")
 

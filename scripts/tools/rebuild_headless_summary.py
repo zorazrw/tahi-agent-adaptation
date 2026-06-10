@@ -64,6 +64,8 @@ def main() -> None:
 
     summaries: list[dict[str, Any]] = []
     scored: list[float] = []
+    zero_score_task_ids: list[Any] = []
+    unscored_task_ids: list[Any] = []
 
     for task_dir in task_dirs:
         summary_path = task_dir / "task_summary.json"
@@ -87,6 +89,11 @@ def main() -> None:
         else:
             summary["score"] = None
 
+        if summary.get("score") is None:
+            unscored_task_ids.append(summary.get("task_id"))
+        elif summary.get("score") == 0:
+            zero_score_task_ids.append(summary.get("task_id"))
+
         if args.include_skipped or summary.get("status") != "skipped" or summary.get("score") is not None:
             summaries.append(summary)
 
@@ -98,6 +105,8 @@ def main() -> None:
         "scored_task_count": len(scored),
         "unscored_task_count": len(summaries) - len(scored),
         "total_task_count": len(summaries),
+        "zero_score_task_ids": zero_score_task_ids,
+        "unscored_task_ids": unscored_task_ids,
         "tasks": summaries,
     }
     (out_dir / "summary.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -122,6 +131,10 @@ def main() -> None:
         print("overall_score: N/A")
     else:
         print(f"overall_score: {overall_score:.1f}")
+    if zero_score_task_ids:
+        print(f"zero_score_task_ids: {zero_score_task_ids}")
+    if unscored_task_ids:
+        print(f"unscored_task_ids: {unscored_task_ids}")
 
 
 if __name__ == "__main__":

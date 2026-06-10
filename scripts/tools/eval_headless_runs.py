@@ -90,6 +90,32 @@ def should_include_failed_only(task_dir: Path) -> bool:
     return any(marker in log_text for marker in failure_markers)
 
 
+def artifact_names_for_task(task_dir: Path) -> list[str]:
+    summary_path = task_dir / "task_summary.json"
+    if not summary_path.exists():
+        return []
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(summary, dict):
+        return []
+    raw = summary.get("output_files")
+    if not isinstance(raw, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        if not isinstance(value, str):
+            continue
+        name = value.strip()
+        if not name or name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
+    return names
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path, help="runs root, run directory, task_XXX directory, or session.json")
@@ -158,6 +184,8 @@ def main() -> int:
             "--json-out",
             str(ratings),
         ]
+        for artifact_name in artifact_names_for_task(task_dir):
+            command.extend(["--artifact-name", artifact_name])
         if args.base_url:
             command.extend(["--base-url", args.base_url])
         if args.api_key:
