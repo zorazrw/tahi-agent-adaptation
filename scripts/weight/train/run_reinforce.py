@@ -149,6 +149,7 @@ class Config:
     artifact_exec_timeout_s: int = 30
     artifact_python_executable: str | None = None
     grpo_group_size: int = 4
+    grpo_advantage_std_floor: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +392,7 @@ class ArtifactReinforceRolloutDataset:
                 student_prompt = _with_artifact_only_instruction(
                     student_prompt, expected_path,
                 )
+            student_prompt = _with_self_contained_artifact_instruction(student_prompt)
             student_prompt_messages = _hydrate_tool_calls(student_prompt)
             student_prompt_input = renderer.build_generation_prompt(
                 student_prompt_messages
@@ -428,6 +430,26 @@ class ArtifactReinforceRolloutDataset:
         start = index * self._batch_size
         end = min(start + self._batch_size, len(self._indices))
         return [self._rows[self._indices[i]] for i in range(start, end)]
+
+
+def _with_self_contained_artifact_instruction(
+    prompt: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append a lightweight rollout hint that generated scripts should be standalone."""
+    if not prompt:
+        return prompt
+    out = [dict(m) for m in prompt]
+    suffix = (
+        "\n\nFor generated Python visualization artifacts, make the script self-contained: "
+        "inline the data needed to produce the final image, and do not read local JSON/CSV/"
+        "data files unless the same script creates those files before reading them."
+    )
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user":
+            out[i]["content"] = (out[i].get("content") or "") + suffix
+            return out
+    out.append({"role": "user", "content": suffix.strip()})
+    return out
 
 
 def _artifact_args_from_message(message: dict[str, Any]) -> dict[str, str] | None:
@@ -654,27 +676,34 @@ def _pre_grader_artifact_decision(
     if not execution.get("attempted"):
         return None
     if execution.get("missing_external_input_path"):
-        return None
+        return {
+            "valid": False,
+            "reason": "missing_external_file_filtered",
+            "grader_parse_mode": "skipped_missing_external_file_filtered",
+            "grader_raw": "Skipped grader: artifact execution depends on a missing external file.",
+            "grader_coverage": 0.0,
+            "reward": None,
+        }
     returncode = execution.get("returncode")
     image_count = int(execution.get("image_count") or 0)
     exec_reason = str(execution.get("reason") or "")
     if exec_reason in {"timeout", "exec_error"} or returncode not in (0, None):
         return {
-            "valid": True,
-            "reason": "execution_failed_zero_reward",
-            "grader_parse_mode": "skipped_execution_failed_zero_reward",
+            "valid": False,
+            "reason": "execution_failed_filtered",
+            "grader_parse_mode": "skipped_execution_failed_filtered",
             "grader_raw": "Skipped grader: artifact execution failed before producing a valid image.",
-            "grader_coverage": 1.0,
-            "reward": 0.0,
+            "grader_coverage": 0.0,
+            "reward": None,
         }
     if image_count <= 0:
         return {
-            "valid": True,
-            "reason": "no_image_zero_reward",
-            "grader_parse_mode": "skipped_no_image_zero_reward",
+            "valid": False,
+            "reason": "no_image_filtered",
+            "grader_parse_mode": "skipped_no_image_filtered",
             "grader_raw": "Skipped grader: artifact execution completed but generated no image files.",
-            "grader_coverage": 1.0,
-            "reward": 0.0,
+            "grader_coverage": 0.0,
+            "reward": None,
         }
     return None
 
@@ -1460,6 +1489,14 @@ async def _sample_artifact_reinforce_async(
             "skipped_no_image_zero_reward",
         }
     ))
+    metrics["artifact_online/pre_grader_filtered"] = float(sum(
+        1 for rec in records
+        if rec.get("grader_parse_mode") in {
+            "skipped_execution_failed_filtered",
+            "skipped_no_image_filtered",
+            "skipped_missing_external_file_filtered",
+        }
+    ))
     metrics["artifact_online/missing_external_file"] = float(sum(
         1 for rec in records
         if ((rec.get("artifact_execution") or {}).get("missing_external_input_path"))
@@ -1470,15 +1507,24 @@ async def _sample_artifact_reinforce_async(
     return datums, rewards, metrics
 
 
-def compute_grpo_group_advantages(rewards: list[float]) -> list[float] | None:
-    """Return group-centered advantages, or None when the group has no signal."""
+def compute_grpo_group_advantages(
+    rewards: list[float],
+    *,
+    std_floor: float = 0.05,
+) -> tuple[list[float], float, float] | None:
+    """Return standardized group advantages, or None when the group has no signal."""
     if len(rewards) < 2:
         return None
     mean_reward = sum(rewards) / len(rewards)
-    advantages = [reward - mean_reward for reward in rewards]
-    if all(abs(adv) < 1e-8 for adv in advantages):
+    centered = [reward - mean_reward for reward in rewards]
+    variance = sum(adv * adv for adv in centered) / len(centered)
+    std = variance ** 0.5
+    if std < 1e-8:
         return None
-    return advantages
+    denom = max(std, std_floor)
+    advantages = [adv / denom for adv in centered]
+    raw_mean_abs_advantage = sum(abs(adv) for adv in centered) / len(centered)
+    return advantages, std, raw_mean_abs_advantage
 
 
 async def _sample_artifact_grpo_async(
@@ -1540,6 +1586,8 @@ async def _sample_artifact_grpo_async(
 
     datums: list[tinker.Datum] = []
     advantages_out: list[float] = []
+    group_reward_stds: list[float] = []
+    raw_abs_advantages: list[float] = []
     skipped_small = 0
     skipped_constant = 0
     for group in groups:
@@ -1547,10 +1595,16 @@ async def _sample_artifact_grpo_async(
             skipped_small += 1
             continue
         rewards = [float(item["reward"]) for item in group]
-        advantages = compute_grpo_group_advantages(rewards)
-        if advantages is None:
+        advantage_result = compute_grpo_group_advantages(
+            rewards,
+            std_floor=max(float(config.grpo_advantage_std_floor), 1e-8),
+        )
+        if advantage_result is None:
             skipped_constant += 1
             continue
+        advantages, reward_std, raw_mean_abs_advantage = advantage_result
+        group_reward_stds.append(float(reward_std))
+        raw_abs_advantages.append(float(raw_mean_abs_advantage))
         for item, advantage in zip(group, advantages, strict=True):
             datums.append(item["datum"])
             advantages_out.append(float(advantage))
@@ -1585,6 +1639,15 @@ async def _sample_artifact_grpo_async(
         metrics["grpo_artifact/mean_abs_advantage"] = (
             sum(abs(a) for a in advantages_out) / len(advantages_out)
         )
+    if raw_abs_advantages:
+        metrics["grpo_artifact/raw_mean_abs_advantage"] = (
+            sum(raw_abs_advantages) / len(raw_abs_advantages)
+        )
+    if group_reward_stds:
+        metrics["grpo_artifact/mean_group_reward_std"] = (
+            sum(group_reward_stds) / len(group_reward_stds)
+        )
+    metrics["grpo_artifact/advantage_std_floor"] = float(config.grpo_advantage_std_floor)
     execution_records = [
         rec.get("artifact_execution")
         for rec in records
@@ -1610,6 +1673,26 @@ async def _sample_artifact_grpo_async(
             "skipped_execution_failed_zero_reward",
             "skipped_no_image_zero_reward",
         }
+    ))
+    metrics["grpo_artifact/pre_grader_filtered"] = float(sum(
+        1 for rec in records
+        if rec.get("grader_parse_mode") in {
+            "skipped_execution_failed_filtered",
+            "skipped_no_image_filtered",
+            "skipped_missing_external_file_filtered",
+        }
+    ))
+    metrics["grpo_artifact/execution_failed_filtered"] = float(sum(
+        1 for rec in records
+        if rec.get("reason") == "execution_failed_filtered"
+    ))
+    metrics["grpo_artifact/no_image_filtered"] = float(sum(
+        1 for rec in records
+        if rec.get("reason") == "no_image_filtered"
+    ))
+    metrics["grpo_artifact/missing_external_file_filtered"] = float(sum(
+        1 for rec in records
+        if rec.get("reason") == "missing_external_file_filtered"
     ))
     metrics["grpo_artifact/missing_external_file"] = float(sum(
         1 for rec in records
@@ -1906,6 +1989,7 @@ def _config_from_cli(
         artifact_exec_timeout_s=args.artifact_exec_timeout_s,
         artifact_python_executable=args.artifact_python_executable,
         grpo_group_size=args.grpo_group_size,
+        grpo_advantage_std_floor=args.grpo_advantage_std_floor,
     )
 
 
@@ -2311,6 +2395,15 @@ def main() -> None:
         ),
     )
     parser.add_argument("--grpo-group-size", type=int, default=4)
+    parser.add_argument(
+        "--grpo-advantage-std-floor",
+        type=float,
+        default=0.05,
+        help=(
+            "Minimum per-group reward std used to normalize GRPO advantages. "
+            "Prevents tiny reward variance from exploding gradients."
+        ),
+    )
     parser.add_argument("--agentic-max-turns", type=int, default=48)
     parser.add_argument("--agentic-max-turns-per-step", type=int, default=8)
     parser.add_argument("--agentic-max-steps", type=int, default=6)
