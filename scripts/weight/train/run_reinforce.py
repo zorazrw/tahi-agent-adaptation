@@ -615,6 +615,7 @@ def _artifact_execution_record(
         "matplotlib_available": execution.get("matplotlib_available"),
         "returncode": execution.get("returncode"),
         "image_count": execution.get("image_count"),
+        "missing_external_input_path": execution.get("missing_external_input_path"),
         "stdout_preview": str(execution.get("stdout") or "")[:sample_log_chars],
         "stderr_preview": str(execution.get("stderr") or "")[:sample_log_chars],
         "images": [
@@ -652,17 +653,8 @@ def _pre_grader_artifact_decision(
         return None
     if not execution.get("attempted"):
         return None
-    stderr = str(execution.get("stderr") or "")
-    missing_input = _missing_external_input_path(artifact.get("path", ""), stderr)
-    if missing_input is not None:
-        return {
-            "valid": False,
-            "reason": "missing_external_file",
-            "grader_parse_mode": "skipped_missing_external_file",
-            "grader_raw": f"Skipped grader: missing external input file {missing_input!r}.",
-            "grader_coverage": 0.0,
-            "reward": None,
-        }
+    if execution.get("missing_external_input_path"):
+        return None
     returncode = execution.get("returncode")
     image_count = int(execution.get("image_count") or 0)
     exec_reason = str(execution.get("reason") or "")
@@ -1258,6 +1250,15 @@ async def _sample_one_artifact_candidate(
         timeout_s=artifact_exec_timeout_s,
         python_executable=artifact_python_executable,
     )
+    missing_external_input = _missing_external_input_path(
+        artifact["path"],
+        str(execution.get("stderr") or ""),
+    )
+    if missing_external_input is not None:
+        execution = {
+            **execution,
+            "missing_external_input_path": missing_external_input,
+        }
     execution_record = _artifact_execution_record(
         execution,
         sample_log_chars=sample_log_chars,
@@ -1309,6 +1310,8 @@ async def _sample_one_artifact_candidate(
         temperature=grader_temperature,
         min_coverage=grader_min_coverage,
     )
+    if missing_external_input is not None:
+        grader_parse_mode = f"text_only_missing_external_file_{grader_parse_mode}"
     if reward is None:
         rec.update({
             "valid": False,
@@ -1459,7 +1462,7 @@ async def _sample_artifact_reinforce_async(
     ))
     metrics["artifact_online/missing_external_file"] = float(sum(
         1 for rec in records
-        if rec.get("grader_parse_mode") == "skipped_missing_external_file"
+        if ((rec.get("artifact_execution") or {}).get("missing_external_input_path"))
     ))
     for reason, count in reason_counts.items():
         safe_reason = reason.replace("/", "_").replace(":", "_")
@@ -1610,7 +1613,7 @@ async def _sample_artifact_grpo_async(
     ))
     metrics["grpo_artifact/missing_external_file"] = float(sum(
         1 for rec in records
-        if rec.get("grader_parse_mode") == "skipped_missing_external_file"
+        if ((rec.get("artifact_execution") or {}).get("missing_external_input_path"))
     ))
     return datums, advantages_out, metrics
 
