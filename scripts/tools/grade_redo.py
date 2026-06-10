@@ -17,6 +17,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import mimetypes
 import os
@@ -46,6 +47,7 @@ DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_MAX_TOKENS = 4096
 _TRUNCATE_LEN = 14_000
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\n\r]+$")
+_PASS_VALUE_RE = re.compile(r'"pass"\s*:\s*(true|false)', re.IGNORECASE)
 
 
 @contextmanager
@@ -233,9 +235,50 @@ def all_artifact_blocks(session: dict[str, Any]) -> dict[str, str]:
     return merged
 
 
+def _read_disk_artifact(path: Path) -> str | None:
+    media_type, _ = mimetypes.guess_type(str(path))
+    if media_type and media_type.startswith("image/"):
+        return base64.b64encode(path.read_bytes()).decode("ascii")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+
+def supplement_artifact_blocks_from_roots(
+    merged: dict[str, str],
+    *,
+    artifact_roots: list[Path],
+    required_names: list[str],
+) -> dict[str, str]:
+    if not artifact_roots or not required_names:
+        return merged
+    supplemented = dict(merged)
+    missing = {_basename(name) for name in required_names if _basename(name) not in {_basename(p) for p in merged}}
+    if not missing:
+        return supplemented
+    for root in artifact_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            base = path.name
+            if base not in missing:
+                continue
+            content = _read_disk_artifact(path)
+            if content:
+                supplemented[str(path.relative_to(root))] = content
+                missing.remove(base)
+            if not missing:
+                return supplemented
+    return supplemented
+
+
 def grading_artifact_blocks(
     session: dict[str, Any],
     artifact_names: list[str] | None = None,
+    artifact_roots: list[Path] | None = None,
 ) -> tuple[list[tuple[str, str]], list[str]]:
     """
     File blocks for the LM grader: only artifacts required by the last workflow step
@@ -246,6 +289,11 @@ def grading_artifact_blocks(
         required = [name for name in artifact_names if isinstance(name, str) and name.strip()]
         if not required:
             raise SystemExit("Explicit artifact list is empty after normalization.")
+        merged = supplement_artifact_blocks_from_roots(
+            merged,
+            artifact_roots=artifact_roots or [],
+            required_names=required,
+        )
         order = {_basename(path): i for i, path in enumerate(required)}
         blocks = sorted(
             ((path, content) for path, content in merged.items() if _basename(path) in order),
@@ -264,6 +312,11 @@ def grading_artifact_blocks(
     if not required:
         raise SystemExit("Could not determine output files for the last workflow step.")
 
+    merged = supplement_artifact_blocks_from_roots(
+        merged,
+        artifact_roots=artifact_roots or [],
+        required_names=required,
+    )
     required_names = {_basename(p) for p in required}
     blocks = sorted((p, c) for p, c in merged.items() if _basename(p) in required_names)
     if not blocks:
@@ -353,6 +406,26 @@ def build_message_content(criteria: list[str], file_blocks: list[tuple[str, str]
 
 
 def _parse_json_from_model_text(text: str) -> Any:
+    stripped = text.strip()
+    if stripped:
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return parsed
+
+        first_brace = stripped.find("{")
+        last_brace = stripped.rfind("}")
+        if 0 <= first_brace < last_brace:
+            candidate = stripped[first_brace : last_brace + 1]
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                return parsed
+
     def scan_candidates(source: str) -> list[str]:
         candidates: list[str] = []
         start: int | None = None
@@ -423,7 +496,16 @@ def _parse_json_from_model_text(text: str) -> Any:
 
 
 def interpret_results(text: str, n: int) -> list[bool | None]:
-    parsed = _parse_json_from_model_text(text)
+    try:
+        parsed = _parse_json_from_model_text(text)
+    except ValueError:
+        matches = _PASS_VALUE_RE.findall(text)
+        if matches:
+            out: list[bool | None] = [None] * n
+            for i, value in enumerate(matches[:n]):
+                out[i] = value.lower() == "true"
+            return out
+        raise
     if isinstance(parsed, dict):
         arr = parsed.get("results")
     elif isinstance(parsed, list):
@@ -567,6 +649,12 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Explicit artifact basename/path to grade; may be repeated. Overrides last-step artifact selection.",
     )
+    p.add_argument(
+        "--artifact-root",
+        action="append",
+        default=[],
+        help="Directory to search on disk for explicit artifacts missing from session snapshots; may be repeated.",
+    )
     p.add_argument("--no-api-config", action="store_true")
     p.add_argument("--no-claude-settings", action="store_true")
     p.add_argument("--env-file", type=Path)
@@ -591,7 +679,12 @@ def main(argv: list[str] | None = None) -> int:
     entry, overlap = match_rubrics(load_catalog(verifiers_path), instruction, args.min_overlap)
     criteria = criteria_list(entry)
     artifact_names = [name.strip() for name in args.artifact_name if isinstance(name, str) and name.strip()]
-    files, required_paths = grading_artifact_blocks(session, artifact_names=artifact_names or None)
+    artifact_roots = [resolve_path(Path(root)) for root in args.artifact_root if isinstance(root, str) and root.strip()]
+    files, required_paths = grading_artifact_blocks(
+        session,
+        artifact_names=artifact_names or None,
+        artifact_roots=artifact_roots,
+    )
     if not criteria:
         raise SystemExit("Matched rubric entry has no criteria.")
 

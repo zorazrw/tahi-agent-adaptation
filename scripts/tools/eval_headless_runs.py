@@ -113,6 +113,18 @@ def artifact_names_for_task(task_dir: Path) -> list[str]:
             continue
         names.append(name)
         seen.add(name)
+    for root_name in ("artifacts", "workdir"):
+        root = task_dir / root_name
+        if not root.exists():
+            continue
+        for path in sorted(root.glob("*")):
+            if not path.is_file():
+                continue
+            name = path.name.strip()
+            if not name or name in seen:
+                continue
+            names.append(name)
+            seen.add(name)
     return names
 
 
@@ -129,6 +141,11 @@ def main() -> int:
     parser.add_argument("--attempts", type=int, default=1, help="Retry each failed grading up to this many attempts")
     parser.add_argument("--retry-delay", type=float, default=1.0, help="Seconds to wait between failed attempts")
     parser.add_argument("--failed-only", action="store_true", help="Only process tasks with missing or previously failed ratings")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Process every discovered task, even if it already has a successful rating",
+    )
     parser.add_argument("--min-overlap", type=float, help="Override grade_redo.py rubric match threshold")
     parser.add_argument("--no-rebuild-summary", action="store_true")
     args = parser.parse_args()
@@ -157,7 +174,7 @@ def main() -> int:
     if not sessions:
         raise SystemExit("No task_*/session.json files found.")
 
-    if args.failed_only:
+    if args.failed_only or not args.force:
         sessions = [session for session in sessions if should_include_failed_only(session.parent)]
         if not sessions:
             print("No failed task sessions found.")
@@ -186,6 +203,9 @@ def main() -> int:
         ]
         for artifact_name in artifact_names_for_task(task_dir):
             command.extend(["--artifact-name", artifact_name])
+        for artifact_root in (task_dir / "artifacts", task_dir / "workdir"):
+            if artifact_root.exists():
+                command.extend(["--artifact-root", str(artifact_root)])
         if args.base_url:
             command.extend(["--base-url", args.base_url])
         if args.api_key:

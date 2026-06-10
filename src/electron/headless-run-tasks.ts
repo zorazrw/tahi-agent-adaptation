@@ -518,12 +518,35 @@ function backupOutDirBeforeForce(outDir: string): string {
   return backupDirectory(outDir, join(dirname(outDir), ".headless-run-backups"));
 }
 
+function collectEvaluationArtifactNames(taskDir: string, workdir: string, copied: string[]): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const name of copied) {
+    if (name && !seen.has(name)) {
+      names.push(name);
+      seen.add(name);
+    }
+  }
+  for (const root of [join(taskDir, "artifacts"), workdir]) {
+    if (!existsSync(root)) continue;
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      if (!seen.has(entry.name)) {
+        names.push(entry.name);
+        seen.add(entry.name);
+      }
+    }
+  }
+  return names;
+}
+
 async function runEvaluation(
   args: Args,
   taskDir: string,
   sessionJson: string,
   runLog: string,
   artifactNames: string[],
+  artifactRoots: string[],
 ): Promise<{ ratingsPath: string; score: number | null }> {
   const ratingsPath = join(taskDir, "ratings.json");
   const evalBackend = args.evalBackend ?? "openai";
@@ -540,6 +563,7 @@ async function runEvaluation(
       "--backend",
       evalBackend,
       ...artifactNames.flatMap((name) => ["--artifact-name", name]),
+      ...artifactRoots.flatMap((root) => ["--artifact-root", root]),
       ...(args.evalModel ? ["--model", args.evalModel] : []),
       ...(args.evalBaseUrl ? ["--base-url", args.evalBaseUrl] : []),
       ...(args.evalApiKey ? ["--api-key", args.evalApiKey] : []),
@@ -616,8 +640,16 @@ async function runTask(args: Args, store: SessionStore, task: TaskSpec, index: n
     let score: number | null | undefined;
     let evalError: string | undefined;
     if (args.eval) {
+      const evalArtifactNames = collectEvaluationArtifactNames(taskDir, workdir, copied);
       try {
-        ({ ratingsPath, score } = await runEvaluation(args, taskDir, sessionJson, runLog, copied));
+        ({ ratingsPath, score } = await runEvaluation(
+          args,
+          taskDir,
+          sessionJson,
+          runLog,
+          evalArtifactNames,
+          [artifactsDir, workdir],
+        ));
       } catch (error) {
         ratingsPath = join(taskDir, "ratings.json");
         score = null;
