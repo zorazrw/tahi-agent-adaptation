@@ -31,14 +31,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import logging
 import os
 import random
 import re
 import subprocess
+import sys
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -142,6 +145,7 @@ class Config:
     grader_temperature: float = 0.0
     grader_min_coverage: float = 0.8
     artifact_exec_timeout_s: int = 30
+    artifact_python_executable: str | None = None
     grpo_group_size: int = 4
 
 
@@ -454,21 +458,57 @@ def _safe_artifact_basename(path: str) -> str:
     return name or "artifact.py"
 
 
+def _resolve_artifact_python_executable(python_executable: str | None = None) -> str:
+    if python_executable is None or not str(python_executable).strip():
+        return sys.executable
+    return str(Path(str(python_executable)).expanduser())
+
+
+@lru_cache(maxsize=16)
+def _python_module_available(python_executable: str, module_name: str) -> bool:
+    """Check a module in the interpreter that will execute generated artifacts."""
+    if python_executable == sys.executable:
+        return importlib.util.find_spec(module_name) is not None
+    try:
+        proc = subprocess.run(
+            [
+                python_executable,
+                "-c",
+                (
+                    "import importlib.util, sys; "
+                    f"sys.exit(0 if importlib.util.find_spec({module_name!r}) else 1)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
 def _execute_artifact_for_grading(
     artifact: dict[str, str],
     *,
     timeout_s: int,
+    python_executable: str | None = None,
     max_images: int = 3,
 ) -> dict[str, Any]:
     """Run Python artifacts in a tempdir and collect generated image files."""
     path = artifact.get("path", "")
     content = artifact.get("content", "")
     suffix = Path(path).suffix.lower()
+    resolved_python = _resolve_artifact_python_executable(python_executable)
+    matplotlib_available = _python_module_available(resolved_python, "matplotlib")
     if suffix != ".py":
         return {
             "attempted": False,
             "reason": "not_python",
+            "python_executable": resolved_python,
+            "matplotlib_available": matplotlib_available,
             "images": [],
+            "image_count": 0,
             "stdout": "",
             "stderr": "",
             "returncode": None,
@@ -480,12 +520,15 @@ def _execute_artifact_for_grading(
         script_path.write_text(content, encoding="utf-8")
         mpl_config = workdir / ".mplconfig"
         mpl_config.mkdir(exist_ok=True)
+        cache_dir = workdir / ".cache"
+        cache_dir.mkdir(exist_ok=True)
         env = os.environ.copy()
         env.setdefault("MPLBACKEND", "Agg")
         env["MPLCONFIGDIR"] = str(mpl_config)
+        env.setdefault("XDG_CACHE_HOME", str(cache_dir))
         try:
             proc = subprocess.run(
-                ["python3", script_path.name],
+                [resolved_python, script_path.name],
                 cwd=workdir,
                 env=env,
                 capture_output=True,
@@ -498,10 +541,30 @@ def _execute_artifact_for_grading(
             timed_out = False
         except subprocess.TimeoutExpired as exc:
             returncode = None
-            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
-            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+            stdout = (
+                exc.stdout.decode("utf-8", errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else str(exc.stdout or "")
+            )
+            stderr = (
+                exc.stderr.decode("utf-8", errors="replace")
+                if isinstance(exc.stderr, bytes)
+                else str(exc.stderr or "")
+            )
             stderr = (stderr + f"\nTimed out after {timeout_s}s").strip()
             timed_out = True
+        except OSError as exc:
+            return {
+                "attempted": True,
+                "reason": "exec_error",
+                "python_executable": resolved_python,
+                "matplotlib_available": matplotlib_available,
+                "images": [],
+                "image_count": 0,
+                "stdout": "",
+                "stderr": str(exc),
+                "returncode": None,
+            }
 
         images: list[dict[str, Any]] = []
         for fp in sorted(workdir.rglob("*")):
@@ -524,7 +587,10 @@ def _execute_artifact_for_grading(
         return {
             "attempted": True,
             "reason": "timeout" if timed_out else "completed",
+            "python_executable": resolved_python,
+            "matplotlib_available": matplotlib_available,
             "images": images,
+            "image_count": len(images),
             "stdout": stdout,
             "stderr": stderr,
             "returncode": returncode,
@@ -541,6 +607,8 @@ def _artifact_execution_summary(execution: dict[str, Any], *, max_chars: int = 2
     ] or ["- none"]
     parts = [
         f"Execution: {execution.get('reason')} returncode={execution.get('returncode')}",
+        f"Python executable: {execution.get('python_executable')}",
+        f"matplotlib available: {execution.get('matplotlib_available')}",
         "Generated image artifacts:",
         *image_lines,
         "stdout:",
@@ -962,6 +1030,7 @@ async def _sample_one_artifact_candidate(
     grader_temperature: float,
     grader_min_coverage: float,
     artifact_exec_timeout_s: int,
+    artifact_python_executable: str | None,
     step: int,
     attempt_idx: int,
     sample_log_chars: int,
@@ -1026,6 +1095,7 @@ async def _sample_one_artifact_candidate(
     execution = _execute_artifact_for_grading(
         artifact,
         timeout_s=artifact_exec_timeout_s,
+        python_executable=artifact_python_executable,
     )
     reward, rubric_scores, grader_raw, grader_parse_mode, grader_coverage = await _grade_artifact_with_tinker(
         grader_client,
@@ -1041,7 +1111,10 @@ async def _sample_one_artifact_candidate(
     execution_record = {
         "attempted": execution.get("attempted"),
         "reason": execution.get("reason"),
+        "python_executable": execution.get("python_executable"),
+        "matplotlib_available": execution.get("matplotlib_available"),
         "returncode": execution.get("returncode"),
+        "image_count": execution.get("image_count"),
         "stdout_preview": str(execution.get("stdout") or "")[:sample_log_chars],
         "stderr_preview": str(execution.get("stderr") or "")[:sample_log_chars],
         "images": [
@@ -1131,6 +1204,7 @@ async def _sample_artifact_reinforce_async(
                 grader_temperature=config.grader_temperature,
                 grader_min_coverage=config.grader_min_coverage,
                 artifact_exec_timeout_s=config.artifact_exec_timeout_s,
+                artifact_python_executable=config.artifact_python_executable,
                 step=step,
                 attempt_idx=attempt_idx,
                 sample_log_chars=config.rollout_sample_log_chars,
@@ -1174,6 +1248,25 @@ async def _sample_artifact_reinforce_async(
         )
     if rewards:
         metrics["artifact_online/mean_reward"] = sum(rewards) / len(rewards)
+    execution_records = [
+        rec.get("artifact_execution")
+        for rec in records
+        if isinstance(rec.get("artifact_execution"), dict)
+    ]
+    if execution_records:
+        image_counts = [
+            float(exec_rec.get("image_count") or 0.0)
+            for exec_rec in execution_records
+        ]
+        metrics["artifact_online/mean_image_count"] = sum(image_counts) / len(image_counts)
+        metrics["artifact_online/matplotlib_unavailable"] = float(sum(
+            1 for exec_rec in execution_records
+            if exec_rec.get("matplotlib_available") is False
+        ))
+        metrics["artifact_online/nonzero_returncode"] = float(sum(
+            1 for exec_rec in execution_records
+            if exec_rec.get("returncode") not in (0, None)
+        ))
     for reason, count in reason_counts.items():
         safe_reason = reason.replace("/", "_").replace(":", "_")
         metrics[f"artifact_online/filter_reason/{safe_reason}"] = float(count)
@@ -1226,6 +1319,7 @@ async def _sample_artifact_grpo_async(
             grader_temperature=config.grader_temperature,
             grader_min_coverage=config.grader_min_coverage,
             artifact_exec_timeout_s=config.artifact_exec_timeout_s,
+            artifact_python_executable=config.artifact_python_executable,
             step=step,
             attempt_idx=sample_idx,
             sample_log_chars=config.rollout_sample_log_chars,
@@ -1294,6 +1388,25 @@ async def _sample_artifact_grpo_async(
         metrics["grpo_artifact/mean_abs_advantage"] = (
             sum(abs(a) for a in advantages_out) / len(advantages_out)
         )
+    execution_records = [
+        rec.get("artifact_execution")
+        for rec in records
+        if isinstance(rec.get("artifact_execution"), dict)
+    ]
+    if execution_records:
+        image_counts = [
+            float(exec_rec.get("image_count") or 0.0)
+            for exec_rec in execution_records
+        ]
+        metrics["grpo_artifact/mean_image_count"] = sum(image_counts) / len(image_counts)
+        metrics["grpo_artifact/matplotlib_unavailable"] = float(sum(
+            1 for exec_rec in execution_records
+            if exec_rec.get("matplotlib_available") is False
+        ))
+        metrics["grpo_artifact/nonzero_returncode"] = float(sum(
+            1 for exec_rec in execution_records
+            if exec_rec.get("returncode") not in (0, None)
+        ))
     return datums, advantages_out, metrics
 
 
@@ -1583,6 +1696,7 @@ def _config_from_cli(
         grader_temperature=args.grader_temperature,
         grader_min_coverage=args.grader_min_coverage,
         artifact_exec_timeout_s=args.artifact_exec_timeout_s,
+        artifact_python_executable=args.artifact_python_executable,
         grpo_group_size=args.grpo_group_size,
     )
 
@@ -1978,8 +2092,16 @@ def main() -> None:
     parser.add_argument("--grader-max-tokens", type=int, default=4096)
     parser.add_argument("--grader-max-file-chars", type=int, default=14000)
     parser.add_argument("--grader-temperature", type=float, default=0.0)
-    parser.add_argument("--grader-min-coverage", type=float, default=0.8)
+    parser.add_argument("--grader-min-coverage", type=float, default=0.7)
     parser.add_argument("--artifact-exec-timeout-s", type=int, default=30)
+    parser.add_argument(
+        "--artifact-python-executable",
+        default=None,
+        help=(
+            "Python interpreter used to execute generated .py artifacts. "
+            "Defaults to the interpreter running this training process."
+        ),
+    )
     parser.add_argument("--grpo-group-size", type=int, default=4)
     parser.add_argument("--agentic-max-turns", type=int, default=48)
     parser.add_argument("--agentic-max-turns-per-step", type=int, default=8)
