@@ -1145,12 +1145,13 @@ function SkillsPanel() {
 
   const setUpdateMode = (contextUpdate: boolean) => {
     setAutoContextInduction(contextUpdate);
-    if (activeSessionId && typeof window !== "undefined" && window.electron?.sendClientEvent) {
-      window.electron.sendClientEvent({
-        type: "session.setAutoContextInduction",
-        payload: { sessionId: activeSessionId, autoContextInduction: contextUpdate },
-      });
-    }
+    window.electron?.sendClientEvent?.({
+      type: "session.setAutoContextInduction",
+      payload: {
+        sessionId: activeSessionId ?? "",
+        autoContextInduction: contextUpdate,
+      },
+    });
   };
 
   const updateModeRow = (contextUpdate: boolean, title: string, description: string) => (

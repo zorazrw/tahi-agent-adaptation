@@ -42,6 +42,7 @@ import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
 import { gatherHumanFileEditDiffs } from "./libs/file-edit-diffs.js";
 import { buildTextDiff } from "./libs/text-diff.js";
 import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
+import { syncTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
@@ -801,9 +802,11 @@ export function handleClientEvent(event: ClientEvent) {
   }
 
   if (event.type === "session.setAutoContextInduction") {
+    const autoContextInduction = Boolean(event.payload.autoContextInduction);
+    syncTinkerAutoUpdateWatcher(autoContextInduction);
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {
-      sessions.updateSession(sid, { autoContextInduction: Boolean(event.payload.autoContextInduction) });
+      sessions.updateSession(sid, { autoContextInduction });
     }
     return;
   }

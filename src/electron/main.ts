@@ -50,7 +50,7 @@ import {
     saveTinkerProviderConfig,
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint, shutdownTinkerBridge } from "./libs/tinker-provider.js";
-import { startTinkerAutoUpdateWatcher, stopTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
+import { stopTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
 import { defaultRecordingsZipName, exportRecordingsBundleToZip } from "./libs/recording-bundle.js";
 
 type SaveMemoryParseResult =
@@ -250,8 +250,6 @@ app.on("ready", () => {
     });
 
     pollResources(mainWindow);
-
-    startTinkerAutoUpdateWatcher();
 
     ipcMainHandle("getStaticData", () => {
         return getStaticData();

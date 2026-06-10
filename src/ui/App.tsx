@@ -191,6 +191,13 @@ function App() {
   }, [apiConfigChecked, setApiConfigChecked, setShowSettingsModal]);
 
   useEffect(() => {
+    window.electron?.sendClientEvent?.({
+      type: "session.setAutoContextInduction",
+      payload: { sessionId: "", autoContextInduction: readStoredAutoInduction() },
+    });
+  }, []);
+
+  useEffect(() => {
     if (connected) sendEvent({ type: "session.list" });
   }, [connected, sendEvent]);
 
