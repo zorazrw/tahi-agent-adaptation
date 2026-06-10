@@ -1,6 +1,6 @@
 import type { Session } from "./session-store.js";
 import type { WorkflowNode } from "../types.js";
-import { loadApiConfig, type ApiConfig } from "./config-store.js";
+import { resolveVerifierApiConfig } from "./pi-config.js";
 import { getNodePath } from "./workflow-tree-utils.js";
 
 function messagesApiUrl(baseURL: string): string {
@@ -40,7 +40,7 @@ export async function generateUpdatedVerifiersForNode(
   userAddedExamples: string[] = [],
   fileEditDiffs: string[] = []
 ): Promise<string[] | null> {
-  const config = loadApiConfig();
+  const config = await resolveVerifierApiConfig();
   if (!config) return null;
 
   const messageList = userMessages

@@ -4,7 +4,7 @@ import type { VerifierMark } from "../types.js";
 import type { WorkflowNode } from "../types.js";
 import type { Session } from "./session-store.js";
 import { getNodePath } from "./workflow-tree-utils.js";
-import { loadApiConfig, type ApiConfig } from "./config-store.js";
+import { resolveVerifierApiConfig } from "./pi-config.js";
 
 function messagesApiUrl(baseURL: string): string {
   const base = baseURL.replace(/\/*$/, "");
@@ -33,7 +33,7 @@ export async function labelVerifiersForNode(
   const n = node.verifiers.length;
   if (n === 0) return [];
 
-  const config = loadApiConfig();
+  const config = await resolveVerifierApiConfig();
   if (!config) {
     return node.verifiers.map(() => undefined);
   }

@@ -20,7 +20,7 @@ import type {
   TinkerProviderInput,
 } from "../types.js";
 import { getSkillLoaderPaths } from "./skill-store.js";
-import { loadApiConfig } from "./config-store.js";
+import { loadApiConfig, saveApiConfig, type ApiConfig } from "./config-store.js";
 import {
   TINKER_PROVIDER,
   readStoredTinkerProviderConfig,
@@ -32,6 +32,7 @@ import { registerTinkerProvider } from "./tinker-provider.js";
 
 const PI_AGENT_DIR_NAME = "pi-agent";
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
+const DEFAULT_VERIFIER_MODEL = "claude-haiku-4-5";
 const OPENAI_COMPATIBLE_PROVIDER = "openai-compatible" as const;
 const OPENAI_COMPATIBLE_API_KEY_PLACEHOLDER = "${OPENAI_COMPATIBLE_API_KEY}";
 
@@ -72,6 +73,53 @@ function getTinkerConfigPath(): string {
 type ModelsJsonConfig = {
   providers?: Record<string, Record<string, unknown>>;
 };
+
+function readAnthropicBaseUrl(): string {
+  const baseUrl = readModelsConfig().providers?.anthropic?.baseUrl;
+  if (typeof baseUrl === "string" && baseUrl.trim()) {
+    return baseUrl.trim().replace(/\/+$/, "");
+  }
+  return DEFAULT_ANTHROPIC_BASE_URL;
+}
+
+function verifierModelForAnthropic(): string {
+  const settings = getAgentSettings();
+  if (settings.defaultProvider === "anthropic" && settings.defaultModel?.trim()) {
+    return settings.defaultModel.trim();
+  }
+  return DEFAULT_VERIFIER_MODEL;
+}
+
+function toVerifierApiConfig(apiKey: string, model?: string, baseURL?: string): ApiConfig {
+  return {
+    apiKey,
+    baseURL: baseURL?.trim().replace(/\/+$/, "") || readAnthropicBaseUrl(),
+    model: model?.trim() || verifierModelForAnthropic(),
+    apiType: "anthropic",
+  };
+}
+
+/** Anthropic Messages API creds for verifier-labeler / verifier-generator. */
+export async function resolveVerifierApiConfig(): Promise<ApiConfig | null> {
+  const { authStorage } = createPiManagers(process.cwd());
+  const fromAuth = await authStorage.getApiKey("anthropic");
+  if (fromAuth?.trim()) {
+    return toVerifierApiConfig(fromAuth.trim());
+  }
+
+  const envKey = process.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN;
+  if (envKey?.trim()) {
+    return toVerifierApiConfig(
+      envKey.trim(),
+      process.env.ANTHROPIC_MODEL,
+      process.env.ANTHROPIC_BASE_URL
+    );
+  }
+
+  const legacy = readLegacyBootstrapConfig();
+  if (!legacy?.apiKey?.trim()) return null;
+  return toVerifierApiConfig(legacy.apiKey, legacy.model, legacy.baseURL);
+}
 
 function readLegacyBootstrapConfig(): LegacyBootstrapConfig | null {
   const uiConfig = loadApiConfig();
@@ -301,12 +349,20 @@ export function getProviderAuthStatus(provider: string): ProviderAuthStatus {
 
 export function saveProviderApiKey(provider: string, apiKey: string): void {
   const { authStorage } = createPiManagers(process.cwd());
-  authStorage.set(provider, { type: "api_key", key: apiKey.trim() });
+  const trimmed = apiKey.trim();
+  authStorage.set(provider, { type: "api_key", key: trimmed });
   // Verify the key was persisted to disk.
   const errors = authStorage.drainErrors();
   if (errors.length > 0) {
     console.error(`[pi-config] saveProviderApiKey: write errors for ${provider}:`, errors);
     throw new Error(`Failed to persist API key for ${provider}: ${errors[0]?.message ?? "unknown error"}`);
+  }
+  if (provider === "anthropic" && trimmed) {
+    try {
+      saveApiConfig(toVerifierApiConfig(trimmed));
+    } catch (e) {
+      console.warn("[pi-config] Failed to sync api-config.json for verifiers:", e);
+    }
   }
 }
 
@@ -447,6 +503,17 @@ export async function loginProvider(provider: string): Promise<void> {
     // with the callback server and freezes the renderer – making it look like
     // the login didn't work even when it succeeded.
   });
+
+  if (provider === "anthropic") {
+    const apiKey = await authStorage.getApiKey("anthropic");
+    if (apiKey?.trim()) {
+      try {
+        saveApiConfig(toVerifierApiConfig(apiKey.trim()));
+      } catch (e) {
+        console.warn("[pi-config] Failed to sync api-config.json after OAuth login:", e);
+      }
+    }
+  }
 }
 
 export function logoutProvider(provider: string): void {
