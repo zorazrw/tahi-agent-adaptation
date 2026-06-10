@@ -187,6 +187,60 @@ def _build_artifact_completion(
     return messages, is_agent
 
 
+def _criteria_from_verifier_list(verifiers: list[Any]) -> list[str]:
+    out: list[str] = []
+    for v in verifiers:
+        if isinstance(v, str) and v.strip():
+            out.append(v.strip())
+        elif isinstance(v, dict):
+            c = v.get("criterion")
+            if isinstance(c, str) and c.strip():
+                out.append(c.strip())
+    return out
+
+
+def _criteria_from_workflow_tree(nodes: list[Any]) -> list[str]:
+    out: list[str] = []
+
+    def walk(node: dict[str, Any]) -> None:
+        out.extend(_criteria_from_verifier_list(node.get("verifiers") or []))
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    for node in nodes:
+        if isinstance(node, dict):
+            walk(node)
+    return out
+
+
+def extract_final_verifier_criteria(session: dict[str, Any]) -> list[str]:
+    """Return final workflow criteria plus missing execution-unit criteria."""
+    units = session.get("task_units") or []
+    if not isinstance(units, list):
+        return []
+
+    planning = next(
+        (u for u in units if isinstance(u, dict) and u.get("intent") == "planning"),
+        units[0] if units and isinstance(units[0], dict) else None,
+    )
+    criteria: list[str] = []
+    if isinstance(planning, dict):
+        tree = planning.get("workflow_tree_final")
+        if isinstance(tree, list) and tree:
+            criteria = _criteria_from_workflow_tree(tree)
+
+    seen = set(criteria)
+    for unit in units:
+        if not isinstance(unit, dict) or unit.get("intent") == "planning":
+            continue
+        for c in _criteria_from_verifier_list(unit.get("verifiers") or []):
+            if c not in seen:
+                criteria.append(c)
+                seen.add(c)
+    return criteria
+
+
 def _build_conversation_context(
     base_prompt: list[dict],
     rounds: list[dict],
@@ -686,15 +740,7 @@ def extract_opd_examples(
     examples: list[dict[str, Any]] = []
 
     for session in sessions:
-        final_rubrics = []
-        for u in reversed(session.get("task_units", []) or []):
-            final_rubrics = [
-                str(r.get("criterion"))
-                for r in (u.get("verifiers") or [])
-                if isinstance(r, dict) and r.get("criterion")
-            ]
-            if final_rubrics:
-                break
+        final_rubrics = extract_final_verifier_criteria(session)
 
         file_index = _build_file_version_index(
             session,
@@ -1296,13 +1342,7 @@ def extract_reinforce_rollout_seeds(
         if not (isinstance(initial_task, str) and initial_task.strip()):
             continue
 
-        task_units = session.get("task_units") or []
-        verifiers = (task_units[-1].get("verifiers") or []) if task_units else []
-        rubrics = [
-            str(v["criterion"])
-            for v in verifiers
-            if isinstance(v, dict) and v.get("criterion")
-        ]
+        rubrics = extract_final_verifier_criteria(session)
 
         examples.append({
             "prompt_messages": [{"role": "user", "content": initial_task.strip()}],
@@ -1402,9 +1442,7 @@ def extract_reinforce_examples(
     for session in sessions:
         system_prompt = session.get("system_prompt", "")
         tool_schemas = session.get("tool_schemas")
-        # Rubrics: last task_unit's verifiers.
-        rubrics = session.get("task_units", [])[-1].get("verifiers", [])
-        rubrics = [v["criterion"] for v in rubrics]  # list[str]
+        rubrics = extract_final_verifier_criteria(session)
 
         accumulated: list[dict] = _session_initial_context(
             session, system_prompt, tool_schemas, renderer,

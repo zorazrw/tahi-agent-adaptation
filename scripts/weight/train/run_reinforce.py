@@ -36,6 +36,8 @@ import logging
 import os
 import random
 import re
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -138,6 +140,8 @@ class Config:
     grader_max_tokens: int = 4096
     grader_max_file_chars: int = 14000
     grader_temperature: float = 0.0
+    grader_min_coverage: float = 0.8
+    artifact_exec_timeout_s: int = 30
     grpo_group_size: int = 4
 
 
@@ -442,6 +446,132 @@ def _truncate_text(text: str, max_len: int) -> str:
     return text if len(text) <= max_len else text[:max_len] + "\n... [truncated]"
 
 
+_GRADE_IMAGE_SUFFIXES = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
+
+
+def _safe_artifact_basename(path: str) -> str:
+    name = Path(path.replace("\\", "/")).name
+    return name or "artifact.py"
+
+
+def _execute_artifact_for_grading(
+    artifact: dict[str, str],
+    *,
+    timeout_s: int,
+    max_images: int = 3,
+) -> dict[str, Any]:
+    """Run Python artifacts in a tempdir and collect generated image files."""
+    path = artifact.get("path", "")
+    content = artifact.get("content", "")
+    suffix = Path(path).suffix.lower()
+    if suffix != ".py":
+        return {
+            "attempted": False,
+            "reason": "not_python",
+            "images": [],
+            "stdout": "",
+            "stderr": "",
+            "returncode": None,
+        }
+
+    with tempfile.TemporaryDirectory(prefix="artifact_grade_") as tmp:
+        workdir = Path(tmp)
+        script_path = workdir / _safe_artifact_basename(path)
+        script_path.write_text(content, encoding="utf-8")
+        mpl_config = workdir / ".mplconfig"
+        mpl_config.mkdir(exist_ok=True)
+        env = os.environ.copy()
+        env.setdefault("MPLBACKEND", "Agg")
+        env["MPLCONFIGDIR"] = str(mpl_config)
+        try:
+            proc = subprocess.run(
+                ["python3", script_path.name],
+                cwd=workdir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=max(1, timeout_s),
+            )
+            returncode: int | None = proc.returncode
+            stdout = proc.stdout
+            stderr = proc.stderr
+            timed_out = False
+        except subprocess.TimeoutExpired as exc:
+            returncode = None
+            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+            stderr = (stderr + f"\nTimed out after {timeout_s}s").strip()
+            timed_out = True
+
+        images: list[dict[str, Any]] = []
+        for fp in sorted(workdir.rglob("*")):
+            if not fp.is_file():
+                continue
+            fmt = _GRADE_IMAGE_SUFFIXES.get(fp.suffix.lower())
+            if fmt is None:
+                continue
+            try:
+                images.append({
+                    "path": str(fp.relative_to(workdir)),
+                    "format": fmt,
+                    "data": fp.read_bytes(),
+                    "size": fp.stat().st_size,
+                })
+            except OSError:
+                continue
+            if len(images) >= max_images:
+                break
+        return {
+            "attempted": True,
+            "reason": "timeout" if timed_out else "completed",
+            "images": images,
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": returncode,
+        }
+
+
+def _artifact_execution_summary(execution: dict[str, Any], *, max_chars: int = 2000) -> str:
+    if not execution.get("attempted"):
+        return f"Execution: not attempted ({execution.get('reason', 'unknown')})."
+    images = execution.get("images") or []
+    image_lines = [
+        f"- {img.get('path')} ({img.get('format')}, {img.get('size')} bytes)"
+        for img in images
+    ] or ["- none"]
+    parts = [
+        f"Execution: {execution.get('reason')} returncode={execution.get('returncode')}",
+        "Generated image artifacts:",
+        *image_lines,
+        "stdout:",
+        _truncate_text(str(execution.get("stdout") or ""), max_chars),
+        "stderr:",
+        _truncate_text(str(execution.get("stderr") or ""), max_chars),
+    ]
+    return "\n".join(parts)
+
+
+def _insert_images_before_generation_suffix(
+    model_input: tinker.ModelInput,
+    images: list[dict[str, Any]],
+) -> tinker.ModelInput:
+    if not images:
+        return model_input
+    chunks = list(model_input.chunks)
+    image_chunks = [
+        tinker.types.ImageChunk(
+            data=img["data"],
+            format=img["format"],
+        )
+        for img in images
+        if img.get("format") in {"png", "jpeg"} and isinstance(img.get("data"), bytes)
+    ]
+    if not image_chunks:
+        return model_input
+    insert_at = max(0, len(chunks) - 1)
+    return tinker.ModelInput(chunks=[*chunks[:insert_at], *image_chunks, *chunks[insert_at:]])
+
+
 def _rubric_json_schema_hint(n: int) -> list[str]:
     return [
         'JSON schema example: {"results":[{"pass":true},{"pass":false}]}',
@@ -453,25 +583,29 @@ def _build_artifact_grader_prompt(
     rubrics: list[str],
     path: str,
     content: str,
+    execution: dict[str, Any],
     *,
     max_file_chars: int,
 ) -> str:
     numbered = "\n".join(f"{i}. {r}" for i, r in enumerate(rubrics))
     body = _truncate_text(content, max_file_chars)
     return "\n".join([
-        "Grade a Python script that is intended to generate a final image artifact.",
-        "The verifier lines were originally written for the generated image. You only see the script; judge whether running it would likely satisfy each verifier.",
+        "Grade generated task artifact(s) against verifier criteria.",
+        "Use the attached/generated artifacts and artifact content to decide whether each verifier is satisfied.",
         "Do not explain your reasoning. Think silently if needed.",
         "Return JSON only. Do not include reasoning, markdown, code fences, labels, or prose.",
         "Your first character must be { and your last character must be }.",
         *_rubric_json_schema_hint(len(rubrics)),
+        "If images are attached, use them as the primary evidence for visual criteria.",
         "",
         "Verifier lines:",
         numbered,
         "",
-        f"Script path: {path}",
-        "Script content:",
+        f"Artifact path: {path}",
+        "Artifact content:",
         body,
+        "",
+        _artifact_execution_summary(execution),
     ])
 
 
@@ -658,6 +792,7 @@ def _build_artifact_grader_retry_prompt(
     rubrics: list[str],
     path: str,
     content: str,
+    execution: dict[str, Any],
     previous_response: str,
     *,
     max_file_chars: int,
@@ -668,16 +803,19 @@ def _build_artifact_grader_retry_prompt(
     return "\n".join([
         "Your previous grader response was not machine-parseable or did not contain one judgment per verifier.",
         "Return only a valid JSON object now. No markdown, no prose, no analysis.",
-        "If the previous response explicitly judged a verifier, preserve that judgment. If it did not, judge the script directly.",
+        "If the previous response explicitly judged a verifier, preserve that judgment. If it did not, judge the artifact directly.",
         "The results array must have exactly one item per verifier, in order, with boolean pass values.",
         *_rubric_json_schema_hint(len(rubrics)),
+        "If images are attached, use them as the primary evidence for visual criteria.",
         "",
         "Verifier lines:",
         numbered,
         "",
-        f"Script path: {path}",
-        "Script content:",
+        f"Artifact path: {path}",
+        "Artifact content:",
         body,
+        "",
+        _artifact_execution_summary(execution),
         "",
         "Previous invalid grader response:",
         previous,
@@ -689,35 +827,51 @@ async def _grade_artifact_with_tinker(
     grader_renderer: renderers.Renderer,
     rubrics: list[str],
     artifact: dict[str, str],
+    execution: dict[str, Any],
     *,
     max_tokens: int,
     max_file_chars: int,
     temperature: float,
-) -> tuple[float, list[float], str, str]:
+    min_coverage: float,
+) -> tuple[float | None, list[float | None], str, str, float]:
     if not rubrics:
-        return 1.0, [], "no_rubrics", "none"
+        return 1.0, [], "no_rubrics", "none", 1.0
     prompt = _build_artifact_grader_prompt(
         rubrics,
         artifact["path"],
         artifact["content"],
+        execution,
         max_file_chars=max_file_chars,
     )
-    prompt_input = grader_renderer.build_generation_prompt([
+    text_prompt_input = grader_renderer.build_generation_prompt([
         {
             "role": "system",
             "content": "You are a strict JSON API. Return only valid JSON and no explanatory text.",
         },
         {"role": "user", "content": prompt},
     ])
-    result = await grader_client.sample_async(
-        prompt=prompt_input,
-        num_samples=1,
-        sampling_params=tinker.SamplingParams(
-            stop=grader_renderer.get_stop_sequences(),
-            max_tokens=max_tokens,
-            temperature=temperature,
-        ),
+    images = list(execution.get("images") or [])
+    prompt_input = _insert_images_before_generation_suffix(text_prompt_input, images)
+    sampling_params = tinker.SamplingParams(
+        stop=grader_renderer.get_stop_sequences(),
+        max_tokens=max_tokens,
+        temperature=temperature,
     )
+    try:
+        result = await grader_client.sample_async(
+            prompt=prompt_input,
+            num_samples=1,
+            sampling_params=sampling_params,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not images:
+            raise
+        logger.warning("Artifact grader image prompt failed (%s); retrying text-only", exc)
+        result = await grader_client.sample_async(
+            prompt=text_prompt_input,
+            num_samples=1,
+            sampling_params=sampling_params,
+        )
     raw = str(grader_renderer.tokenizer.decode(list(result.sequences[0].tokens)))
     passes, parse_mode = _parse_artifact_grader_results_best_effort(raw, len(rubrics))
     if _parse_coverage(passes) < len(rubrics):
@@ -725,25 +879,38 @@ async def _grade_artifact_with_tinker(
             rubrics,
             artifact["path"],
             artifact["content"],
+            execution,
             raw,
             max_file_chars=max_file_chars,
         )
-        retry_input = grader_renderer.build_generation_prompt([
+        retry_text_input = grader_renderer.build_generation_prompt([
             {
                 "role": "system",
                 "content": "You are a strict JSON repair API. Return only valid JSON and no explanatory text.",
             },
             {"role": "user", "content": retry_prompt},
         ])
-        retry_result = await grader_client.sample_async(
-            prompt=retry_input,
-            num_samples=1,
-            sampling_params=tinker.SamplingParams(
-                stop=grader_renderer.get_stop_sequences(),
-                max_tokens=max(max_tokens, 2048),
-                temperature=0.0,
-            ),
+        retry_input = _insert_images_before_generation_suffix(retry_text_input, images)
+        retry_sampling_params = tinker.SamplingParams(
+            stop=grader_renderer.get_stop_sequences(),
+            max_tokens=max(max_tokens, 2048),
+            temperature=0.0,
         )
+        try:
+            retry_result = await grader_client.sample_async(
+                prompt=retry_input,
+                num_samples=1,
+                sampling_params=retry_sampling_params,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not images:
+                raise
+            logger.warning("Artifact grader retry image prompt failed (%s); retrying text-only", exc)
+            retry_result = await grader_client.sample_async(
+                prompt=retry_text_input,
+                num_samples=1,
+                sampling_params=retry_sampling_params,
+            )
         retry_raw = str(grader_renderer.tokenizer.decode(list(retry_result.sequences[0].tokens)))
         retry_passes, retry_parse_mode = _parse_artifact_grader_results_best_effort(
             retry_raw,
@@ -754,19 +921,29 @@ async def _grade_artifact_with_tinker(
             parse_mode = f"retry_{retry_parse_mode}"
             raw = retry_raw
     if not any(p is not None for p in passes):
-        logger.warning("Artifact grader parse failed; reward=0.0")
-        return 0.0, [0.0] * len(rubrics), raw, parse_mode
+        logger.warning("Artifact grader parse failed; sample skipped")
+        return None, [None] * len(rubrics), raw, parse_mode, 0.0
+    coverage = _parse_coverage(passes) / max(len(rubrics), 1)
     missing_idx = [i for i, p in enumerate(passes) if p is None]
     if missing_idx:
         logger.warning(
-            "Artifact grader parse mode=%s recovered %d/%d judgments; missing %s scored as 0.0",
+            "Artifact grader parse mode=%s recovered %d/%d judgments; missing %s treated as unknown",
             parse_mode,
             len(rubrics) - len(missing_idx),
             len(rubrics),
             missing_idx[:20],
         )
-    scores = [1.0 if p is True else 0.0 for p in passes]
-    return sum(scores) / len(rubrics), scores, raw, parse_mode
+    scores = [None if p is None else 1.0 if p is True else 0.0 for p in passes]
+    if coverage < min_coverage:
+        logger.warning(
+            "Artifact grader coverage %.3f below threshold %.3f; sample skipped",
+            coverage,
+            min_coverage,
+        )
+        return None, scores, raw, f"{parse_mode}_low_coverage", coverage
+    known_scores = [s for s in scores if s is not None]
+    reward = sum(known_scores) / len(known_scores) if known_scores else None
+    return reward, scores, raw, parse_mode, coverage
 
 
 async def _sample_one_artifact_candidate(
@@ -783,6 +960,8 @@ async def _sample_one_artifact_candidate(
     grader_max_tokens: int,
     grader_max_file_chars: int,
     grader_temperature: float,
+    grader_min_coverage: float,
+    artifact_exec_timeout_s: int,
     step: int,
     attempt_idx: int,
     sample_log_chars: int,
@@ -844,22 +1023,62 @@ async def _sample_one_artifact_candidate(
             "record": rec,
             "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
         }
-    reward, rubric_scores, grader_raw, grader_parse_mode = await _grade_artifact_with_tinker(
+    execution = _execute_artifact_for_grading(
+        artifact,
+        timeout_s=artifact_exec_timeout_s,
+    )
+    reward, rubric_scores, grader_raw, grader_parse_mode, grader_coverage = await _grade_artifact_with_tinker(
         grader_client,
         grader_renderer,
         [str(r) for r in row.get("rubrics", [])],
         artifact,
+        execution,
         max_tokens=grader_max_tokens,
         max_file_chars=grader_max_file_chars,
         temperature=grader_temperature,
+        min_coverage=grader_min_coverage,
     )
+    execution_record = {
+        "attempted": execution.get("attempted"),
+        "reason": execution.get("reason"),
+        "returncode": execution.get("returncode"),
+        "stdout_preview": str(execution.get("stdout") or "")[:sample_log_chars],
+        "stderr_preview": str(execution.get("stderr") or "")[:sample_log_chars],
+        "images": [
+            {
+                "path": img.get("path"),
+                "format": img.get("format"),
+                "size": img.get("size"),
+            }
+            for img in (execution.get("images") or [])
+        ],
+    }
+    if reward is None:
+        rec.update({
+            "valid": False,
+            "reason": "grader_low_coverage",
+            "rubric_scores": rubric_scores,
+            "grader_parse_mode": grader_parse_mode,
+            "grader_coverage": grader_coverage,
+            "grader_raw_preview": grader_raw[:sample_log_chars],
+            "graded_path": artifact["path"],
+            "artifact_execution": execution_record,
+        })
+        return {
+            "valid": False,
+            "reason": "grader_low_coverage",
+            "record": rec,
+            "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
+        }
     rec.update({
         "valid": True,
         "reward": reward,
         "rubric_scores": rubric_scores,
         "grader_parse_mode": grader_parse_mode,
+        "grader_coverage": grader_coverage,
         "grader_raw_preview": grader_raw[:sample_log_chars],
         "graded_path": artifact["path"],
+        "artifact_execution": execution_record,
     })
     return {
         "valid": True,
@@ -910,6 +1129,8 @@ async def _sample_artifact_reinforce_async(
                 grader_max_tokens=config.grader_max_tokens,
                 grader_max_file_chars=config.grader_max_file_chars,
                 grader_temperature=config.grader_temperature,
+                grader_min_coverage=config.grader_min_coverage,
+                artifact_exec_timeout_s=config.artifact_exec_timeout_s,
                 step=step,
                 attempt_idx=attempt_idx,
                 sample_log_chars=config.rollout_sample_log_chars,
@@ -1003,6 +1224,8 @@ async def _sample_artifact_grpo_async(
             grader_max_tokens=config.grader_max_tokens,
             grader_max_file_chars=config.grader_max_file_chars,
             grader_temperature=config.grader_temperature,
+            grader_min_coverage=config.grader_min_coverage,
+            artifact_exec_timeout_s=config.artifact_exec_timeout_s,
             step=step,
             attempt_idx=sample_idx,
             sample_log_chars=config.rollout_sample_log_chars,
@@ -1358,6 +1581,8 @@ def _config_from_cli(
         grader_max_tokens=args.grader_max_tokens,
         grader_max_file_chars=args.grader_max_file_chars,
         grader_temperature=args.grader_temperature,
+        grader_min_coverage=args.grader_min_coverage,
+        artifact_exec_timeout_s=args.artifact_exec_timeout_s,
         grpo_group_size=args.grpo_group_size,
     )
 
@@ -1399,20 +1624,20 @@ async def run_artifact_policy_training(
     service_client = tinker.ServiceClient(base_url=config.base_url)
     if resume_info:
         assert resume_info.state_path is not None
-        training_client = service_client.create_training_client_from_state_with_optimizer(
+        training_client = await service_client.create_training_client_from_state_with_optimizer_async(
             resume_info.state_path, user_metadata=user_metadata,
         )
     elif config.load_checkpoint_path:
-        training_client = service_client.create_training_client_from_state(
+        training_client = await service_client.create_training_client_from_state_async(
             config.load_checkpoint_path, user_metadata=user_metadata,
         )
     else:
-        training_client = service_client.create_lora_training_client(
+        training_client = await service_client.create_lora_training_client_async(
             base_model=config.model_name, rank=config.lora_rank, user_metadata=user_metadata,
         )
 
-    sampling_client = training_client.save_weights_and_get_sampling_client()
-    grader_client = service_client.create_sampling_client(base_model=grader_model_name)
+    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+    grader_client = await service_client.create_sampling_client_async(base_model=grader_model_name)
     n_batches = len(dataset)
     total_steps = n_batches * config.num_epochs
     if config.max_steps is not None:
@@ -1525,7 +1750,7 @@ async def run_artifact_policy_training(
                     loop_state={"epoch": epoch_idx, "batch": batch_idx},
                     ttl_seconds=config.ttl_seconds,
                 )
-            sampling_client = training_client.save_weights_and_get_sampling_client()
+            sampling_client = await training_client.save_weights_and_get_sampling_client_async()
 
     await checkpoint_utils.save_checkpoint_async(
         training_client=training_client,
@@ -1574,19 +1799,19 @@ async def run_online_training(
     service_client = tinker.ServiceClient(base_url=config.base_url)
     if resume_info:
         assert resume_info.state_path is not None
-        training_client = service_client.create_training_client_from_state_with_optimizer(
+        training_client = await service_client.create_training_client_from_state_with_optimizer_async(
             resume_info.state_path, user_metadata=user_metadata,
         )
     elif config.load_checkpoint_path:
-        training_client = service_client.create_training_client_from_state(
+        training_client = await service_client.create_training_client_from_state_async(
             config.load_checkpoint_path, user_metadata=user_metadata,
         )
     else:
-        training_client = service_client.create_lora_training_client(
+        training_client = await service_client.create_lora_training_client_async(
             base_model=config.model_name, rank=config.lora_rank, user_metadata=user_metadata,
         )
 
-    sampling_client = training_client.save_weights_and_get_sampling_client()
+    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
     n_batches = len(dataset)
     total_steps = n_batches * config.num_epochs
     if config.max_steps is not None:
@@ -1669,7 +1894,7 @@ async def run_online_training(
                     loop_state={"epoch": epoch_idx, "batch": batch_idx},
                     ttl_seconds=config.ttl_seconds,
                 )
-            sampling_client = training_client.save_weights_and_get_sampling_client()
+            sampling_client = await training_client.save_weights_and_get_sampling_client_async()
 
     await checkpoint_utils.save_checkpoint_async(
         training_client=training_client,
@@ -1753,6 +1978,8 @@ def main() -> None:
     parser.add_argument("--grader-max-tokens", type=int, default=4096)
     parser.add_argument("--grader-max-file-chars", type=int, default=14000)
     parser.add_argument("--grader-temperature", type=float, default=0.0)
+    parser.add_argument("--grader-min-coverage", type=float, default=0.8)
+    parser.add_argument("--artifact-exec-timeout-s", type=int, default=30)
     parser.add_argument("--grpo-group-size", type=int, default=4)
     parser.add_argument("--agentic-max-turns", type=int, default=48)
     parser.add_argument("--agentic-max-turns-per-step", type=int, default=8)
