@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import io
 import json
 import logging
 import os
@@ -48,6 +49,7 @@ from typing import Any, Literal, cast
 import tinker
 import torch
 import chz
+from PIL import Image
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.supervised.types import ChatDatasetBuilder, ChatDatasetBuilderCommonConfig
@@ -451,6 +453,7 @@ def _truncate_text(text: str, max_len: int) -> str:
 
 
 _GRADE_IMAGE_SUFFIXES = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
+_GRADER_IMAGE_MAX_BYTES = 2 * 1024 * 1024
 _MISSING_FILE_RE = re.compile(
     r"(?:FileNotFoundError: .*)?No such file or directory: ['\"]([^'\"]+)['\"]"
 )
@@ -704,6 +707,74 @@ def _artifact_execution_summary(execution: dict[str, Any], *, max_chars: int = 2
         _truncate_text(str(execution.get("stderr") or ""), max_chars),
     ]
     return "\n".join(parts)
+
+
+def _encode_image_bytes(image: Image.Image, image_format: str) -> bytes:
+    buffer = io.BytesIO()
+    if image_format == "png":
+        image.save(buffer, format="PNG", optimize=True, compress_level=9)
+    else:
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+        image.save(buffer, format="JPEG", quality=90, optimize=True)
+    return buffer.getvalue()
+
+
+def _shrink_image_for_grader(
+    img: dict[str, Any],
+    *,
+    max_bytes: int = _GRADER_IMAGE_MAX_BYTES,
+) -> dict[str, Any] | None:
+    data = img.get("data")
+    image_format = str(img.get("format") or "").lower()
+    if not isinstance(data, bytes) or image_format not in {"png", "jpeg"}:
+        return None
+    if len(data) <= max_bytes:
+        return img
+    try:
+        with Image.open(io.BytesIO(data)) as opened:
+            source = opened.copy()
+    except Exception:  # noqa: BLE001
+        return None
+
+    for scale in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5):
+        if scale == 1.0:
+            candidate = source.copy()
+        else:
+            width = max(1, int(source.width * scale))
+            height = max(1, int(source.height * scale))
+            candidate = source.resize((width, height), Image.Resampling.LANCZOS)
+        encoded = _encode_image_bytes(candidate, image_format)
+        if len(encoded) <= max_bytes:
+            return {
+                **img,
+                "data": encoded,
+                "size": len(encoded),
+            }
+    return None
+
+
+def _prepare_images_for_grader(
+    images: list[dict[str, Any]],
+    *,
+    max_bytes: int = _GRADER_IMAGE_MAX_BYTES,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    prepared: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for img in images:
+        size = int(img.get("size") or len(img.get("data") or b""))
+        if size <= max_bytes:
+            prepared.append(img)
+            continue
+        shrunk = _shrink_image_for_grader(img, max_bytes=max_bytes)
+        if shrunk is not None:
+            notes.append(
+                f"compressed {img.get('path')} from {size} to {int(shrunk.get('size') or 0)} bytes"
+            )
+            prepared.append(shrunk)
+            continue
+        notes.append(f"dropped {img.get('path')} ({size} bytes) because it exceeds grader asset limit")
+    return prepared, notes
 
 
 def _insert_images_before_generation_suffix(
@@ -1006,7 +1077,10 @@ async def _grade_artifact_with_tinker(
         {"role": "user", "content": prompt},
     ])
     images = list(execution.get("images") or [])
-    prompt_input = _insert_images_before_generation_suffix(text_prompt_input, images)
+    grader_images, image_notes = _prepare_images_for_grader(images)
+    for note in image_notes:
+        logger.info("Artifact grader image prep: %s", note)
+    prompt_input = _insert_images_before_generation_suffix(text_prompt_input, grader_images)
     sampling_params = tinker.SamplingParams(
         stop=grader_renderer.get_stop_sequences(),
         max_tokens=max_tokens,
@@ -1019,7 +1093,7 @@ async def _grade_artifact_with_tinker(
             sampling_params=sampling_params,
         )
     except Exception as exc:  # noqa: BLE001
-        if not images:
+        if not grader_images:
             raise
         logger.warning("Artifact grader image prompt failed (%s); retrying text-only", exc)
         result = await grader_client.sample_async(
@@ -1045,7 +1119,7 @@ async def _grade_artifact_with_tinker(
             },
             {"role": "user", "content": retry_prompt},
         ])
-        retry_input = _insert_images_before_generation_suffix(retry_text_input, images)
+        retry_input = _insert_images_before_generation_suffix(retry_text_input, grader_images)
         retry_sampling_params = tinker.SamplingParams(
             stop=grader_renderer.get_stop_sequences(),
             max_tokens=max(max_tokens, 2048),
@@ -1058,7 +1132,7 @@ async def _grade_artifact_with_tinker(
                 sampling_params=retry_sampling_params,
             )
         except Exception as exc:  # noqa: BLE001
-            if not images:
+            if not grader_images:
                 raise
             logger.warning("Artifact grader retry image prompt failed (%s); retrying text-only", exc)
             retry_result = await grader_client.sample_async(
