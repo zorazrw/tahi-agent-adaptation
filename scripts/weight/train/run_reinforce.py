@@ -451,6 +451,9 @@ def _truncate_text(text: str, max_len: int) -> str:
 
 
 _GRADE_IMAGE_SUFFIXES = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
+_MISSING_FILE_RE = re.compile(
+    r"(?:FileNotFoundError: .*)?No such file or directory: ['\"]([^'\"]+)['\"]"
+)
 
 
 def _safe_artifact_basename(path: str) -> str:
@@ -595,6 +598,90 @@ def _execute_artifact_for_grading(
             "stderr": stderr,
             "returncode": returncode,
         }
+
+
+def _artifact_execution_record(
+    execution: dict[str, Any],
+    *,
+    sample_log_chars: int,
+) -> dict[str, Any]:
+    return {
+        "attempted": execution.get("attempted"),
+        "reason": execution.get("reason"),
+        "python_executable": execution.get("python_executable"),
+        "matplotlib_available": execution.get("matplotlib_available"),
+        "returncode": execution.get("returncode"),
+        "image_count": execution.get("image_count"),
+        "stdout_preview": str(execution.get("stdout") or "")[:sample_log_chars],
+        "stderr_preview": str(execution.get("stderr") or "")[:sample_log_chars],
+        "images": [
+            {
+                "path": img.get("path"),
+                "format": img.get("format"),
+                "size": img.get("size"),
+            }
+            for img in (execution.get("images") or [])
+        ],
+    }
+
+
+def _missing_external_input_path(artifact_path: str, stderr: str) -> str | None:
+    """Return a missing input path when artifact execution depends on absent files."""
+    match = _MISSING_FILE_RE.search(stderr)
+    if match is None:
+        return None
+    missing = match.group(1).strip()
+    if not missing:
+        return None
+    # Missing the artifact script itself is an execution setup problem, not a
+    # model dependency on session-local input files.
+    if Path(missing).name == _safe_artifact_basename(artifact_path):
+        return None
+    return missing
+
+
+def _pre_grader_artifact_decision(
+    artifact: dict[str, str],
+    execution: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Classify execution-only failures before spending a grader call."""
+    if Path(artifact.get("path", "")).suffix.lower() != ".py":
+        return None
+    if not execution.get("attempted"):
+        return None
+    stderr = str(execution.get("stderr") or "")
+    missing_input = _missing_external_input_path(artifact.get("path", ""), stderr)
+    if missing_input is not None:
+        return {
+            "valid": False,
+            "reason": "missing_external_file",
+            "grader_parse_mode": "skipped_missing_external_file",
+            "grader_raw": f"Skipped grader: missing external input file {missing_input!r}.",
+            "grader_coverage": 0.0,
+            "reward": None,
+        }
+    returncode = execution.get("returncode")
+    image_count = int(execution.get("image_count") or 0)
+    exec_reason = str(execution.get("reason") or "")
+    if exec_reason in {"timeout", "exec_error"} or returncode not in (0, None):
+        return {
+            "valid": True,
+            "reason": "execution_failed_zero_reward",
+            "grader_parse_mode": "skipped_execution_failed_zero_reward",
+            "grader_raw": "Skipped grader: artifact execution failed before producing a valid image.",
+            "grader_coverage": 1.0,
+            "reward": 0.0,
+        }
+    if image_count <= 0:
+        return {
+            "valid": True,
+            "reason": "no_image_zero_reward",
+            "grader_parse_mode": "skipped_no_image_zero_reward",
+            "grader_raw": "Skipped grader: artifact execution completed but generated no image files.",
+            "grader_coverage": 1.0,
+            "reward": 0.0,
+        }
+    return None
 
 
 def _artifact_execution_summary(execution: dict[str, Any], *, max_chars: int = 2000) -> str:
@@ -1097,10 +1184,50 @@ async def _sample_one_artifact_candidate(
         timeout_s=artifact_exec_timeout_s,
         python_executable=artifact_python_executable,
     )
+    execution_record = _artifact_execution_record(
+        execution,
+        sample_log_chars=sample_log_chars,
+    )
+    rubrics = [str(r) for r in row.get("rubrics", [])]
+    pre_grader_decision = _pre_grader_artifact_decision(artifact, execution)
+    if pre_grader_decision is not None:
+        rubric_scores = (
+            [0.0] * len(rubrics)
+            if pre_grader_decision.get("reward") is not None
+            else [None] * len(rubrics)
+        )
+        rec.update({
+            "valid": bool(pre_grader_decision["valid"]),
+            "reason": pre_grader_decision["reason"],
+            "reward": pre_grader_decision["reward"],
+            "rubric_scores": rubric_scores,
+            "grader_parse_mode": pre_grader_decision["grader_parse_mode"],
+            "grader_coverage": pre_grader_decision["grader_coverage"],
+            "grader_raw_preview": str(pre_grader_decision["grader_raw"])[:sample_log_chars],
+            "graded_path": artifact["path"],
+            "artifact_execution": execution_record,
+        })
+        if not pre_grader_decision["valid"]:
+            return {
+                "valid": False,
+                "reason": str(pre_grader_decision["reason"]),
+                "record": rec,
+                "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
+            }
+        reward = float(pre_grader_decision["reward"])
+        return {
+            "valid": True,
+            "reason": str(pre_grader_decision["reason"]),
+            "datum": datum,
+            "reward": reward,
+            "artifact": artifact,
+            "record": rec,
+            "rollout_elapsed_s": float(rec["rollout_elapsed_s"]),
+        }
     reward, rubric_scores, grader_raw, grader_parse_mode, grader_coverage = await _grade_artifact_with_tinker(
         grader_client,
         grader_renderer,
-        [str(r) for r in row.get("rubrics", [])],
+        rubrics,
         artifact,
         execution,
         max_tokens=grader_max_tokens,
@@ -1108,24 +1235,6 @@ async def _sample_one_artifact_candidate(
         temperature=grader_temperature,
         min_coverage=grader_min_coverage,
     )
-    execution_record = {
-        "attempted": execution.get("attempted"),
-        "reason": execution.get("reason"),
-        "python_executable": execution.get("python_executable"),
-        "matplotlib_available": execution.get("matplotlib_available"),
-        "returncode": execution.get("returncode"),
-        "image_count": execution.get("image_count"),
-        "stdout_preview": str(execution.get("stdout") or "")[:sample_log_chars],
-        "stderr_preview": str(execution.get("stderr") or "")[:sample_log_chars],
-        "images": [
-            {
-                "path": img.get("path"),
-                "format": img.get("format"),
-                "size": img.get("size"),
-            }
-            for img in (execution.get("images") or [])
-        ],
-    }
     if reward is None:
         rec.update({
             "valid": False,
@@ -1267,6 +1376,17 @@ async def _sample_artifact_reinforce_async(
             1 for exec_rec in execution_records
             if exec_rec.get("returncode") not in (0, None)
         ))
+    metrics["artifact_online/pre_grader_zero_reward"] = float(sum(
+        1 for rec in records
+        if rec.get("grader_parse_mode") in {
+            "skipped_execution_failed_zero_reward",
+            "skipped_no_image_zero_reward",
+        }
+    ))
+    metrics["artifact_online/missing_external_file"] = float(sum(
+        1 for rec in records
+        if rec.get("grader_parse_mode") == "skipped_missing_external_file"
+    ))
     for reason, count in reason_counts.items():
         safe_reason = reason.replace("/", "_").replace(":", "_")
         metrics[f"artifact_online/filter_reason/{safe_reason}"] = float(count)
@@ -1407,6 +1527,17 @@ async def _sample_artifact_grpo_async(
             1 for exec_rec in execution_records
             if exec_rec.get("returncode") not in (0, None)
         ))
+    metrics["grpo_artifact/pre_grader_zero_reward"] = float(sum(
+        1 for rec in records
+        if rec.get("grader_parse_mode") in {
+            "skipped_execution_failed_zero_reward",
+            "skipped_no_image_zero_reward",
+        }
+    ))
+    metrics["grpo_artifact/missing_external_file"] = float(sum(
+        1 for rec in records
+        if rec.get("grader_parse_mode") == "skipped_missing_external_file"
+    ))
     return datums, advantages_out, metrics
 
 
@@ -2092,7 +2223,7 @@ def main() -> None:
     parser.add_argument("--grader-max-tokens", type=int, default=4096)
     parser.add_argument("--grader-max-file-chars", type=int, default=14000)
     parser.add_argument("--grader-temperature", type=float, default=0.0)
-    parser.add_argument("--grader-min-coverage", type=float, default=0.7)
+    parser.add_argument("--grader-min-coverage", type=float, default=0.8)
     parser.add_argument("--artifact-exec-timeout-s", type=int, default=30)
     parser.add_argument(
         "--artifact-python-executable",
