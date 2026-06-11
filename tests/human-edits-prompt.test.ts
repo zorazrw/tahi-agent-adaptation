@@ -10,13 +10,15 @@ import {
 import { compactFileEditAnnotation } from "../src/electron/libs/text-diff.js";
 
 function wfSnapshot(
-  verifiers: Array<{ criterion: string; status: "success" | "failure" | "unchecked" }>
+  verifiers: Array<{ criterion: string; status: "success" | "failure" | "unchecked" }>,
+  nodeId = "n1",
+  description = "step"
 ) {
   return {
     workflow: [
       {
-        id: "n1",
-        description: "step",
+        id: nodeId,
+        description,
         outputFiles: [],
         verifiers,
         status: "pending",
@@ -29,17 +31,53 @@ function wfSnapshot(
   };
 }
 
+function twoNodeWf(
+  nodes: Array<{
+    id: string;
+    description: string;
+    verifiers: Array<{ criterion: string; status: "success" | "failure" | "unchecked" }>;
+  }>
+) {
+  return {
+    workflow: nodes.map((n) => ({
+      id: n.id,
+      description: n.description,
+      outputFiles: [],
+      verifiers: n.verifiers,
+      status: "pending",
+      children: [],
+    })),
+    file: [],
+    memory: {},
+    skill: {},
+  };
+}
+
 
 describe("compactFileEditAnnotation", () => {
-  test("shows compact line-change bullets, not full unified diff", () => {
+  test("code files: line-aligned - / + on changed lines only", () => {
     const out = compactFileEditAnnotation(
       "h1 { font-size: 24px; }\n.title { color: blue; }",
       "h1 { font-size: 36px; }\n.title { color: blue; }",
       "chart.html"
     );
     expect(out).toContain("path=chart.html");
+    expect(out).toContain("-");
+    expect(out).toContain("+");
+    expect(out).toContain("24px");
+    expect(out).toContain("36px");
+    expect(out).not.toContain("color: blue");
+  });
+
+  test("prose files: sentence-aligned compact bullets", () => {
+    const out = compactFileEditAnnotation(
+      "First sentence here. Second sentence stays.\n\nThird paragraph.",
+      "First sentence here. Second sentence changed.\n\nThird paragraph.",
+      "notes.md"
+    );
+    expect(out).toContain("path=notes.md");
     expect(out).toContain("•");
-    expect(out).not.toContain("- h1 { font-size: 24px; }");
+    expect(out).not.toContain("First sentence here");
   });
 });
 
@@ -76,7 +114,7 @@ describe("findHumanEditsWindowStart", () => {
 });
 
 describe("gatherVerifierEditDiffSinceAgentRound", () => {
-  test("single diff from agent run_result to user_prompt snapshot", () => {
+  test("single diff for active node from run_result to user_prompt", () => {
     const before = wfSnapshot([{ criterion: "A", status: "unchecked" }]);
     const after = wfSnapshot([{ criterion: "B", status: "unchecked" }]);
     const rows = [
@@ -84,23 +122,45 @@ describe("gatherVerifierEditDiffSinceAgentRound", () => {
       { message: { type: "edit_verifier" }, snapshot: after },
       { message: { type: "user_prompt" }, snapshot: after },
     ];
-    const diffs = gatherVerifierEditDiffSinceAgentRound(rows, 1, 2);
+    const diffs = gatherVerifierEditDiffSinceAgentRound(rows, 1, 2, "n1");
     expect(diffs).toHaveLength(1);
+    expect(diffs[0]).toContain("verifiers (step)");
     expect(diffs[0]).toContain("removed:");
     expect(diffs[0]).toContain("added:");
   });
 
-  test("skips when verifiers unchanged between endpoints", () => {
-    const snap = wfSnapshot([{ criterion: "Same", status: "unchecked" }]);
+  test("skips when no edit_verifier in current human-edit window", () => {
+    const before = wfSnapshot([{ criterion: "A", status: "unchecked" }]);
+    const after = wfSnapshot([{ criterion: "B", status: "unchecked" }]);
     const rows = [
-      { message: { type: "run_result" }, snapshot: snap },
-      { message: { type: "edit_verifier" }, snapshot: snap },
-      { message: { type: "user_prompt" }, snapshot: snap },
+      { message: { type: "run_result" }, snapshot: before },
+      { message: { type: "file_edit" }, snapshot: after },
+      { message: { type: "user_prompt" }, snapshot: after },
     ];
-    expect(gatherVerifierEditDiffSinceAgentRound(rows, 1, 2)).toHaveLength(0);
+    expect(gatherVerifierEditDiffSinceAgentRound(rows, 1, 2, "n1")).toHaveLength(0);
   });
 
-  test("ignores intermediate edit_verifier rows (endpoints only)", () => {
+  test("only includes verifiers from the requested node", () => {
+    const before = twoNodeWf([
+      { id: "n1", description: "step one", verifiers: [{ criterion: "A", status: "unchecked" }] },
+      { id: "n2", description: "step two", verifiers: [{ criterion: "Other", status: "unchecked" }] },
+    ]);
+    const after = twoNodeWf([
+      { id: "n1", description: "step one", verifiers: [{ criterion: "B", status: "unchecked" }] },
+      { id: "n2", description: "step two", verifiers: [{ criterion: "Other changed", status: "unchecked" }] },
+    ]);
+    const rows = [
+      { message: { type: "run_result" }, snapshot: before },
+      { message: { type: "edit_verifier" }, snapshot: after },
+      { message: { type: "user_prompt" }, snapshot: after },
+    ];
+    const diffs = gatherVerifierEditDiffSinceAgentRound(rows, 1, 2, "n1");
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]).toContain("step one");
+    expect(diffs[0]).not.toContain("Other");
+  });
+
+  test("endpoint diff ignores intermediate edit_verifier snapshots", () => {
     const mid = wfSnapshot([{ criterion: "X", status: "unchecked" }]);
     const before = wfSnapshot([{ criterion: "A", status: "unchecked" }]);
     const after = wfSnapshot([{ criterion: "B", status: "unchecked" }]);
@@ -110,7 +170,7 @@ describe("gatherVerifierEditDiffSinceAgentRound", () => {
       { message: { type: "edit_verifier" }, snapshot: after },
       { message: { type: "user_prompt" }, snapshot: after },
     ];
-    const diffs = gatherVerifierEditDiffSinceAgentRound(rows, 1, 3);
+    const diffs = gatherVerifierEditDiffSinceAgentRound(rows, 1, 3, "n1");
     expect(diffs).toHaveLength(1);
     expect(diffs[0]).toContain("A");
     expect(diffs[0]).toContain("B");

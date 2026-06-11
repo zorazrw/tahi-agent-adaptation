@@ -973,7 +973,7 @@ export function handleClientEvent(event: ClientEvent) {
     const promptWithHumanEdits = appendHumanEditsToContinuePrompt(
       event.payload.prompt,
       gatherFileEditDiffsSinceAgentRound(messageRows, session.cwd, editFrom, editTo),
-      gatherVerifierEditDiffSinceAgentRound(messageRows, editFrom, editTo)
+      gatherVerifierEditDiffSinceAgentRound(messageRows, editFrom, editTo, vNode)
     );
 
     runClaude({

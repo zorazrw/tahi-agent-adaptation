@@ -43,6 +43,42 @@ function truncSnippet(text: string, max = 160): string {
   return t.slice(0, max - 3).trimEnd() + "...";
 }
 
+const PLAIN_TEXT_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".text", ".rst"]);
+
+/** Prose / markdown / plain text — sentence chunks keep diffs short. */
+export function isPlainTextFilePath(path: string): boolean {
+  const base = path.replace(/\\/g, "/").split("/").pop() ?? path;
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return true;
+  return PLAIN_TEXT_EXTENSIONS.has(base.slice(dot).toLowerCase());
+}
+
+const SENTENCE_BREAK_RE = /(?<=[.!?])\s+/;
+
+/** Split prose into sentence-sized lines (paragraphs flattened). */
+export function linesForProseDiff(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const out: string[] = [];
+  for (const para of trimmed.split(/\n\s*\n/)) {
+    const flat = para.replace(/\s+/g, " ").trim();
+    if (!flat) continue;
+    const sentences = flat.split(SENTENCE_BREAK_RE).map((s) => s.trim()).filter(Boolean);
+    if (sentences.length > 0) out.push(...sentences);
+    else out.push(flat);
+  }
+  return out.length > 0 ? out : [trimmed];
+}
+
+/** Code / markup — one diff line per source line. */
+export function linesForCodeDiff(text: string): string[] {
+  return text.split(/\r?\n/).map((l) => l.replace(/\r$/, ""));
+}
+
+export function linesForFileDiff(text: string, path: string): string[] {
+  return isPlainTextFilePath(path) ? linesForProseDiff(text) : linesForCodeDiff(text);
+}
+
 function wordChangeSnippets(beforeLine: string, afterLine: string): string {
   const wa = beforeLine.split(/\s+/).filter(Boolean);
   const wb = afterLine.split(/\s+/).filter(Boolean);
@@ -72,21 +108,8 @@ function wordChangeSnippets(beforeLine: string, afterLine: string): string {
   return parts.length > 0 ? parts.join(", ") : `${truncSnippet(beforeLine, 100)} → ${truncSnippet(afterLine, 100)}`;
 }
 
-/**
- * Line-aligned compact diff: only changed line groups, with short token snippets (not a full unified diff).
- */
-export function compactFileEditAnnotation(
-  before: string,
-  after: string,
-  pathDisp: string,
-  maxChunks = 8
-): string {
-  if (before === after) return "";
-  const bl = before.split(/\r?\n/).map((l) => l.replace(/\r$/, ""));
-  const al = after.split(/\r?\n/).map((l) => l.replace(/\r$/, ""));
-  const ops = computeLineOps(bl, al);
+function formatProseDiffParts(ops: LineOp[], maxChunks: number): string[] {
   const parts: string[] = [];
-
   for (let k = 0; k < ops.length; k++) {
     if (ops[k].type === "equal") continue;
     const delLines: string[] = [];
@@ -110,6 +133,44 @@ export function compactFileEditAnnotation(
     }
     if (parts.length >= maxChunks) break;
   }
+  return parts;
+}
+
+/** Changed source lines only: ``-`` / ``+`` (no equal-line context). */
+function formatCodeDiffParts(ops: LineOp[], maxChunks: number): string[] {
+  const parts: string[] = [];
+  let chunks = 0;
+  for (let k = 0; k < ops.length; k++) {
+    if (ops[k].type === "equal") continue;
+    if (chunks > 0) parts.push("...");
+    while (k < ops.length && ops[k].type !== "equal") {
+      const op = ops[k];
+      if (op.type === "del") parts.push(`- ${truncSnippet(op.line, 300)}`);
+      else if (op.type === "add") parts.push(`+ ${truncSnippet(op.line, 300)}`);
+      k++;
+    }
+    k--;
+    chunks++;
+    if (chunks >= maxChunks) break;
+  }
+  return parts;
+}
+
+/**
+ * Compact file edit diff. Prose (.md, .txt, …): sentence-aligned bullets.
+ * Code/markup: line-aligned ``-`` / ``+`` on changed lines only.
+ */
+export function compactFileEditAnnotation(
+  before: string,
+  after: string,
+  pathDisp: string,
+  maxChunks = 8
+): string {
+  if (before === after) return "";
+  const ops = computeLineOps(linesForFileDiff(before, pathDisp), linesForFileDiff(after, pathDisp));
+  const parts = isPlainTextFilePath(pathDisp)
+    ? formatProseDiffParts(ops, maxChunks)
+    : formatCodeDiffParts(ops, maxChunks);
 
   if (parts.length === 0) return "";
   let body = parts.join("\n");

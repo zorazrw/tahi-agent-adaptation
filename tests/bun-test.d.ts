@@ -6,10 +6,12 @@ declare module "bun:test" {
   export function test(name: string, fn: TestFn): void;
   export function afterEach(fn: TestFn): void;
 
-  export const expect: <T>(actual: T) => {
+  type Matchers<T> = {
     toBe(expected: T): void;
     toEqual(expected: unknown): void;
     toContain(expected: string): void;
     toHaveLength(expected: number): void;
   };
+
+  export const expect: <T>(actual: T) => Matchers<T> & { not: Matchers<T> };
 }

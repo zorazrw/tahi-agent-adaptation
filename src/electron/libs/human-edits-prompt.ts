@@ -1,4 +1,6 @@
 type SnapshotWorkflowNode = {
+  id?: string;
+  description?: string;
   verifiers?: Array<{ criterion?: string; status?: string }>;
   children?: SnapshotWorkflowNode[];
 };
@@ -13,7 +15,31 @@ function oneLineField(val: unknown): string {
   return String(val).replace(/\s+/g, " ").trim();
 }
 
-/** Preorder flatten: one line per verifier as ``{criterion}: {status}`` (matches export). */
+export function findNodeInSnapshotWorkflow(
+  wf: SnapshotWorkflowNode[] | null | undefined,
+  nodeId: string
+): SnapshotWorkflowNode | null {
+  if (!wf?.length || !nodeId.trim()) return null;
+  const stack = [...wf];
+  while (stack.length > 0) {
+    const n = stack.shift()!;
+    if (n.id === nodeId) return n;
+    if (n.children?.length) stack.push(...n.children);
+  }
+  return null;
+}
+
+/** Verifier lines for one workflow node only. */
+export function flattenNodeVerifierLines(node: SnapshotWorkflowNode | null | undefined): string[] {
+  if (!node) return [];
+  return (node.verifiers ?? []).map((v) => {
+    const crit = oneLineField(v.criterion);
+    const st = oneLineField(v.status);
+    return crit ? `${crit}: ${st}` : `(empty criterion): ${st}`;
+  });
+}
+
+/** Preorder flatten: one line per verifier as ``{criterion}: {status}`` (all nodes). */
 export function flattenWorkflowVerifierLines(
   wf: SnapshotWorkflowNode[] | null | undefined
 ): string[] {
@@ -21,11 +47,7 @@ export function flattenWorkflowVerifierLines(
   function walk(nodes: SnapshotWorkflowNode[] | undefined) {
     if (!nodes?.length) return;
     for (const n of nodes) {
-      for (const v of n.verifiers ?? []) {
-        const crit = oneLineField(v.criterion);
-        const st = oneLineField(v.status);
-        out.push(crit ? `${crit}: ${st}` : `(empty criterion): ${st}`);
-      }
+      out.push(...flattenNodeVerifierLines(n));
       walk(n.children);
     }
   }
@@ -127,21 +149,41 @@ export function findHumanEditsWindowEnd(rows: SnapshotRow[]): number {
   return idx < rows.length ? idx : rows.length;
 }
 
+function hasHumanVerifierEditInWindow(rows: SnapshotRow[], editFrom: number, editTo: number): boolean {
+  const end = Math.min(editTo, rows.length);
+  for (let i = Math.max(0, editFrom); i < end; i++) {
+    if (rows[i].message.type === "edit_verifier") return true;
+  }
+  return false;
+}
+
 /**
- * Single verifier diff: after the last agent ``run_result`` → when the human sends the message.
+ * Verifier diff for the active workflow node only, and only when the human issued
+ * ``edit_verifier`` this round. Compares that node's verifiers at the last
+ * ``run_result`` vs the ``user_prompt`` snapshot (endpoints of the human-edit window).
  */
 export function gatherVerifierEditDiffSinceAgentRound(
   rows: SnapshotRow[],
   editFrom: number,
-  editTo: number
+  editTo: number,
+  nodeId: string | undefined
 ): string[] {
+  const nid = nodeId?.trim();
+  if (!nid) return [];
+  if (!hasHumanVerifierEditInWindow(rows, editFrom, editTo)) return [];
+
   const beforeIdx = editFrom > 0 && isAgentRoundEnd(rows[editFrom - 1].message) ? editFrom - 1 : -1;
   const afterIdx = editTo < rows.length && rows[editTo].message.type === "user_prompt" ? editTo : -1;
   if (beforeIdx < 0 || afterIdx < 0) return [];
 
+  const beforeNode = findNodeInSnapshotWorkflow(rows[beforeIdx].snapshot?.workflow ?? null, nid);
+  const afterNode = findNodeInSnapshotWorkflow(rows[afterIdx].snapshot?.workflow ?? null, nid);
+  const pathDisp = afterNode?.description?.trim() || beforeNode?.description?.trim() || nid;
+
   const annotation = compactVerifierLinesAnnotation(
-    flattenWorkflowVerifierLines(rows[beforeIdx].snapshot?.workflow ?? null),
-    flattenWorkflowVerifierLines(rows[afterIdx].snapshot?.workflow ?? null)
+    flattenNodeVerifierLines(beforeNode),
+    flattenNodeVerifierLines(afterNode),
+    `verifiers (${pathDisp})`
   );
   if (!annotation.trim() || isNoOpVerifierAnnotation(annotation)) return [];
   return [annotation];
