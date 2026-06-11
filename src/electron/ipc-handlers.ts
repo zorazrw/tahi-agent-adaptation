@@ -44,8 +44,13 @@ import {
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 import { createPiSessionManager, getAgentSettings, getPiAgentDir, getPiSessionsDir } from "./libs/pi-config.js";
 import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
-import { gatherHumanFileEditDiffs } from "./libs/file-edit-diffs.js";
-import { buildTextDiff } from "./libs/text-diff.js";
+import { gatherFileEditDiffsSinceAgentRound, gatherHumanFileEditDiffs } from "./libs/file-edit-diffs.js";
+import {
+  appendHumanEditsToContinuePrompt,
+  findHumanEditsWindowEnd,
+  findHumanEditsWindowStart,
+  gatherVerifierEditDiffSinceAgentRound,
+} from "./libs/human-edits-prompt.js";
 import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
 import { syncTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
 
@@ -962,8 +967,17 @@ export function handleClientEvent(event: ClientEvent) {
       }
     }
 
+    const messageRows = sessions.getMessageRowsWithSnapshots(session.id);
+    const editFrom = findHumanEditsWindowStart(messageRows);
+    const editTo = findHumanEditsWindowEnd(messageRows);
+    const promptWithHumanEdits = appendHumanEditsToContinuePrompt(
+      event.payload.prompt,
+      gatherFileEditDiffsSinceAgentRound(messageRows, session.cwd, editFrom, editTo),
+      gatherVerifierEditDiffSinceAgentRound(messageRows, editFrom, editTo)
+    );
+
     runClaude({
-      prompt: event.payload.prompt,
+      prompt: promptWithHumanEdits,
       session,
       ...(session.workflowTree?.length
         ? { trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS }
