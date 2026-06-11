@@ -204,4 +204,16 @@ describe("appendHumanEditsToContinuePrompt", () => {
     expect(prompt.split("path=verifiers").length - 1).toBe(1);
     expect(prompt).toContain("localized line changes");
   });
+
+  test("omits user text but keeps edit sections when prompt is empty", () => {
+    const prompt = appendHumanEditsToContinuePrompt(
+      "",
+      ["path=chart.html\n• font-size: 24px → 36px"],
+      ["path=verifiers\n• added: Large title: unchecked"]
+    );
+    expect(prompt.startsWith("---")).toBe(true);
+    expect(prompt).toContain("Human file edits");
+    expect(prompt).toContain("Human verifier edits");
+    expect(prompt).toContain("path=chart.html");
+  });
 });

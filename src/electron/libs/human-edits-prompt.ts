@@ -196,16 +196,17 @@ export function appendHumanEditsToContinuePrompt(
   verifierDiffs: string[]
 ): string {
   const trimmed = userPrompt.trim();
-  if (!trimmed) return trimmed;
   if (fileDiffs.length === 0 && verifierDiffs.length === 0) return trimmed;
 
-  const sections: string[] = [
-    trimmed,
-    "",
+  const sections: string[] = [];
+  if (trimmed) {
+    sections.push(trimmed, "");
+  }
+  sections.push(
     "---",
     "",
-    "The human made edits since your last response. Treat the current on-disk files and verifier criteria as authoritative.",
-  ];
+    "The human made edits since your last response. Treat the current on-disk files and verifier criteria as authoritative."
+  );
 
   if (fileDiffs.length > 0) {
     sections.push(
