@@ -689,10 +689,12 @@ const UserMessageCard = ({
   message,
   onRevertToBeforeMessage,
   revertDisabled,
+  label,
 }: {
   message: { type: "user_prompt"; prompt: string };
   onRevertToBeforeMessage?: () => void;
   revertDisabled?: boolean;
+  label?: string;
 }) => {
   const [copied, setCopied] = useState(false);
 
@@ -717,6 +719,11 @@ const UserMessageCard = ({
           )}
         </button>
         <div className="relative rounded-2xl rounded-tr-sm bg-surface-secondary border border-ink-900/8 px-4 py-3 pb-8">
+          {label ? (
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-primary/70 mb-1.5">
+              {label}
+            </div>
+          ) : null}
           <MessageResponse>{message.prompt}</MessageResponse>
           {onRevertToBeforeMessage && (
             <button
@@ -770,6 +777,15 @@ export function MessageCard({
             ? () => onRevertToBeforeMessage(messageIndex)
             : undefined
         }
+      />
+    );
+  }
+
+  if (message.type === "file_comment") {
+    return (
+      <UserMessageCard
+        message={{ type: "user_prompt", prompt: message.prompt }}
+        label={`Comment on ${message.path}`}
       />
     );
   }

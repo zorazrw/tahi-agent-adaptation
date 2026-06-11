@@ -219,6 +219,8 @@ export type EditVerifierMessage = { type: "edit_verifier" };
 /** LLM auto-refinement of verifiers after user prompts / file edits (not manual sidebar edits). */
 export type UpdateVerifiersMessage = { type: "update_verifiers" };
 export type FileEditMessage = { type: "file_edit"; path: string };
+/** Quoted selection + comment on a txt/md preview file; does not trigger an agent run by itself. */
+export type FileCommentMessage = { type: "file_comment"; path: string; prompt: string };
 
 export type StreamMessage =
   | UserPromptMessage
@@ -234,6 +236,7 @@ export type StreamMessage =
   | EditVerifierMessage
   | UpdateVerifiersMessage
   | FileEditMessage
+  | FileCommentMessage
   | LegacyMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
@@ -355,6 +358,7 @@ export type ClientEvent =
       };
     }
   | { type: "session.continue"; payload: { sessionId: string; prompt: string; verificationNodeId?: string } }
+  | { type: "session.addFileComment"; payload: { sessionId: string; path: string; prompt: string } }
   | { type: "session.stop"; payload: { sessionId: string } }
   | { type: "session.delete"; payload: { sessionId: string } }
   | { type: "session.updateWorkflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }

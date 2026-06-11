@@ -49,6 +49,8 @@ import {
   appendHumanEditsToContinuePrompt,
   findHumanEditsWindowEnd,
   findHumanEditsWindowStart,
+  formatFileCommentsForPrompt,
+  gatherPendingFileCommentsSinceAgentRound,
   gatherVerifierEditDiffSinceAgentRound,
 } from "./libs/human-edits-prompt.js";
 import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
@@ -689,7 +691,11 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   sessionLastVerificationNodeId.set(sessionId, nodeId);
   sessionContinueVerificationNodeId.delete(sessionId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
-  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd, node);
+  const messageRows = store.getMessageRowsWithSnapshots(sessionId);
+  const pendingComments = gatherPendingFileCommentsSinceAgentRound(messageRows);
+  const nodePrompt =
+    buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd, node) +
+    formatFileCommentsForPrompt(pendingComments);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",
@@ -973,7 +979,8 @@ export function handleClientEvent(event: ClientEvent) {
     const promptWithHumanEdits = appendHumanEditsToContinuePrompt(
       event.payload.prompt,
       gatherFileEditDiffsSinceAgentRound(messageRows, session.cwd, editFrom, editTo),
-      gatherVerifierEditDiffSinceAgentRound(messageRows, editFrom, editTo, vNode)
+      gatherVerifierEditDiffSinceAgentRound(messageRows, editFrom, editTo, vNode),
+      gatherPendingFileCommentsSinceAgentRound(messageRows)
     );
 
     runClaude({
@@ -1005,6 +1012,51 @@ export function handleClientEvent(event: ClientEvent) {
         });
       });
 
+    return;
+  }
+
+  if (event.type === "session.addFileComment") {
+    const { sessionId, path, prompt } = event.payload;
+    const session = sessions.getSession(sessionId);
+    if (!session) {
+      emit({ type: "session.deleted", payload: { sessionId } });
+      emit({
+        type: "runner.error",
+        payload: { sessionId, message: "Session no longer exists." },
+      });
+      return;
+    }
+
+    if (session.engine === "legacy-claude") {
+      emitLegacyReadonlyError(session.id, "add a file comment");
+      return;
+    }
+
+    if (session.status === "running") {
+      broadcast({
+        type: "runner.error",
+        payload: { sessionId, message: "Session is still running. Please wait or stop it first." },
+      });
+      return;
+    }
+
+    const pathForMessage = path.trim();
+    const commentPrompt = prompt.trim();
+    if (!pathForMessage || !commentPrompt) return;
+
+    const rowId = sessions.recordMessage(sessionId, {
+      type: "file_comment",
+      path: pathForMessage,
+      prompt: commentPrompt,
+    });
+    sessions.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(session));
+    broadcast({
+      type: "stream.message",
+      payload: {
+        sessionId,
+        message: { type: "file_comment", path: pathForMessage, prompt: commentPrompt },
+      },
+    });
     return;
   }
 

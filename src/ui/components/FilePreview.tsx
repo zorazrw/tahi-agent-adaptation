@@ -125,8 +125,8 @@ type FilePreviewProps = {
   cwd?: string | null;
   sessionId?: string | null;
   stepCompleted?: boolean;
-  /** Send quoted selection + comment to the agent (user ``message`` action). */
-  onTextComment?: (prompt: string) => void | Promise<void>;
+  /** Record quoted selection + comment without starting an agent run. */
+  onTextComment?: (prompt: string) => void;
 };
 
 const ZOOM_STEP = 0.1;

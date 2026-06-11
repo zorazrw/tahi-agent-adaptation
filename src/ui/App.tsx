@@ -7,7 +7,7 @@ import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
 import { MemoryModal } from "./components/MemoryModal";
-import { PromptInput, usePromptActions } from "./components/PromptInput";
+import { PromptInput } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
@@ -167,7 +167,6 @@ function App() {
   }, [handleServerEvent, handlePartialMessages, activeSessionId]);
 
   const { connected, sendEvent } = useIPC(onEvent);
-  const { continueWithPrompt } = usePromptActions(sendEvent);
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
@@ -359,13 +358,17 @@ function App() {
   }, [resetToLatest]);
 
   const handlePreviewTextComment = useCallback(
-    async (prompt: string) => {
-      await continueWithPrompt(prompt);
+    (prompt: string) => {
+      if (!activeSessionId || !previewFilePath) return;
+      sendEvent({
+        type: "session.addFileComment",
+        payload: { sessionId: activeSessionId, path: previewFilePath, prompt },
+      });
       setShouldAutoScroll(true);
       setHasNewMessages(false);
       resetToLatest();
     },
-    [continueWithPrompt, resetToLatest]
+    [activeSessionId, previewFilePath, resetToLatest, sendEvent]
   );
 
   const handleRevertToBeforeMessage = useCallback(

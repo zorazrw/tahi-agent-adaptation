@@ -11,7 +11,7 @@ type ToolbarState = {
 type Props = {
   children: ReactNode;
   filePath?: string;
-  onSendComment?: (prompt: string) => void | Promise<void>;
+  onSendComment?: (prompt: string) => void;
 };
 
 export function TextSelectionComment({

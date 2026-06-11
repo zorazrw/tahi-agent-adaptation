@@ -189,36 +189,63 @@ export function gatherVerifierEditDiffSinceAgentRound(
   return [annotation];
 }
 
+/** All file comments after the most recent agent ``run_result`` / ``result``. */
+export function gatherPendingFileCommentsSinceAgentRound(rows: SnapshotRow[]): string[] {
+  let start = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (isAgentRoundEnd(rows[i].message)) {
+      start = i + 1;
+      break;
+    }
+  }
+  const end = rows.length;
+  const out: string[] = [];
+  for (let i = start; i < end; i++) {
+    const msg = rows[i].message as { type?: string; prompt?: string };
+    if (msg.type !== "file_comment") continue;
+    const prompt = String(msg.prompt ?? "").trim();
+    if (prompt) out.push(prompt);
+  }
+  return out;
+}
+
+/** Suffix block for pending txt/md preview comments (empty when none). */
+export function formatFileCommentsForPrompt(comments: string[]): string {
+  if (comments.length === 0) return "";
+  return `\n\nHuman comments on text files:\n${comments.join("\n\n")}`;
+}
+
 /** Append human file and verifier edit diffs to a follow-up user message for task execution. */
 export function appendHumanEditsToContinuePrompt(
   userPrompt: string,
   fileDiffs: string[],
-  verifierDiffs: string[]
+  verifierDiffs: string[],
+  fileComments: string[] = []
 ): string {
   const trimmed = userPrompt.trim();
-  if (fileDiffs.length === 0 && verifierDiffs.length === 0) return trimmed;
+  if (fileDiffs.length === 0 && verifierDiffs.length === 0 && fileComments.length === 0) return trimmed;
 
-  const sections: string[] = [];
-  if (trimmed) {
-    sections.push(trimmed, "");
+  const parts: string[] = [];
+  if (fileDiffs.length > 0) {
+    parts.push(["Human file edits (localized line changes):", ...fileDiffs].join("\n"));
   }
-  sections.push(
+  if (verifierDiffs.length > 0) {
+    parts.push(["Human verifier edits:", ...verifierDiffs].join("\n"));
+  }
+  if (fileComments.length > 0) {
+    parts.push(`Human comments on text files:\n${fileComments.join("\n\n")}`);
+  }
+
+  const editsBlock = parts.join("\n\n");
+  if (!trimmed) return editsBlock;
+
+  return [
+    trimmed,
+    "",
     "---",
     "",
-    "The human made edits since your last response. Treat the current on-disk files and verifier criteria as authoritative."
-  );
-
-  if (fileDiffs.length > 0) {
-    sections.push(
-      "",
-      "Human file edits (localized line changes):",
-      ...fileDiffs
-    );
-  }
-
-  if (verifierDiffs.length > 0) {
-    sections.push("", "Human verifier edits:", ...verifierDiffs);
-  }
-
-  return sections.join("\n");
+    "The human made edits since your last response. Treat the current on-disk files and verifier criteria as authoritative.",
+    "",
+    editsBlock,
+  ].join("\n");
 }

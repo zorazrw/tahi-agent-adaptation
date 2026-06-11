@@ -5,7 +5,9 @@ import {
   findHumanEditsWindowEnd,
   findHumanEditsWindowStart,
   flattenWorkflowVerifierLines,
+  gatherPendingFileCommentsSinceAgentRound,
   gatherVerifierEditDiffSinceAgentRound,
+  formatFileCommentsForPrompt,
 } from "../src/electron/libs/human-edits-prompt.js";
 import { compactFileEditAnnotation } from "../src/electron/libs/text-diff.js";
 
@@ -189,6 +191,28 @@ describe("endpoint file diff (run_result → user_prompt)", () => {
   });
 });
 
+describe("gatherPendingFileCommentsSinceAgentRound", () => {
+  test("collects comments after last run_result up to the next user_prompt", () => {
+    const rows = [
+      { message: { type: "run_result" } },
+      { message: { type: "file_comment", prompt: "Quote:\nline\n\nMake this bigger" } },
+      { message: { type: "file_edit" } },
+      { message: { type: "user_prompt" } },
+    ];
+    expect(gatherPendingFileCommentsSinceAgentRound(rows)).toEqual(["Quote:\nline\n\nMake this bigger"]);
+  });
+
+  test("collects multiple pending comments", () => {
+    const rows = [
+      { message: { type: "user_prompt" } },
+      { message: { type: "run_result" } },
+      { message: { type: "file_comment", prompt: "First note" } },
+      { message: { type: "file_comment", prompt: "Second note" } },
+    ];
+    expect(gatherPendingFileCommentsSinceAgentRound(rows)).toEqual(["First note", "Second note"]);
+  });
+});
+
 describe("appendHumanEditsToContinuePrompt", () => {
   test("returns plain prompt when there are no edits", () => {
     expect(appendHumanEditsToContinuePrompt("make it bigger", [], [])).toBe("make it bigger");
@@ -205,15 +229,42 @@ describe("appendHumanEditsToContinuePrompt", () => {
     expect(prompt).toContain("localized line changes");
   });
 
-  test("omits user text but keeps edit sections when prompt is empty", () => {
+  test("omits user text and --- boilerplate when prompt is empty", () => {
     const prompt = appendHumanEditsToContinuePrompt(
       "",
       ["path=chart.html\n• font-size: 24px → 36px"],
       ["path=verifiers\n• added: Large title: unchecked"]
     );
-    expect(prompt.startsWith("---")).toBe(true);
-    expect(prompt).toContain("Human file edits");
+    expect(prompt.startsWith("---")).toBe(false);
+    expect(prompt.startsWith("Human file edits")).toBe(true);
     expect(prompt).toContain("Human verifier edits");
     expect(prompt).toContain("path=chart.html");
+  });
+
+  test("comments-only with empty prompt start directly with the comments section", () => {
+    const prompt = appendHumanEditsToContinuePrompt("", [], [], ["Expand this section"]);
+    expect(prompt).toBe("Human comments on text files:\nExpand this section");
+  });
+
+  test("appends accumulated file comments", () => {
+    const prompt = appendHumanEditsToContinuePrompt(
+      "please revise",
+      [],
+      [],
+      ["Quote (from notes.md):\nIntro\n\nExpand this section"]
+    );
+    expect(prompt).toContain("please revise");
+    expect(prompt).toContain("Human comments on text files:");
+    expect(prompt).toContain("Expand this section");
+  });
+});
+
+describe("formatFileCommentsForPrompt", () => {
+  test("returns empty string when there are no comments", () => {
+    expect(formatFileCommentsForPrompt([])).toBe("");
+  });
+
+  test("joins multiple comments", () => {
+    expect(formatFileCommentsForPrompt(["First", "Second"])).toContain("First\n\nSecond");
   });
 });
