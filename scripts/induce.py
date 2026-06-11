@@ -8,11 +8,11 @@ Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 When export JSON includes ``expertise_task`` (e.g. ``data-viz-html``), writes to that stem
 instead of slugifying the session title, and includes existing memory/skill file content in the LM prompt.
 
-Requires: python-dotenv; ``anthropic`` for Claude models; Pi runtime deps (e.g. tinker bridge) otherwise.
+Requires: python-dotenv and ``anthropic``.
 
-Model selection: ``--model`` or Pi ``defaultModel``. If that name starts with ``claude``, use
-Anthropic credentials from ``pi-agent/auth.json`` (same as in-app Settings), then env.
-Otherwise use the Pi agent runtime (typically Tinker).
+Model: defaults to ``claude-haiku-4-5`` (same as verifier-generator), overridable via ``--model``.
+Always uses Anthropic credentials from ``pi-agent/auth.json`` (in-app Settings), then env —
+independent of the task-solving model in Settings.
 """
 
 from __future__ import annotations
@@ -30,10 +30,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from pi_llm import (
-    PiLlmConfigError,
     ResolvedRuntimeLlm,
     default_agent_cowork_user_data,
-    resolve_runtime_llm,
     runtime_llm_text,
 )
 
@@ -42,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_INDUCE_MODEL = "claude-haiku-4-5"
 _TASK_STEM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 _MAX_EXISTING_FILE_CHARS = 6000
 
@@ -140,17 +139,15 @@ def _pi_settings_model() -> str:
 
 
 def resolve_induce_llm(*, model_override: str | None = None) -> ResolvedRuntimeLlm:
-    """Claude models use ``auth.json``; others use the Pi runtime (e.g. Tinker)."""
-    model = (model_override or "").strip() or _pi_settings_model()
-    if model.lower().startswith("claude"):
-        cfg = resolve_anthropic_config()
-        return ResolvedRuntimeLlm(
-            provider="anthropic",
-            model=model,
-            api_key=cfg.api_key,
-            base_url=cfg.base_url,
-        )
-    return resolve_runtime_llm(model_override=model_override)
+    """Anthropic Haiku + ``auth.json``, like verifier-generator — not the task-solving model."""
+    model = (model_override or "").strip() or DEFAULT_INDUCE_MODEL
+    cfg = resolve_anthropic_config()
+    return ResolvedRuntimeLlm(
+        provider="anthropic",
+        model=model,
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
+    )
 
 
 def make_anthropic_client(cfg: ResolvedAnthropicConfig):
@@ -690,7 +687,7 @@ def main() -> None:
     p.add_argument(
         "--model",
         default=None,
-        help="Override model; claude* uses Anthropic, otherwise Pi/Tinker runtime",
+        help=f"Override induce model (default: {DEFAULT_INDUCE_MODEL}; always uses Anthropic auth)",
     )
     p.add_argument(
         "--msg_only",
@@ -714,7 +711,7 @@ def main() -> None:
 
     try:
         runtime = resolve_induce_llm(model_override=args.model)
-    except (AnthropicConfigError, PiLlmConfigError) as e:
+    except AnthropicConfigError as e:
         logger.error("%s", e)
         raise SystemExit(1) from e
     logger.info(
