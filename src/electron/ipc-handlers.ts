@@ -1314,13 +1314,6 @@ export function recordFileEditAfterPreviewSave(
     type: "stream.message",
     payload: { sessionId, message: { type: "file_edit", path: pathForMessage } },
   });
-
-  const vNode = sessionLastVerificationNodeId.get(sessionId);
-  if (vNode) {
-    void autoRefineVerifiersFromUserMessages(sessionId, [vNode]);
-  } else if (sess.workflowTree?.length) {
-    void autoRefineVerifiersFromUserMessages(sessionId, flattenWorkflowNodeIds(sess.workflowTree));
-  }
 }
 
 /** Best-effort fallback when renderer omits ``sessionId`` for preview writes. */
