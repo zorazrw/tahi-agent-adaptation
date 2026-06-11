@@ -999,6 +999,12 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
+  if (event.type === "session.labelVerifiers") {
+    const { sessionId, nodeId } = event.payload;
+    void runVerifierLabelingForNode(sessionId, nodeId);
+    return;
+  }
+
   if (event.type === "session.stop") {
     const session = sessions.getSession(event.payload.sessionId);
     if (!session) return;

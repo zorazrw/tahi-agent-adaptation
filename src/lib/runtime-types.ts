@@ -363,6 +363,7 @@ export type ClientEvent =
   | { type: "session.list" }
   | { type: "session.history"; payload: { sessionId: string } }
   | { type: "session.solveNode"; payload: { sessionId: string; nodeId: string } }
+  | { type: "session.labelVerifiers"; payload: { sessionId: string; nodeId: string } }
   | { type: "session.regenerateWorkflow"; payload: { sessionId: string } }
   | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: AppPermissionResult } }
   | { type: "memory.read"; payload: { requestId: string } }
