@@ -3,6 +3,7 @@
  * Shape matches export_task_sessions.build_environment_state(include_files=True) (minus legacy-only edge cases).
  */
 import { readFileSync, existsSync } from "fs";
+import { readFile, writeFile } from "fs/promises";
 import { join, resolve, relative, isAbsolute } from "path";
 import type { Session } from "./session-store.js";
 import type { VerifierMark, WorkflowNode } from "../types.js";
@@ -280,18 +281,24 @@ export function buildExportEnvironmentSnapshotWithPreviewWrittenFile(
   return { workflow: base.workflow, file: files, memory: base.memory, skill: base.skill };
 }
 
-/** UTF-8 text from a snapshot ``file`` entry for ``filePath`` (skips base64/binary). */
-export function snapshotFileUtf8Content(
+type SnapshotFileEntry = {
+  content: string;
+  content_encoding: OutputContentEncoding | null;
+};
+
+export type { SnapshotFileEntry };
+
+function findSnapshotFileEntry(
   snapshot: ExportEnvironmentSnapshot | null | undefined,
   filePath: string,
   cwd?: string
-): string | null {
+): SnapshotFileEntry | null {
   if (!snapshot?.file?.length) return null;
   const wantKey = resolvedFileKey(cwd, filePath);
   if (!wantKey) return null;
 
   const basename = filePath.replace(/\\/g, "/").split("/").pop() ?? "";
-  let fallback: string | null = null;
+  let fallback: SnapshotFileEntry | null = null;
 
   for (const entry of snapshot.file) {
     const fp = String(entry.path ?? "").trim();
@@ -301,19 +308,97 @@ export function snapshotFileUtf8Content(
       key === wantKey ||
       fp === filePath ||
       fp.replace(/\\/g, "/") === filePath.replace(/\\/g, "/");
+    const candidate =
+      typeof entry.content === "string"
+        ? { content: entry.content, content_encoding: entry.content_encoding ?? null }
+        : null;
     if (!matches) {
-      if (basename && fp.replace(/\\/g, "/").endsWith(`/${basename}`)) {
-        const c = entry.content;
-        if (typeof c === "string" && entry.content_encoding !== "base64") {
-          fallback = c;
-        }
+      if (basename && fp.replace(/\\/g, "/").endsWith(`/${basename}`) && candidate) {
+        fallback = candidate;
       }
       continue;
     }
-    if (entry.content_encoding === "base64") return null;
-    return typeof entry.content === "string" ? entry.content : null;
+    if (candidate) return candidate;
   }
   return fallback;
+}
+
+export async function readDiskFileAsSnapshotEntry(resolved: string): Promise<SnapshotFileEntry | null> {
+  try {
+    const buf = await readFile(resolved);
+    if (isValidUtf8(buf)) {
+      return { content: buf.toString("utf8"), content_encoding: "utf8" };
+    }
+    return { content: buf.toString("base64"), content_encoding: "base64" };
+  } catch {
+    return null;
+  }
+}
+
+export function snapshotEntryToBuffer(entry: SnapshotFileEntry): Buffer {
+  const encoding = entry.content_encoding ?? "utf8";
+  return encoding === "base64"
+    ? Buffer.from(entry.content, "base64")
+    : Buffer.from(entry.content, "utf8");
+}
+
+export async function writeDiskFileFromSnapshotEntry(
+  resolved: string,
+  entry: SnapshotFileEntry
+): Promise<void> {
+  await writeFile(resolved, snapshotEntryToBuffer(entry));
+}
+
+/** Map a UI message index to the corresponding DB row index for a ``user_prompt``. */
+export function resolveUserPromptRowIndex(
+  rows: Array<{ message: { type?: string } }>,
+  uiMessages: Array<{ type?: string }>,
+  messageIndex: number
+): number | null {
+  if (messageIndex < 0 || messageIndex >= uiMessages.length) return null;
+  if (uiMessages[messageIndex].type !== "user_prompt") return null;
+
+  let ordinal = 0;
+  for (let i = 0; i < messageIndex; i++) {
+    if (uiMessages[i].type === "user_prompt") ordinal++;
+  }
+
+  let count = 0;
+  for (let r = 0; r < rows.length; r++) {
+    if (rows[r].message.type === "user_prompt") {
+      if (count === ordinal) return r;
+      count++;
+    }
+  }
+  return null;
+}
+
+/** File content from the last snapshot row strictly before ``userMessageIndex`` (pre-send state). */
+export function snapshotFileEntryBeforeUserMessage(
+  rows: Array<{ message: { type?: string }; snapshot: ExportEnvironmentSnapshot | null }>,
+  userMessageIndex: number,
+  filePath: string,
+  cwd?: string
+): SnapshotFileEntry | null {
+  if (userMessageIndex < 0 || userMessageIndex >= rows.length) return null;
+  if (rows[userMessageIndex].message.type !== "user_prompt") return null;
+
+  for (let j = userMessageIndex - 1; j >= 0; j--) {
+    const entry = findSnapshotFileEntry(rows[j].snapshot, filePath, cwd);
+    if (entry) return entry;
+  }
+  return null;
+}
+
+/** UTF-8 text from a snapshot ``file`` entry for ``filePath`` (skips base64/binary). */
+export function snapshotFileUtf8Content(
+  snapshot: ExportEnvironmentSnapshot | null | undefined,
+  filePath: string,
+  cwd?: string
+): string | null {
+  const entry = findSnapshotFileEntry(snapshot, filePath, cwd);
+  if (!entry || entry.content_encoding === "base64") return null;
+  return entry.content;
 }
 
 /** Whether to persist a snapshot for this SDK message (per meaningful agent turn / tool outcome). */

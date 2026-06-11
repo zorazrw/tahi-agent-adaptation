@@ -179,6 +179,15 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted, onTextCom
   }, []);
 
   useEffect(() => {
+    const onExternalReload = () => {
+      setPreviewSaveChrome(null);
+      setRefreshKey((k) => k + 1);
+    };
+    window.addEventListener("preview-external-reload", onExternalReload);
+    return () => window.removeEventListener("preview-external-reload", onExternalReload);
+  }, []);
+
+  useEffect(() => {
     if (!filePath) {
       setResult(null);
       setLoading(false);

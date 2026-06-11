@@ -15,6 +15,8 @@ import {
     cleanupAllSessions,
     inferSessionIdForPreviewWrite,
     recordFileEditAfterPreviewSave,
+    revertPreviewToBeforeUserMessage,
+    restorePreviewLatestVersion,
 } from "./ipc-handlers.js";
 import { fileToModel, modelToBytes, modelToText } from "./libs/exceljs-xlsx.js";
 import type { XlsxModel } from "../lib/xlsx-model.js";
@@ -632,6 +634,25 @@ app.on("ready", () => {
             return { error: message };
         }
     });
+
+    ipcMainHandle(
+        "revert-preview-before-user-message",
+        async (_: any, sessionId: string, messageIndex: number, filePath: string) => {
+            return revertPreviewToBeforeUserMessage(sessionId, messageIndex, filePath);
+        }
+    );
+
+    ipcMainHandle(
+        "restore-preview-latest-version",
+        async (
+            _: any,
+            sessionId: string,
+            filePath: string,
+            latestVersion: import("./libs/message-state-snapshot.js").SnapshotFileEntry
+        ) => {
+            return restorePreviewLatestVersion(sessionId, filePath, latestVersion);
+        }
+    );
 
     ipcMainHandle(
         "write-file",

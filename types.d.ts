@@ -120,6 +120,11 @@ type ResolveTinkerCheckpointResult =
     | { ok: true; base_model: string }
     | { ok: false; error: string };
 
+type PreviewFileSnapshotEntry = {
+    content: string;
+    content_encoding: "utf8" | "base64" | null;
+};
+
 type TinkerModelUpdateEvent = {
     slug: string;
     model_path: string;
@@ -151,6 +156,12 @@ type EventPayloadMapping = {
     "login-provider": { success: boolean; error?: string };
     "logout-provider": { success: boolean; error?: string };
     "preview-file": PreviewFileResult;
+    "revert-preview-before-user-message": {
+        success: boolean;
+        error?: string;
+        latestVersion?: PreviewFileSnapshotEntry;
+    };
+    "restore-preview-latest-version": { success: boolean; error?: string };
     "write-file": { success: boolean; error?: string };
     "write-xlsx": { success: boolean; error?: string };
     "list-skills": SkillInfo[];
@@ -194,6 +205,16 @@ interface Window {
         loginProvider: (provider: string) => Promise<{ success: boolean; error?: string }>;
         logoutProvider: (provider: string) => Promise<{ success: boolean; error?: string }>;
         previewFile: (filePath: string, cwd?: string | null) => Promise<PreviewFileResult>;
+        revertPreviewBeforeUserMessage: (
+            sessionId: string,
+            messageIndex: number,
+            filePath: string
+        ) => Promise<{ success: boolean; error?: string; latestVersion?: PreviewFileSnapshotEntry }>;
+        restorePreviewLatestVersion: (
+            sessionId: string,
+            filePath: string,
+            latestVersion: PreviewFileSnapshotEntry
+        ) => Promise<{ success: boolean; error?: string }>;
         writeFile: (
             filePath: string,
             cwd?: string | null,

@@ -35,6 +35,11 @@ import {
   buildExportEnvironmentSnapshot,
   buildExportEnvironmentSnapshotWithPreviewWrittenFile,
   shouldWriteSnapshotForSdkMessage,
+  snapshotFileEntryBeforeUserMessage,
+  readDiskFileAsSnapshotEntry,
+  writeDiskFileFromSnapshotEntry,
+  resolveUserPromptRowIndex,
+  type SnapshotFileEntry,
 } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 import { createPiSessionManager, getAgentSettings, getPiAgentDir, getPiSessionsDir } from "./libs/pi-config.js";
@@ -1193,6 +1198,85 @@ function fileEditPathForMessage(sess: Session, absNorm: string): string {
     /* keep absolute */
   }
   return absNorm;
+}
+
+async function writeSnapshotEntryToDisk(
+  sessionId: string,
+  resolved: string,
+  entry: SnapshotFileEntry
+): Promise<void> {
+  await writeDiskFileFromSnapshotEntry(resolved, entry);
+  const pathForRecord = resolved.replace(/\\/g, "/");
+  if ((entry.content_encoding ?? "utf8") === "utf8") {
+    recordFileEditAfterPreviewSave(sessionId, pathForRecord, entry.content);
+  } else {
+    recordFileEditAfterPreviewSave(sessionId, pathForRecord);
+  }
+}
+
+/** Restore the preview file to its last saved state before the given user message was sent. */
+export async function revertPreviewToBeforeUserMessage(
+  sessionId: string,
+  messageIndex: number,
+  filePath: string
+): Promise<{ success: boolean; error?: string; latestVersion?: SnapshotFileEntry }> {
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (!session) return { success: false, error: "Session not found" };
+  const trimmedPath = String(filePath ?? "").trim();
+  if (!trimmedPath) return { success: false, error: "No file selected" };
+
+  const rows = store.getMessageRowsWithSnapshots(sessionId);
+  const uiMessages = store.getMessages(sessionId);
+  const rowIndex = resolveUserPromptRowIndex(rows, uiMessages, messageIndex);
+  if (rowIndex == null) {
+    return { success: false, error: "Message not found" };
+  }
+
+  const entry = snapshotFileEntryBeforeUserMessage(rows, rowIndex, trimmedPath, session.cwd);
+  if (!entry) {
+    return {
+      success: false,
+      error: "No earlier version of this file is saved before that message",
+    };
+  }
+
+  const base = session.cwd?.trim() || process.cwd();
+  const resolved = pathIsAbsolute(trimmedPath) ? trimmedPath : resolve(base, trimmedPath);
+
+  try {
+    const latestVersion = await readDiskFileAsSnapshotEntry(resolved);
+    await writeSnapshotEntryToDisk(sessionId, resolved, entry);
+    return { success: true, latestVersion: latestVersion ?? undefined };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Write a previously stashed on-disk version back to the preview file (undo a revert). */
+export async function restorePreviewLatestVersion(
+  sessionId: string,
+  filePath: string,
+  latestVersion: SnapshotFileEntry
+): Promise<{ success: boolean; error?: string }> {
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (!session) return { success: false, error: "Session not found" };
+  const trimmedPath = String(filePath ?? "").trim();
+  if (!trimmedPath) return { success: false, error: "No file selected" };
+  if (typeof latestVersion?.content !== "string") {
+    return { success: false, error: "No stashed version to restore" };
+  }
+
+  const base = session.cwd?.trim() || process.cwd();
+  const resolved = pathIsAbsolute(trimmedPath) ? trimmedPath : resolve(base, trimmedPath);
+
+  try {
+    await writeSnapshotEntryToDisk(sessionId, resolved, latestVersion);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Called from main after a successful preview-panel ``write-file`` (``file_edit`` row + env snapshot including written HTML/text). */

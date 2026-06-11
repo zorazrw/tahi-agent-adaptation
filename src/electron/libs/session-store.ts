@@ -259,7 +259,7 @@ export class SessionStore {
 
     const messages = (this.db
       .prepare(
-        `select data from messages where session_id = ? order by created_at asc`
+        `select data from messages where session_id = ? order by created_at asc, rowid asc`
       )
       .all(id) as Array<Record<string, unknown>>)
       .map((row) => JSON.parse(String(row.data)) as StreamMessage);
