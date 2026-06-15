@@ -125,8 +125,8 @@ type FilePreviewProps = {
   cwd?: string | null;
   sessionId?: string | null;
   stepCompleted?: boolean;
-  /** Send quoted selection + comment to the agent (user ``message`` action). */
-  onTextComment?: (prompt: string) => void | Promise<void>;
+  /** Record quoted selection + comment without starting an agent run. */
+  onTextComment?: (prompt: string) => void;
 };
 
 const ZOOM_STEP = 0.1;
@@ -176,6 +176,15 @@ export function FilePreview({ filePath, cwd, sessionId, stepCompleted, onTextCom
 
   const handleRefreshPointerDown = useCallback(() => {
     window.dispatchEvent(new CustomEvent("preview-reload-discard"));
+  }, []);
+
+  useEffect(() => {
+    const onExternalReload = () => {
+      setPreviewSaveChrome(null);
+      setRefreshKey((k) => k + 1);
+    };
+    window.addEventListener("preview-external-reload", onExternalReload);
+    return () => window.removeEventListener("preview-external-reload", onExternalReload);
   }, []);
 
   useEffect(() => {

@@ -430,6 +430,12 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
   const [newOutputFileDraft, setNewOutputFileDraft] = useState("");
   const [addingOutputFile, setAddingOutputFile] = useState(false);
   const skipNextOutputFileBlurSave = useRef(false);
+  const [newVerifierDraft, setNewVerifierDraft] = useState("");
+  const [addingVerifier, setAddingVerifier] = useState(false);
+  const [editingVerifierIndex, setEditingVerifierIndex] = useState<number | null>(null);
+  const [editingVerifierDraft, setEditingVerifierDraft] = useState("");
+  const editingVerifierInputRef = useRef<HTMLInputElement | null>(null);
+  const skipNextVerifierBlurSave = useRef(false);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     readStoredLayoutNumber(SIDEBAR_WIDTH_STORAGE_KEY, DEFAULT_SIDEBAR_WIDTH)
   );
@@ -615,6 +621,10 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     setEditingOutputFileDraft("");
     setAddingOutputFile(false);
     setNewOutputFileDraft("");
+    setEditingVerifierIndex(null);
+    setEditingVerifierDraft("");
+    setAddingVerifier(false);
+    setNewVerifierDraft("");
   }, [selectedNodeId, activeSessionId]);
 
   useEffect(() => {
@@ -622,6 +632,14 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
       newOutputFileInputRef.current?.focus({ preventScroll: true });
     }
   }, [addingOutputFile]);
+
+  useEffect(() => {
+    if (editingVerifierIndex !== null) {
+      const el = editingVerifierInputRef.current;
+      el?.focus({ preventScroll: true });
+      el?.select();
+    }
+  }, [editingVerifierIndex]);
 
   const startEditTitle = () => {
     if (!activeSessionId || !sessions[activeSessionId]) return;
@@ -730,8 +748,6 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
 
   const currentVerifiers = selectedNode?.verifiers ?? [];
   const currentVerifierMarks = selectedNode?.verifierMarks ?? [];
-  const [newVerifierDraft, setNewVerifierDraft] = useState("");
-  const [addingVerifier, setAddingVerifier] = useState(false);
 
   const toggleVerifierMark = (index: number) => {
     if (!activeSessionId || !selectedNodeId) return;
@@ -778,6 +794,44 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
     sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
     setAddingVerifier(false);
     setNewVerifierDraft("");
+  };
+
+  const startEditVerifier = (index: number) => {
+    if (!selectedNode) return;
+    const text = selectedNode.verifiers[index];
+    if (text === undefined) return;
+    skipNextVerifierBlurSave.current = false;
+    setEditingVerifierIndex(index);
+    setEditingVerifierDraft(text);
+  };
+
+  const saveVerifierEdit = () => {
+    if (skipNextVerifierBlurSave.current) {
+      skipNextVerifierBlurSave.current = false;
+      return;
+    }
+    if (editingVerifierIndex === null || !activeSessionId || !selectedNodeId) return;
+    const idx = editingVerifierIndex;
+    const trimmed = editingVerifierDraft.trim();
+    setEditingVerifierIndex(null);
+    setEditingVerifierDraft("");
+    if (!trimmed) return;
+    const newTree = JSON.parse(JSON.stringify(workflowTree)) as WorkflowNode[];
+    const node = findNode(newTree, selectedNodeId);
+    if (!node || idx < 0 || idx >= node.verifiers.length) return;
+    if (node.verifiers[idx] === trimmed) return;
+    node.verifiers[idx] = trimmed;
+    if (Array.isArray(node.verifierMarks) && node.verifierMarks[idx] !== undefined) {
+      node.verifierMarks[idx] = undefined;
+    }
+    updateWorkflowTree(activeSessionId, newTree);
+    sendEvent({ type: "session.updateWorkflowTree", payload: { sessionId: activeSessionId, workflowTree: newTree } });
+  };
+
+  const cancelVerifierEdit = () => {
+    skipNextVerifierBlurSave.current = true;
+    setEditingVerifierIndex(null);
+    setEditingVerifierDraft("");
   };
 
   const startEditOutputFile = (index: number) => {
@@ -1234,42 +1288,125 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
             className="shrink-0 flex flex-col overflow-hidden pt-2.5 pb-3"
             style={{ height: clampedVerifiersHeight }}
           >
-          <div className="flex items-center justify-between gap-1.5 mb-2.5 shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-base font-semibold text-ink-900 truncate tracking-tight">Verifiers</span>
-              {isVerifierChecking && (
-                <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
-                    <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
-                  </svg>
-                  Checking…
-                </span>
-              )}
-            </div>
-            <button
-              type="button"
-              disabled={isVerifierChecking}
-              onClick={() => { setAddingVerifier(true); setNewVerifierDraft(""); }}
-              className="shrink-0 p-0.5 rounded text-ink-300 hover:text-primary hover:bg-ink-900/5 transition-colors disabled:opacity-40"
-              aria-label="Add verifier"
-            >
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M8 3v10M3 8h10" />
-              </svg>
-            </button>
+          <div className="flex items-center gap-2 mb-2.5 shrink-0 min-w-0">
+            <span className="text-base font-semibold text-ink-900 truncate tracking-tight shrink-0">Verifiers</span>
+            {isVerifierChecking && (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+                <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 animate-spin" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
+                  <path d="M12 3a9 9 0 0 1 9 9" strokeLinecap="round" />
+                </svg>
+                Checking…
+              </span>
+            )}
+            <div className="flex-1 min-w-0" aria-hidden />
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    disabled={isVerifierChecking || currentVerifiers.length === 0}
+                    onClick={() => {
+                      if (!activeSessionId || !selectedNodeId) return;
+                      sendEvent({
+                        type: "session.labelVerifiers",
+                        payload: { sessionId: activeSessionId, nodeId: selectedNodeId },
+                      });
+                    }}
+                    className="shrink-0 rounded p-1 text-ink-400 hover:text-primary hover:bg-ink-900/5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                    aria-label="Grade verifiers from file content"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2H2v10l9.29 9.29a1 1 0 0 0 1.41 0l6.59-6.59a1 1 0 0 0 0-1.41L12 2Z" />
+                      <circle cx="7" cy="7" r="1.5" fill="currentColor" stroke="none" />
+                    </svg>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Grade verifiers from current file content</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           </div>
-          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5">
+            {currentVerifiers.map((text, index) => {
+                const mark = currentVerifierMarks[index];
+                const pass = mark === "check";
+                const fail = mark === "cross";
+                return editingVerifierIndex === index ? (
+                  <input
+                    key={`${selectedNode.id}-verifier-${index}`}
+                    ref={editingVerifierInputRef}
+                    type="text"
+                    className="w-full min-w-0 rounded border border-ink-900/20 bg-white px-1.5 py-0.5 text-sm text-ink-800 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
+                    value={editingVerifierDraft}
+                    onChange={(e) => setEditingVerifierDraft(e.target.value)}
+                    onBlur={saveVerifierEdit}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        saveVerifierEdit();
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelVerifierEdit();
+                      }
+                    }}
+                  />
+                ) : (
+                  <div key={index} className="flex items-start gap-1.5 min-w-0">
+                    <button
+                      type="button"
+                      disabled={isVerifierChecking}
+                      onClick={() => { if (!isVerifierChecking) toggleVerifierMark(index); }}
+                      className="shrink-0 flex items-center justify-center w-4 h-4 mt-0.5 rounded-full border border-ink-900/25 bg-white text-ink-400 hover:bg-ink-900/5 transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                    >
+                      {pass ? (
+                        <svg viewBox="0 0 16 16" className="h-3 w-3 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 4L6 11 3 8" /></svg>
+                      ) : fail ? (
+                        <svg viewBox="0 0 16 16" className="h-3 w-3 text-red-500" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 4L4 12M4 4l8 8" /></svg>
+                      ) : (
+                        null
+                      )}
+                    </button>
+                    <span
+                      className="min-w-0 flex-1 text-sm leading-snug text-ink-600 break-words cursor-text rounded px-0.5 -mx-0.5 hover:text-ink-800"
+                      title="Double-click to edit"
+                      onDoubleClick={(e) => {
+                        e.preventDefault();
+                        startEditVerifier(index);
+                      }}
+                    >
+                      {text}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteVerifier(index)}
+                      className="shrink-0 p-0.5 rounded text-ink-300 hover:text-error hover:bg-ink-900/5 transition-colors mt-0.5"
+                      aria-label="Delete verifier"
+                    >
+                      <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <path d="M12 4L4 12M4 4l8 8" />
+                      </svg>
+                    </button>
+                  </div>
+                );
+              })}
             {addingVerifier && (
-              <div className="flex items-center gap-1.5">
-                <span className="block h-1.5 w-1.5 rounded-full bg-ink-900/15" />
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="block h-1.5 w-1.5 shrink-0 rounded-full bg-ink-900/15" />
                 <input
                   type="text"
                   value={newVerifierDraft}
                   onChange={(e) => setNewVerifierDraft(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") handleAddVerifier();
-                    if (e.key === "Escape") { setAddingVerifier(false); setNewVerifierDraft(""); }
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleAddVerifier();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setAddingVerifier(false);
+                      setNewVerifierDraft("");
+                    }
                   }}
                   onBlur={handleAddVerifier}
                   placeholder="Describe what to verify…"
@@ -1277,42 +1414,20 @@ export function Sidebar({ sendEvent, onNewSession, onDeleteSession }: SidebarPro
                 />
               </div>
             )}
-            {currentVerifiers.map((text, index) => {
-              const mark = currentVerifierMarks[index];
-              const pass = mark === "check";
-              const fail = mark === "cross";
-              return (
-                <div key={index} className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    disabled={isVerifierChecking}
-                    onClick={() => { if (!isVerifierChecking) toggleVerifierMark(index); }}
-                    className="shrink-0 flex items-center justify-center w-4 h-4 rounded-full border border-ink-900/25 bg-white text-ink-400 hover:bg-ink-900/5 transition-colors disabled:opacity-50 disabled:pointer-events-none"
-                  >
-                    {pass ? (
-                      <svg viewBox="0 0 16 16" className="h-3 w-3 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 4L6 11 3 8" /></svg>
-                    ) : fail ? (
-                      <svg viewBox="0 0 16 16" className="h-3 w-3 text-red-500" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 4L4 12M4 4l8 8" /></svg>
-                    ) : (
-                      null
-                    )}
-                  </button>
-                  <span className="min-w-0 flex-1 text-sm leading-snug text-ink-600 break-words">
-                    {text}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteVerifier(index)}
-                    className="shrink-0 p-0.5 rounded text-ink-300 hover:text-error hover:bg-ink-900/5 transition-colors"
-                    aria-label="Delete verifier"
-                  >
-                    <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <path d="M12 4L4 12M4 4l8 8" />
-                    </svg>
-                  </button>
-                </div>
-              );
-            })}
+            <button
+              type="button"
+              disabled={isVerifierChecking}
+              className="shrink-0 flex items-center gap-1 py-1 px-0.5 text-sm text-muted-foreground hover:text-ink-600 transition-colors disabled:opacity-40"
+              onClick={() => {
+                setAddingVerifier(true);
+                setNewVerifierDraft("");
+              }}
+            >
+              <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M8 3v10M3 8h10" />
+              </svg>
+              <span>Add verifier</span>
+            </button>
           </div>
           </div>
         </>

@@ -312,6 +312,7 @@ class HeadlessSessionRuntime {
       node.outputFiles,
       undefined,
       session.cwd,
+      node,
     );
     const headlessPrompt = addHeadlessExecutionNote(prompt);
     this.emit({ type: "stream.user_prompt", payload: { sessionId: session.id, prompt: headlessPrompt } });

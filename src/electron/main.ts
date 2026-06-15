@@ -15,6 +15,8 @@ import {
     cleanupAllSessions,
     inferSessionIdForPreviewWrite,
     recordFileEditAfterPreviewSave,
+    revertPreviewToBeforeUserMessage,
+    restorePreviewLatestVersion,
 } from "./ipc-handlers.js";
 import { fileToModel, modelToBytes, modelToText } from "./libs/exceljs-xlsx.js";
 import type { XlsxModel } from "../lib/xlsx-model.js";
@@ -50,7 +52,7 @@ import {
     saveTinkerProviderConfig,
 } from "./libs/pi-config.js";
 import { resolveTinkerCheckpoint, shutdownTinkerBridge } from "./libs/tinker-provider.js";
-import { startTinkerAutoUpdateWatcher, stopTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
+import { stopTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
 import { defaultRecordingsZipName, exportRecordingsBundleToZip } from "./libs/recording-bundle.js";
 
 type SaveMemoryParseResult =
@@ -250,8 +252,6 @@ app.on("ready", () => {
     });
 
     pollResources(mainWindow);
-
-    startTinkerAutoUpdateWatcher();
 
     ipcMainHandle("getStaticData", () => {
         return getStaticData();
@@ -634,6 +634,25 @@ app.on("ready", () => {
             return { error: message };
         }
     });
+
+    ipcMainHandle(
+        "revert-preview-before-user-message",
+        async (_: any, sessionId: string, messageIndex: number, filePath: string) => {
+            return revertPreviewToBeforeUserMessage(sessionId, messageIndex, filePath);
+        }
+    );
+
+    ipcMainHandle(
+        "restore-preview-latest-version",
+        async (
+            _: any,
+            sessionId: string,
+            filePath: string,
+            latestVersion: import("./libs/message-state-snapshot.js").SnapshotFileEntry
+        ) => {
+            return restorePreviewLatestVersion(sessionId, filePath, latestVersion);
+        }
+    );
 
     ipcMainHandle(
         "write-file",

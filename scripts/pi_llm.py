@@ -235,6 +235,93 @@ def resolve_runtime_llm(
     raise PiLlmConfigError(f"Unsupported Pi provider: {provider!r}")
 
 
+_TINKER_SLUG_TO_BASE_MODEL: dict[str, str] = {
+    "kimi-k2.5": "moonshotai/Kimi-K2.5",
+    "kimi-k2-thinking": "moonshotai/Kimi-K2-Thinking",
+    "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
+}
+
+
+def _tinker_renderer_for_describe_base(base_model: str) -> str:
+    try:
+        from model_manager import TINKER_MODEL_TO_RENDERER_NAME
+    except ImportError:
+        TINKER_MODEL_TO_RENDERER_NAME = {
+            "moonshotai/Kimi-K2.5": "kimi_k25",
+            "moonshotai/Kimi-K2-Thinking": "kimi_k2",
+            "Qwen/Qwen3.5-35B-A3B": "qwen3_5",
+        }
+    renderer = TINKER_MODEL_TO_RENDERER_NAME.get(base_model)
+    if not renderer:
+        raise PiLlmConfigError(
+            f"No Tinker renderer mapping for base model {base_model!r}. "
+            "Use a supported slug (e.g. kimi-k2.5) or HF path from model_manager.TINKER_SUPPORTED_MODELS."
+        )
+    return renderer
+
+
+def _resolve_tinker_describe_fields(spec: str) -> tuple[str, str, str]:
+    """Map ``--describe-model`` to ``(id_slug, base_model, renderer_name)``."""
+    s = spec.strip()
+    if not s:
+        raise PiLlmConfigError("--describe-model must be non-empty")
+
+    if s in _TINKER_SLUG_TO_BASE_MODEL:
+        base_model = _TINKER_SLUG_TO_BASE_MODEL[s]
+        return s, base_model, _tinker_renderer_for_describe_base(base_model)
+
+    try:
+        from model_manager import TINKER_MODEL_TO_RENDERER_NAME
+    except ImportError:
+        TINKER_MODEL_TO_RENDERER_NAME = {}
+
+    if s in TINKER_MODEL_TO_RENDERER_NAME:
+        slug = next((k for k, v in _TINKER_SLUG_TO_BASE_MODEL.items() if v == s), s)
+        return slug, s, TINKER_MODEL_TO_RENDERER_NAME[s]
+
+    raise PiLlmConfigError(
+        f"Unknown describe model {s!r}. Use a Pi slug (e.g. kimi-k2.5, qwen3.5-35b-a3b) "
+        f"or HF base model path (e.g. moonshotai/Kimi-K2.5)."
+    )
+
+
+def resolve_description_runtime_llm(describe_model: str) -> ResolvedRuntimeLlm:
+    """Pick a describe model without changing tinker-provider.json."""
+    from dataclasses import replace
+
+    base = resolve_runtime_llm()
+    spec = describe_model.strip()
+    if not spec:
+        raise PiLlmConfigError("--describe-model must be non-empty")
+
+    if base.provider == TINKER_PROVIDER:
+        agent_dir = pi_agent_dir()
+        tinker = _read_tinker_config(agent_dir)
+        id_slug, base_model, renderer = _resolve_tinker_describe_fields(spec)
+        api_key = _read_auth_key(agent_dir, TINKER_PROVIDER)
+        if not api_key:
+            raise PiLlmConfigError("Tinker API key missing in pi-agent/auth.json or TINKER_API_KEY")
+        return ResolvedRuntimeLlm(
+            provider=TINKER_PROVIDER,
+            model=id_slug,
+            api_key=api_key,
+            base_url=tinker["base_url"],
+            base_model=base_model,
+            model_path=None,
+            renderer_name=renderer,
+            reasoning="off",
+            max_tokens=max(256, int(tinker["max_tokens"])),
+        )
+
+    if base.provider in ("anthropic", "openai"):
+        return replace(base, model=spec, reasoning=None)
+
+    if base.provider == OPENAI_COMPATIBLE_PROVIDER:
+        return replace(base, model=spec)
+
+    raise PiLlmConfigError(f"Unsupported Pi provider for --describe-model: {base.provider!r}")
+
+
 def _text_from_bridge_message(message: dict[str, Any]) -> str:
     content = message.get("content")
     parts: list[str] = []

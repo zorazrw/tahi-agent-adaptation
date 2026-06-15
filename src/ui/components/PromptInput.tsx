@@ -31,7 +31,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   const continueWithPrompt = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || !activeSessionId) return;
+      if (!activeSessionId) return;
       if (activeSession?.status === "running") {
         setGlobalError("Session is still running. Please wait for it to finish.");
         return;
@@ -51,7 +51,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   );
 
   const handleSend = useCallback(async () => {
-    if (!prompt.trim()) return;
+    if (!activeSessionId && !prompt.trim()) return;
 
     if (!activeSessionId) {
       window.dispatchEvent(new CustomEvent("preview-flush-save"));

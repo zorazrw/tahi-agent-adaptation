@@ -416,8 +416,8 @@ def call_verifier_llm(client: Any, model: str, user_text: str, *, max_tokens: in
         hint = ""
         if code == 401 or "401" in tail or "authentication" in tail.lower():
             hint = (
-                "\n\nAuthentication hint: key and base URL must match (see induce.resolve_anthropic_config). "
-                "Try --debug-auth, --no-claude-settings, or --no-api-config."
+                "\n\nAuthentication hint: save Anthropic in app Settings (pi-agent/auth.json) or set "
+                "ANTHROPIC_API_KEY. Try --debug-auth or --no-api-config for env-only."
             )
         elif code == 400 and re.search(r"credit|billing|balance|purchase|Plans\s*&\s*Billing", tail, re.I):
             hint = "\n\nBilling hint: add credits at https://console.anthropic.com/ (Plans & Billing)."

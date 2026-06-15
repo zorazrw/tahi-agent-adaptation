@@ -1,23 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIPC } from "./hooks/useIPC";
 import { useMessageWindow } from "./hooks/useMessageWindow";
 import { useAppStore } from "./store/useAppStore";
-import type { AppPermissionResult, ServerEvent } from "./types";
+import type { AppPermissionResult, ServerEvent, WorkflowNode } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { HomePromptInput } from "./components/HomePromptInput";
 import { SettingsModal } from "./components/SettingsModal";
 import { MemoryModal } from "./components/MemoryModal";
-import { PromptInput, usePromptActions } from "./components/PromptInput";
+import { PromptInput } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import { TaskToolCard } from "./components/TaskToolCard";
 import { useGroupedMessages } from "./hooks/useGroupedMessages";
 import { FilePreview, getPreviewFileForNode } from "./components/FilePreview";
 import { MessageResponse } from "../components/ai-elements/message";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { MessagesSquare, MessageSquareX } from "lucide-react";
+import { MessagesSquare, MessageSquareX, Redo2 } from "lucide-react";
 import { readStoredAutoInduction } from "./lib/auto-induction";
 
 const SCROLL_THRESHOLD = 50;
+
+function reloadFilePreview(discardEdits = false) {
+  if (discardEdits) {
+    window.dispatchEvent(new CustomEvent("preview-reload-discard"));
+  }
+  window.dispatchEvent(new CustomEvent("preview-external-reload"));
+}
+
+function findWorkflowNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
+  for (const n of tree) {
+    if (n.id === id) return n;
+    const found = findWorkflowNode(n.children, id);
+    if (found) return found;
+  }
+  return undefined;
+}
 
 /**
  * Idea bulb like reference: thick upper semicircle (open below), sides curve inward to a short neck,
@@ -80,6 +96,7 @@ function App() {
   const brainShineFallbackTimeoutRef = useRef<number | null>(null);
   const prevContextInductionDepthRef = useRef(0);
   const [brainInductionPending, setBrainInductionPending] = useState(false);
+  const [previewRestoreStash, setPreviewRestoreStash] = useState<PreviewFileSnapshotEntry | null>(null);
 
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -150,7 +167,6 @@ function App() {
   }, [handleServerEvent, handlePartialMessages, activeSessionId]);
 
   const { connected, sendEvent } = useIPC(onEvent);
-  const { continueWithPrompt } = usePromptActions(sendEvent);
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
@@ -168,6 +184,20 @@ function App() {
   } = useMessageWindow(messages, permissionRequests, activeSessionId);
 
   const groupedItems = useGroupedMessages(visibleMessages);
+
+  const selectedNode = useMemo(() => {
+    if (!selectedNodeId || !activeSession?.workflowTree) return undefined;
+    return findWorkflowNode(activeSession.workflowTree, selectedNodeId);
+  }, [selectedNodeId, activeSession?.workflowTree]);
+
+  const previewFilePath = useMemo(
+    () => getPreviewFileForNode(selectedNode?.outputFiles),
+    [selectedNode?.outputFiles]
+  );
+
+  useEffect(() => {
+    setPreviewRestoreStash(null);
+  }, [activeSessionId, previewFilePath]);
 
   // Check API configuration on startup
   useEffect(() => {
@@ -189,6 +219,13 @@ function App() {
         });
     }
   }, [apiConfigChecked, setApiConfigChecked, setShowSettingsModal]);
+
+  useEffect(() => {
+    window.electron?.sendClientEvent?.({
+      type: "session.setAutoContextInduction",
+      payload: { sessionId: "", autoContextInduction: readStoredAutoInduction() },
+    });
+  }, []);
 
   useEffect(() => {
     if (connected) sendEvent({ type: "session.list" });
@@ -321,14 +358,53 @@ function App() {
   }, [resetToLatest]);
 
   const handlePreviewTextComment = useCallback(
-    async (prompt: string) => {
-      await continueWithPrompt(prompt);
+    (prompt: string) => {
+      if (!activeSessionId || !previewFilePath) return;
+      sendEvent({
+        type: "session.addFileComment",
+        payload: { sessionId: activeSessionId, path: previewFilePath, prompt },
+      });
       setShouldAutoScroll(true);
       setHasNewMessages(false);
       resetToLatest();
     },
-    [continueWithPrompt, resetToLatest]
+    [activeSessionId, previewFilePath, resetToLatest, sendEvent]
   );
+
+  const handleRevertToBeforeMessage = useCallback(
+    async (messageIndex: number) => {
+      if (!activeSessionId || !previewFilePath) return;
+      reloadFilePreview(true);
+      const result = await window.electron.revertPreviewBeforeUserMessage(
+        activeSessionId,
+        messageIndex,
+        previewFilePath
+      );
+      if (result.success) {
+        if (result.latestVersion) setPreviewRestoreStash(result.latestVersion);
+        reloadFilePreview();
+      } else {
+        setGlobalError(result.error ?? "Failed to revert file");
+      }
+    },
+    [activeSessionId, previewFilePath, setGlobalError]
+  );
+
+  const handleRestoreLatestPreview = useCallback(async () => {
+    if (!activeSessionId || !previewFilePath || !previewRestoreStash) return;
+    reloadFilePreview(true);
+    const result = await window.electron.restorePreviewLatestVersion(
+      activeSessionId,
+      previewFilePath,
+      previewRestoreStash
+    );
+    if (result.success) {
+      setPreviewRestoreStash(null);
+      reloadFilePreview();
+    } else {
+      setGlobalError(result.error ?? "Failed to restore latest version");
+    }
+  }, [activeSessionId, previewFilePath, previewRestoreStash, setGlobalError]);
 
   const triggerBrainContextUpdate = useCallback(() => {
     if (!activeSessionId) return;
@@ -510,33 +586,9 @@ function App() {
                         ? handlePreviewTextComment
                         : undefined
                     }
-                    filePath={(() => {
-                      if (!selectedNodeId || !activeSession?.workflowTree) return null;
-                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
-                        for (const n of tree) {
-                          if (n.id === id) return n;
-                          const f = findNode(n.children, id);
-                          if (f) return f;
-                        }
-                        return undefined;
-                      };
-                      const node = findNode(activeSession.workflowTree, selectedNodeId);
-                      return getPreviewFileForNode(node?.outputFiles);
-                    })()}
+                    filePath={previewFilePath}
                     cwd={activeSession?.cwd}
-                    stepCompleted={(() => {
-                      if (!selectedNodeId || !activeSession?.workflowTree) return false;
-                      const findNode = (tree: import("./types").WorkflowNode[], id: string): import("./types").WorkflowNode | undefined => {
-                        for (const n of tree) {
-                          if (n.id === id) return n;
-                          const f = findNode(n.children, id);
-                          if (f) return f;
-                        }
-                        return undefined;
-                      };
-                      const node = findNode(activeSession.workflowTree, selectedNodeId);
-                      return node?.status === "completed";
-                    })()}
+                    stepCompleted={selectedNode?.status === "completed"}
                   />
                 </ErrorBoundary>
               </div>
@@ -555,7 +607,7 @@ function App() {
 
           {/* Right column: chat / model log (only when Chat is toggled) */}
           {showChatPanel && (
-            <div className="min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
+            <div className="relative min-w-0 overflow-hidden flex flex-col bg-surface-cream" style={{ flex: `${previewWidthPct} 1 0px` }}>
               <div className="flex items-center justify-between px-4 pt-3 pb-1 border-b border-ink-900/10">
                 <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Conversation</span>
                 <button
@@ -639,6 +691,9 @@ function App() {
                               permissionRequest={permissionRequests[0]}
                               onPermissionResult={handlePermissionResult}
                               skipTaskToolUse
+                              messageIndex={item.originalIndex}
+                              onRevertToBeforeMessage={handleRevertToBeforeMessage}
+                              revertDisabled={isRunning || !previewFilePath}
                             />
                           </ErrorBoundary>
                         </div>
@@ -665,6 +720,17 @@ function App() {
                   <div ref={messagesEndRef} />
                 </div>
               </div>
+              {previewRestoreStash && previewFilePath && !isRunning && (
+                <button
+                  type="button"
+                  onClick={() => void handleRestoreLatestPreview()}
+                    className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-ink-900/10 bg-white/95 text-ink-500 shadow-md hover:text-ink-800 hover:bg-white hover:border-ink-900/20 transition-colors"
+                    aria-label="Restore latest file version"
+                    title="Restore latest file version"
+                  >
+                    <Redo2 className="h-4 w-4" strokeWidth={2} />
+                  </button>
+                )}
             </div>
           )}
           </div>

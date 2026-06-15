@@ -8,8 +8,11 @@ Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 When export JSON includes ``expertise_task`` (e.g. ``data-viz-html``), writes to that stem
 instead of slugifying the session title, and includes existing memory/skill file content in the LM prompt.
 
-Requires: python-dotenv; provider deps per Pi runtime (tinker bridge, anthropic, or openai).
-LLM calls use the same Pi defaults as in-app task solving (``pi-agent/settings.json``).
+Requires: python-dotenv and ``anthropic``.
+
+Model: defaults to ``claude-haiku-4-5`` (same as verifier-generator), overridable via ``--model``.
+Always uses Anthropic credentials from ``pi-agent/auth.json`` (in-app Settings), then env —
+independent of the task-solving model in Settings.
 """
 
 from __future__ import annotations
@@ -27,10 +30,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from pi_llm import (
-    PiLlmConfigError,
     ResolvedRuntimeLlm,
     default_agent_cowork_user_data,
-    resolve_runtime_llm,
     runtime_llm_text,
 )
 
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_INDUCE_MODEL = "claude-haiku-4-5"
 _TASK_STEM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 _MAX_EXISTING_FILE_CHARS = 6000
 
@@ -54,50 +56,45 @@ class ResolvedAnthropicConfig:
     model: str
 
 
-def _api_config_paths() -> list[Path]:
-    home = Path.home()
-    if sys.platform == "darwin":
-        b = home / "Library/Application Support"
-        return [b / "agent-cowork/api-config.json", b / "Agent Cowork/api-config.json"]
-    if sys.platform == "win32":
-        ad = os.environ.get("APPDATA")
-        if not ad:
-            return []
-        root = Path(ad)
-        return [root / "agent-cowork/api-config.json", root / "Agent Cowork/api-config.json"]
-    xdg = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
-    return [xdg / "agent-cowork/api-config.json", xdg / "Agent Cowork/api-config.json"]
-
-
-def _resolved_from_api_config(path: Path) -> ResolvedAnthropicConfig | None:
+def _resolved_from_auth_json() -> ResolvedAnthropicConfig | None:
+    auth_path = default_agent_cowork_user_data() / "pi-agent" / "auth.json"
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(auth_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    key = raw.get("apiKey")
-    base = (raw.get("baseURL") or "").strip()
-    model = (raw.get("model") or "").strip()
-    if key and base and model:
-        return ResolvedAnthropicConfig(str(key), base.rstrip("/") or None, model)
-    return None
-
-
-def _resolved_from_claude_settings() -> ResolvedAnthropicConfig | None:
+    if not isinstance(raw, dict):
+        return None
+    entry = raw.get("anthropic")
+    if not isinstance(entry, dict) or entry.get("type") != "api_key":
+        return None
+    key = str(entry.get("key") or "").strip()
+    if not key:
+        return None
+    agent_dir = auth_path.parent
+    base: str | None = None
     try:
-        parsed = json.loads((Path.home() / ".claude/settings.json").read_text(encoding="utf-8"))
+        models = json.loads((agent_dir / "models.json").read_text(encoding="utf-8"))
+        if isinstance(models, dict):
+            providers = models.get("providers")
+            if isinstance(providers, dict):
+                anthropic = providers.get("anthropic")
+                if isinstance(anthropic, dict):
+                    base = str(anthropic.get("baseUrl") or "").strip().rstrip("/") or None
     except (OSError, json.JSONDecodeError):
-        return None
-    env = parsed.get("env") or {}
-    if not isinstance(env, dict):
-        return None
-    auth, base, model = env.get("ANTHROPIC_AUTH_TOKEN"), env.get("ANTHROPIC_BASE_URL"), env.get("ANTHROPIC_MODEL")
-    if auth and base and model:
-        return ResolvedAnthropicConfig(
-            str(auth),
-            str(base).strip().rstrip("/") or None,
-            str(model).strip(),
-        )
-    return None
+        pass
+    if not base:
+        base = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/") or None
+    return ResolvedAnthropicConfig(key, base, _anthropic_model())
+
+
+def _anthropic_model() -> str:
+    env_model = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
+    if env_model:
+        return env_model
+    settings_model = _pi_settings_model()
+    if settings_model.lower().startswith("claude"):
+        return settings_model
+    return DEFAULT_MODEL
 
 
 def _resolved_from_env() -> ResolvedAnthropicConfig | None:
@@ -105,8 +102,7 @@ def _resolved_from_env() -> ResolvedAnthropicConfig | None:
     if not key:
         return None
     base = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/") or None
-    model = (os.environ.get("ANTHROPIC_MODEL") or "").strip() or DEFAULT_MODEL
-    return ResolvedAnthropicConfig(key.strip(), base, model)
+    return ResolvedAnthropicConfig(key.strip(), base, _anthropic_model())
 
 
 def resolve_anthropic_config(
@@ -114,24 +110,43 @@ def resolve_anthropic_config(
     skip_api_config: bool = False,
     skip_claude_settings: bool = False,
 ) -> ResolvedAnthropicConfig:
-    """Same order as the app: userData ``api-config.json``, ``~/.claude/settings.json``, then env."""
+    """Anthropic creds from ``pi-agent/auth.json`` (in-app Settings), then env."""
+    _ = skip_claude_settings
     if not skip_api_config:
-        for path in _api_config_paths():
-            r = _resolved_from_api_config(path)
-            if r:
-                return r
-    if not skip_claude_settings:
-        r = _resolved_from_claude_settings()
+        r = _resolved_from_auth_json()
         if r:
             return r
     r = _resolved_from_env()
     if r:
         return r
-    tried = ", ".join(str(p) for p in _api_config_paths())
+    auth_path = default_agent_cowork_user_data() / "pi-agent" / "auth.json"
     raise AnthropicConfigError(
-        "No Anthropic credentials. Use app Settings (writes api-config.json), or "
-        "~/.claude/settings.json with ANTHROPIC_AUTH_TOKEN+ANTHROPIC_BASE_URL+ANTHROPIC_MODEL, or "
-        f"env ANTHROPIC_API_KEY (optional ANTHROPIC_BASE_URL, ANTHROPIC_MODEL). Tried: {tried}"
+        f"No Anthropic credentials. Save Anthropic API key in app Settings (writes {auth_path}), "
+        "or set ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN "
+        "(optional ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)."
+    )
+
+
+def _pi_settings_model() -> str:
+    path = default_agent_cowork_user_data() / "pi-agent" / "settings.json"
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(settings, dict):
+        return ""
+    return str(settings.get("defaultModel") or "").strip()
+
+
+def resolve_induce_llm(*, model_override: str | None = None) -> ResolvedRuntimeLlm:
+    """Anthropic Haiku + ``auth.json``, like verifier-generator — not the task-solving model."""
+    model = (model_override or "").strip() or DEFAULT_INDUCE_MODEL
+    cfg = resolve_anthropic_config()
+    return ResolvedRuntimeLlm(
+        provider="anthropic",
+        model=model,
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
     )
 
 
@@ -223,8 +238,42 @@ def _normalized_trajectory(blob: dict[str, Any]) -> list[dict[str, Any]]:
     return merged
 
 
-def build_context_inputs(data: Any) -> list[dict[str, Any]]:
-    """Rows: ``name``, ``task`` (long instruction when present), ``actions``, ``source``."""
+def _is_user_message_action(action: str) -> bool:
+    return action.strip().startswith("message(")
+
+
+def _format_action_entry(entry: dict[str, str], *, include_tool_result: bool = False) -> str:
+    action = entry["action"]
+    if not include_tool_result:
+        return action
+    tool_result = entry.get("tool_result")
+    if isinstance(tool_result, str) and tool_result.strip():
+        prefix = "[USER EDIT — infer preferences from these changes]\n" if not _is_user_message_action(action) else ""
+        return f"{action}\n{prefix}tool_result: {tool_result.strip()}"
+    return action
+
+
+def _build_action_log(
+    entries: list[dict[str, str]],
+    *,
+    actors: set[str] | None = None,
+    msg_only: bool = False,
+    include_tool_results: bool = False,
+) -> str:
+    actions: list[str] = []
+    for entry in entries:
+        actor = entry.get("actor") or "user"
+        if actors is not None and actor not in actors:
+            continue
+        action = entry["action"]
+        if msg_only and actor == "user" and not _is_user_message_action(action):
+            continue
+        actions.append(_format_action_entry(entry, include_tool_result=include_tool_results))
+    return "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
+
+
+def build_context_inputs(data: Any, *, msg_only: bool = False) -> list[dict[str, Any]]:
+    """Rows: ``name``, ``task``, ``action_entries`` (``actor``, ``action``, optional ``tool_result``), ``source``."""
     rows: list[dict[str, Any]] = []
     for i, blob in enumerate(_session_blobs(data)):
         if not isinstance(blob, dict):
@@ -236,11 +285,20 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
             continue
         nm = blob.get("name")
         name_str = nm if isinstance(nm, str) else ""
-        actions = [
-            entry["action"]
-            for entry in raw_traj
-            if isinstance(entry, dict) and isinstance(entry.get("action"), str)
-        ]
+        action_entries: list[dict[str, str]] = []
+        for entry in raw_traj:
+            if not isinstance(entry, dict) or not isinstance(entry.get("action"), str):
+                continue
+            row_entry: dict[str, str] = {
+                "actor": str(entry.get("actor") or "user"),
+                "action": entry["action"],
+            }
+            tool_result = entry.get("tool_result")
+            if isinstance(tool_result, str) and tool_result.strip():
+                row_entry["tool_result"] = tool_result
+            action_entries.append(row_entry)
+        if not action_entries:
+            continue
         sid = blob.get("uuid")
         source = sid.strip() if isinstance(sid, str) and sid.strip() else f"session_{i}"
         task_blob = blob.get("task")
@@ -251,7 +309,7 @@ def build_context_inputs(data: Any) -> list[dict[str, Any]]:
             {
                 "name": name_str,
                 "task": task_str,
-                "actions": actions,
+                "action_entries": action_entries,
                 "source": source,
                 "expertise_task": expertise_str,
             }
@@ -263,19 +321,63 @@ MEMORY_SYSTEM = """From the task description and the numbered action log, write 
 
 Your primary job is to extract NEW information from the current session Log (user messages, edits, styling choices, corrections, tools used, preferences). The existing memory file—if any—is background only.
 
+Two kinds of user evidence — weigh both; do not ignore direct edits:
+1. message("...") actions: stated preferences in the user's own words.
+2. Non-message actions (edit(...), brain_edit(), etc.) with tool_result: the user changed files directly. Read tool_result carefully — diffs, removed/added lines, CSS/property changes, deleted memory/skill text — and infer preferences from what they changed, not only what they typed.
+When tool_result shows concrete changes (e.g. font-size 18px → 22px, grid removed, colors changed), turn those into Preference: lines even if no message says it explicitly.
+
+Example:
+  action: edit("chart.html")
+  tool_result: font-size: 18px → font-size: 22px; grid: { display: true } → { display: false }
+→ Preference: User prefers larger chart text and no gridlines.
+
 When an existing memory file is provided:
-- FIRST mine the Log for facts/preferences not already captured (this is mandatory when the log is non-empty).
-- Include at least 2 lines clearly derived from this session when the log has agent actions.
-- Adopt the useful parts from original lines only when they do not duplicate what you add.
+- Mine the facts/preferences not already captured (mandatory).
 - Edit originals when this session refines or contradicts them.
-- Drop obsolete or redundant lines to make room for new learnings.
-Output the full updated memory file (not a diff).
+Output the updated memory entries (not repeating current content).
 
 Output rules:
-- One fact per line. Plain text only (no markdown headers like # or ##).
+- One fact per line. Plain text only (NO markdown headers like # or ##).
 - Each line is a single sentence (no numbered lists in the sense of "1." as list markers—use plain sentences).
-- Optional prefixes "Fact:" or "Preference:" on a line are OK.
-- If nothing is worth saving, output exactly the single word NONE (nothing else)."""
+- Add prefixes "Fact:" or "Preference:" to each line.
+- If nothing is worth saving, output exactly the single word NONE (nothing else).
+- Do not include reasoning, analysis, or a thinking process. Start directly with Title: (or NONE).
+
+Reply with:
+Title: <short task name>
+- Fact: <item>
+- Preference: <item>
+...
+"""
+
+MEMORY_CONSOLIDATE_SYSTEM = """Merge new induction entries into the existing memory file and produce a refined, cross-session version.
+
+You receive (i) the original memory file and (ii) new entries derived from a new session.
+Merge (ii) into (i): keep durable prior preferences, add genuinely new ones, and lightly deduplicate.
+Output line count should stay about the same as (i) or slightly more, but definitely substantially less than (i) and (ii) combineds.
+
+Keep:
+- Specific user preferences that apply to certain contexts
+- Recurring styling or workflow habits (e.g. larger fonts, no gridlines, compact layout) across tasks
+- General facts about how the user works
+
+Remove or merge only when necessary:
+- Nonsensical or contradictory entries
+- Highly task-specific details unlikely to help elsewhere (e.g. a color for one named column/bar)
+- Duplicate lines that say the same thing in different words.
+- Make each line concise but do not over-compress away useful detail.
+
+Output rules:
+- One entry per line. Plain text only (NO markdown headers like # or ##).
+- Prefix each line with "Fact:" or "Preference:".
+- Do not include reasoning or a thinking process.
+
+Reply with:
+Title: <short topic name>
+- Fact: <item>
+- Preference: <item>
+...
+"""
 
 SKILL_SYSTEM = """From the task and numbered log, describe the workflow the agent used: ordered steps, generalized (no long paths).
 
@@ -309,35 +411,51 @@ def _strip_outer_fences(text: str) -> str:
 
 
 _NUM_BULLET_RE = re.compile(r"^\s*(?:[-*+•]|\d+[\.)])\s+")
+_MEMORY_ANSWER_LINE_RE = re.compile(
+    r"^\s*(?:[-*+•]|\d+[\.)]\s+)?(?:\*{1,2})?(?:title|fact|preference)\s*:",
+    re.I,
+)
+_LABEL_PREFIX_RE = re.compile(
+    r"^(?:\*{1,2})?(?:preference|fact)(?:\*{1,2}:|:\*{0,2}|\s*:)\s*",
+    re.I,
+)
+
+
+def _strip_memory_preamble(text: str) -> str:
+    """Drop leading thinking/reasoning before the structured memory answer."""
+    t = text.strip()
+    if not t:
+        return t
+    lines = t.replace("\r\n", "\n").split("\n")
+    if not re.match(r"^thinking\s+process\s*:", lines[0].strip(), re.I):
+        return t
+    for i, line in enumerate(lines):
+        if _MEMORY_ANSWER_LINE_RE.match(line):
+            return "\n".join(lines[i:]).strip()
+    return ""
 
 
 def _normalize_memory_line(line: str) -> str | None:
     s = line.strip()
     if not s:
         return None
-    if s.upper().rstrip(".") in ("NONE", "N/A", "NA"):
-        return None
-    if s.startswith("##") or re.match(r"^#\s+\S", s):
-        return None
-    low = s.lower()
-    if (
-        low.startswith(("here are the", "below are the", "the following ", "summary:", "memories:", "facts:"))
-        and len(s) < 140
-    ):
-        return None
     while _NUM_BULLET_RE.match(s):
         s = _NUM_BULLET_RE.sub("", s, count=1).strip()
-    low = s.lower()
-    if low.startswith("fact:"):
-        s = s[5:].strip()
-    elif low.startswith("preference:"):
-        s = s[11:].strip()
-    s = " ".join(s.split())
-    if not s or s.upper().rstrip(".") == "NONE":
+    if not _LABEL_PREFIX_RE.match(s):
         return None
-    if s.startswith("##"):
-        return None
-    return s
+    return s or None
+
+
+def _parse_memory_lines(raw: str) -> list[str]:
+    blob = _strip_memory_preamble(_strip_outer_fences(raw))
+    if not blob or blob.strip().upper() == "NONE":
+        return []
+    out: list[str] = []
+    for line in blob.replace("\r\n", "\n").split("\n"):
+        s = _normalize_memory_line(line)
+        if s:
+            out.append(s)
+    return out
 
 
 def _clip_existing(text: str) -> str:
@@ -360,10 +478,14 @@ def _existing_file_block(label: str, content: str) -> str:
 def _merge_tail_instruction(has_existing: bool, kind: str) -> str:
     if not has_existing:
         return ""
-    noun = "memory facts" if kind == "memory" else "workflow steps"
+    if kind == "memory":
+        return (
+            "\nInstruction: Output ONLY new memory facts/preferences from this session's Log. "
+            "Use the existing file to skip duplicates—do not repeat or revise prior lines.\n"
+        )
     return (
         f"\nMerge instruction: The Log above is from a NEW session. "
-        f"Extract fresh {noun} from it. Keep prior file content only when still useful; "
+        f"Extract fresh workflow steps from it. Keep prior file content only when still useful; "
         f"edit or replace stale lines. Do not return the prior file unchanged if the log has agent actions.\n"
     )
 
@@ -376,26 +498,93 @@ def extract_memories(
     user = (
         f"Task / session title:\n{task_block}\n\n"
         f"{_existing_file_block('Existing memory file', existing_memory)}"
-        f"Log (primary source—mine this session for new facts and preferences):\n{log or '(empty)'}\n"
+        "User action log (messages + direct edits; for edit/brain_edit steps, "
+        "mine tool_result diffs for preferences):\n"
+        f"{log or '(empty)'}\n"
         f"{_merge_tail_instruction(has_existing, 'memory')}"
     )
     try:
-        raw = runtime_llm_text(runtime, MEMORY_SYSTEM, user)
+        raw = runtime_llm_text(runtime, MEMORY_SYSTEM, user, max_tokens=2048)
     except Exception:
         logger.exception("Memory LLM failed")
         return []
-    raw = _strip_outer_fences(raw)
-    out: list[str] = []
-    for line in raw.replace("\r\n", "\n").split("\n"):
-        s = _normalize_memory_line(line)
-        if s:
-            out.append(s)
+    out = _parse_memory_lines(raw)
     if not out and raw.strip() and raw.strip().upper() not in ("NONE",):
         logger.warning(
             "Memory extraction produced 0 lines after parsing (model returned non-empty text). Preview: %s",
             raw.strip()[:500],
         )
     return out[:8 if has_existing else 6]
+
+
+def _log_memory_consolidation_diff(
+    stem: str, before_lines: list[str], after_lines: list[str]
+) -> None:
+    if before_lines == after_lines:
+        logger.info(
+            "Memory consolidation (%s): no line changes (%d lines)", stem, len(after_lines)
+        )
+        return
+    before_set = set(before_lines)
+    after_set = set(after_lines)
+    removed = [ln for ln in before_lines if ln not in after_set]
+    added = [ln for ln in after_lines if ln not in before_set]
+    unchanged = len(before_set & after_set)
+    parts = [
+        f"Memory consolidation ({stem}): {len(before_lines)} → {len(after_lines)} lines "
+        f"({unchanged} unchanged)",
+        "─" * 72,
+    ]
+    if removed:
+        parts.append("  removed:")
+        parts.extend(f"    − {ln}" for ln in removed)
+    if added:
+        parts.append("  added:")
+        parts.extend(f"    + {ln}" for ln in added)
+    if not removed and not added:
+        parts.append("  (lines reordered only)")
+    parts.append("─" * 72)
+    logger.info("\n%s", "\n".join(parts))
+
+
+def consolidate_memory_file(
+    runtime: ResolvedRuntimeLlm,
+    path: Path,
+    *,
+    original_content: str,
+    new_entries: list[str],
+) -> list[str]:
+    """Second LM pass: merge new entries into the pre-induction memory file."""
+    original = original_content.strip()
+    new_block = "\n\n".join(new_entries).strip()
+    if not original and not new_block:
+        return []
+    before_lines = _parse_memory_lines(original) + new_entries
+    user = (
+        f"(i) Original memory file (before this induction round):\n"
+        f"{original or '(empty)'}\n\n"
+        f"(ii) New entries from this induction round:\n"
+        f"{new_block or '(none)'}\n"
+    )
+    try:
+        raw = runtime_llm_text(runtime, MEMORY_CONSOLIDATE_SYSTEM, user, max_tokens=2048)
+    except Exception:
+        logger.exception("Memory consolidation LLM failed")
+        return []
+    out = _parse_memory_lines(raw)
+    if not out:
+        if raw.strip().upper() == "NONE":
+            _log_memory_consolidation_diff(path.stem, before_lines, [])
+            path.write_text("", encoding="utf-8")
+        elif raw.strip():
+            logger.warning(
+                "Memory consolidation produced 0 lines after parsing; keeping file. Preview: %s",
+                raw.strip()[:500],
+            )
+        return []
+    _log_memory_consolidation_diff(path.stem, before_lines, out)
+    path.write_text("\n\n".join(out) + "\n", encoding="utf-8")
+    return out
 
 
 def extract_skill(
@@ -467,6 +656,19 @@ def _read_existing_outputs(out: Path, stem: str) -> tuple[str, str]:
     return memory, skill
 
 
+def _append_memory_file(path: Path, memories: list[str]) -> None:
+    if not memories:
+        return
+    new_block = "\n\n".join(memories) + "\n"
+    prefix = ""
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8")
+        if existing.strip():
+            prefix = "\n\n"
+    with path.open("a", encoding="utf-8") as f:
+        f.write(prefix + new_block)
+
+
 def _slug(name: str, fallback: str) -> str:
     s = (name or "").strip()
     if len(s) >= 2 and s[0] in "\"'" and s[0] == s[-1]:
@@ -482,23 +684,43 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Extract memories & skills from session JSON")
     p.add_argument("--data_path", required=True, help="Path to session JSON")
     p.add_argument("--output_dir", default=None, help="Output root (default: app userData)")
-    p.add_argument("--model", default=None, help="Override Pi default model slug/id")
+    p.add_argument(
+        "--model",
+        default=None,
+        help=f"Override induce model (default: {DEFAULT_INDUCE_MODEL}; always uses Anthropic auth)",
+    )
+    p.add_argument(
+        "--msg_only",
+        action="store_true",
+        help="Only include user message(...) actions; drop other user actions (edit, brain_edit, etc.)",
+    )
+    p.add_argument(
+        "--memory_only",
+        action="store_true",
+        help="Only induce memory files; skip skill extraction",
+    )
     args = p.parse_args()
     load_dotenv()
 
     with open(args.data_path, encoding="utf-8") as f:
         raw = json.load(f)
-    inputs = build_context_inputs(raw)
+    inputs = build_context_inputs(raw, msg_only=args.msg_only)
     if not inputs:
         logger.warning("Nothing to extract.")
         return
 
     try:
-        runtime = resolve_runtime_llm(model_override=args.model)
-    except PiLlmConfigError as e:
+        runtime = resolve_induce_llm(model_override=args.model)
+    except AnthropicConfigError as e:
         logger.error("%s", e)
         raise SystemExit(1) from e
-    logger.info("Pi runtime: provider=%s model=%s", runtime.provider, runtime.model)
+    logger.info(
+        "Induce LLM: provider=%s model=%s msg_only=%s memory_only=%s",
+        runtime.provider,
+        runtime.model,
+        args.msg_only,
+        args.memory_only,
+    )
 
     out = (Path(args.output_dir) if args.output_dir else default_agent_cowork_user_data()).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -514,8 +736,10 @@ def main() -> None:
         task_for_llm = (row.get("task") or "").strip() if isinstance(row.get("task"), str) else ""
         if not task_for_llm:
             task_for_llm = (name or "").strip() if isinstance(name, str) else ""
-        actions = row.get("actions") or []
-        log = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
+        entries = row.get("action_entries") or []
+        memory_log = _build_action_log(
+            entries, actors={"user"}, msg_only=args.msg_only, include_tool_results=True
+        )
         base = _output_stem(row)
         expertise_stem = _normalize_task_stem(
             row.get("expertise_task") if isinstance(row.get("expertise_task"), str) else ""
@@ -529,23 +753,30 @@ def main() -> None:
 
         existing_memory, existing_skill = _read_existing_outputs(out, stem)
         memories = extract_memories(
-            runtime, task_for_llm, log, existing_memory=existing_memory
+            runtime, task_for_llm, memory_log, existing_memory=existing_memory
         )
-        (mem_dir / f"{stem}.md").write_text(
-            ("\n\n".join(memories) + "\n") if memories else "",
-            encoding="utf-8",
-        )
+        mem_path = mem_dir / f"{stem}.md"
+        _append_memory_file(mem_path, memories)
+        if memories:
+            consolidate_memory_file(
+                runtime,
+                mem_path,
+                original_content=existing_memory,
+                new_entries=memories,
+            )
 
-        skill = extract_skill(
-            runtime, task_for_llm, log, existing_skill=existing_skill
-        )
-        if skill:
-            t, steps = skill
-            body = t + "\n" + "\n".join(f"{i + 1}. {st}" for i, st in enumerate(steps)) + "\n"
-            (sk_dir / f"{stem}.md").write_text(body, encoding="utf-8")
-            ns += 1
-        else:
-            (sk_dir / f"{stem}.md").write_text("", encoding="utf-8")
+        if not args.memory_only:
+            skill_log = _build_action_log(entries, msg_only=args.msg_only)
+            skill = extract_skill(
+                runtime, task_for_llm, skill_log, existing_skill=existing_skill
+            )
+            if skill:
+                t, steps = skill
+                body = t + "\n" + "\n".join(f"{i + 1}. {st}" for i, st in enumerate(steps)) + "\n"
+                (sk_dir / f"{stem}.md").write_text(body, encoding="utf-8")
+                ns += 1
+            else:
+                (sk_dir / f"{stem}.md").write_text("", encoding="utf-8")
 
         nm += len(memories)
         logger.info("%s → %s.md", src, stem)

@@ -244,9 +244,16 @@ function sleep(ms: number): Promise<void> {
 }
 
 let activeWatcher: TinkerAutoUpdateWatcher | null = null;
+/** Context Update (true) vs Weight Update (false). Default matches Settings → Mode. */
+let autoContextInduction = true;
 
-export function startTinkerAutoUpdateWatcher(): void {
-  if (activeWatcher || isTrainingProxyDisabled()) return;
+export function syncTinkerAutoUpdateWatcher(contextUpdate?: boolean): void {
+  if (contextUpdate !== undefined) autoContextInduction = contextUpdate;
+  if (isTrainingProxyDisabled() || autoContextInduction) {
+    stopTinkerAutoUpdateWatcher();
+    return;
+  }
+  if (activeWatcher) return;
   const baseUrl = getTrainingProxyBaseUrl();
   if (!baseUrl) return;
   activeWatcher = new TinkerAutoUpdateWatcher(() => BrowserWindow.getAllWindows(), baseUrl);

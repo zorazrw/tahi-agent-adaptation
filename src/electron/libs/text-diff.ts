@@ -1,3 +1,186 @@
+type LineOp = { type: "equal" | "del" | "add"; line: string };
+
+function computeLineOps(origLines: string[], currLines: string[]): LineOp[] {
+  const n = origLines.length;
+  const m = currLines.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      if (origLines[i] === currLines[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
+      else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops: LineOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (origLines[i] === currLines[j]) {
+      ops.push({ type: "equal", line: origLines[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: "del", line: origLines[i] });
+      i++;
+    } else {
+      ops.push({ type: "add", line: currLines[j] });
+      j++;
+    }
+  }
+  while (i < n) {
+    ops.push({ type: "del", line: origLines[i] });
+    i++;
+  }
+  while (j < m) {
+    ops.push({ type: "add", line: currLines[j] });
+    j++;
+  }
+  return ops;
+}
+
+function truncSnippet(text: string, max = 160): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  return t.slice(0, max - 3).trimEnd() + "...";
+}
+
+const PLAIN_TEXT_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".text", ".rst"]);
+
+/** Prose / markdown / plain text — sentence chunks keep diffs short. */
+export function isPlainTextFilePath(path: string): boolean {
+  const base = path.replace(/\\/g, "/").split("/").pop() ?? path;
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return true;
+  return PLAIN_TEXT_EXTENSIONS.has(base.slice(dot).toLowerCase());
+}
+
+const SENTENCE_BREAK_RE = /(?<=[.!?])\s+/;
+
+/** Split prose into sentence-sized lines (paragraphs flattened). */
+export function linesForProseDiff(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const out: string[] = [];
+  for (const para of trimmed.split(/\n\s*\n/)) {
+    const flat = para.replace(/\s+/g, " ").trim();
+    if (!flat) continue;
+    const sentences = flat.split(SENTENCE_BREAK_RE).map((s) => s.trim()).filter(Boolean);
+    if (sentences.length > 0) out.push(...sentences);
+    else out.push(flat);
+  }
+  return out.length > 0 ? out : [trimmed];
+}
+
+/** Code / markup — one diff line per source line. */
+export function linesForCodeDiff(text: string): string[] {
+  return text.split(/\r?\n/).map((l) => l.replace(/\r$/, ""));
+}
+
+export function linesForFileDiff(text: string, path: string): string[] {
+  return isPlainTextFilePath(path) ? linesForProseDiff(text) : linesForCodeDiff(text);
+}
+
+function wordChangeSnippets(beforeLine: string, afterLine: string): string {
+  const wa = beforeLine.split(/\s+/).filter(Boolean);
+  const wb = afterLine.split(/\s+/).filter(Boolean);
+  if (wa.join(" ") === wb.join(" ")) return "(same tokens)";
+  const parts: string[] = [];
+  let ai = 0;
+  let bi = 0;
+  while (ai < wa.length || bi < wb.length) {
+    if (ai < wa.length && bi < wb.length && wa[ai] === wb[bi]) {
+      ai++;
+      bi++;
+      continue;
+    }
+    const nextA = wa.indexOf(wb[bi] ?? "", ai);
+    const nextB = wb.indexOf(wa[ai] ?? "", bi);
+    if (bi < wb.length && (nextA === -1 || (nextB !== -1 && nextB - bi <= nextA - ai))) {
+      parts.push(`+ ${truncSnippet(wb[bi], 100)}`);
+      bi++;
+    } else if (ai < wa.length) {
+      parts.push(`- ${truncSnippet(wa[ai], 100)}`);
+      ai++;
+    } else {
+      break;
+    }
+    if (parts.length >= 6) break;
+  }
+  return parts.length > 0 ? parts.join(", ") : `${truncSnippet(beforeLine, 100)} → ${truncSnippet(afterLine, 100)}`;
+}
+
+function formatProseDiffParts(ops: LineOp[], maxChunks: number): string[] {
+  const parts: string[] = [];
+  for (let k = 0; k < ops.length; k++) {
+    if (ops[k].type === "equal") continue;
+    const delLines: string[] = [];
+    const addLines: string[] = [];
+    while (k < ops.length && ops[k].type !== "equal") {
+      if (ops[k].type === "del") delLines.push(ops[k].line);
+      else if (ops[k].type === "add") addLines.push(ops[k].line);
+      k++;
+    }
+    k--;
+
+    const bJoin = delLines.join(" ");
+    const aJoin = addLines.join(" ");
+    if (delLines.length > 0 && addLines.length > 0) {
+      const ws = wordChangeSnippets(bJoin, aJoin);
+      if (ws !== "(same tokens)") parts.push(`• ${truncSnippet(ws, 700)}`);
+    } else if (delLines.length > 0) {
+      parts.push(`• removed: ${truncSnippet(bJoin, 200)}`);
+    } else if (addLines.length > 0) {
+      parts.push(`• added: ${truncSnippet(aJoin, 200)}`);
+    }
+    if (parts.length >= maxChunks) break;
+  }
+  return parts;
+}
+
+/** Changed source lines only: ``-`` / ``+`` (no equal-line context). */
+function formatCodeDiffParts(ops: LineOp[], maxChunks: number): string[] {
+  const parts: string[] = [];
+  let chunks = 0;
+  for (let k = 0; k < ops.length; k++) {
+    if (ops[k].type === "equal") continue;
+    if (chunks > 0) parts.push("...");
+    while (k < ops.length && ops[k].type !== "equal") {
+      const op = ops[k];
+      if (op.type === "del") parts.push(`- ${truncSnippet(op.line, 300)}`);
+      else if (op.type === "add") parts.push(`+ ${truncSnippet(op.line, 300)}`);
+      k++;
+    }
+    k--;
+    chunks++;
+    if (chunks >= maxChunks) break;
+  }
+  return parts;
+}
+
+/**
+ * Compact file edit diff. Prose (.md, .txt, …): sentence-aligned bullets.
+ * Code/markup: line-aligned ``-`` / ``+`` on changed lines only.
+ */
+export function compactFileEditAnnotation(
+  before: string,
+  after: string,
+  pathDisp: string,
+  maxChunks = 8
+): string {
+  if (before === after) return "";
+  const ops = computeLineOps(linesForFileDiff(before, pathDisp), linesForFileDiff(after, pathDisp));
+  const parts = isPlainTextFilePath(pathDisp)
+    ? formatProseDiffParts(ops, maxChunks)
+    : formatCodeDiffParts(ops, maxChunks);
+
+  if (parts.length === 0) return "";
+  let body = parts.join("\n");
+  const maxOut = 8000;
+  if (body.length > maxOut) {
+    body = body.slice(0, maxOut - 50).trimEnd() + `\n… (truncated, path=${pathDisp})`;
+  }
+  return `path=${pathDisp}\n${body}`;
+}
+
 /** Compact line-based diff between two texts (changed hunks + small context). */
 export function buildTextDiff(
   original: string,
@@ -7,42 +190,7 @@ export function buildTextDiff(
 ): string {
   const origLines = original.split(/\r?\n/);
   const currLines = current.split(/\r?\n/);
-  const n = origLines.length;
-  const m = currLines.length;
-
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      if (origLines[i] === currLines[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
-      else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-
-  type Op = { type: "equal" | "del" | "add"; line: string; i: number; j: number };
-  const ops: Op[] = [];
-  let i = 0,
-    j = 0;
-  while (i < n && j < m) {
-    if (origLines[i] === currLines[j]) {
-      ops.push({ type: "equal", line: origLines[i], i, j });
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push({ type: "del", line: origLines[i], i, j });
-      i++;
-    } else {
-      ops.push({ type: "add", line: currLines[j], i, j });
-      j++;
-    }
-  }
-  while (i < n) {
-    ops.push({ type: "del", line: origLines[i], i, j });
-    i++;
-  }
-  while (j < m) {
-    ops.push({ type: "add", line: currLines[j], i, j });
-    j++;
-  }
+  const ops = computeLineOps(origLines, currLines);
 
   const hunks: { start: number; end: number }[] = [];
   for (let k = 0; k < ops.length; k++) {
@@ -66,13 +214,9 @@ export function buildTextDiff(
     if (h > 0) lines.push("...");
     for (let k = s; k <= e; k++) {
       const op = ops[k];
-      if (op.type === "equal") {
-        lines.push(`  ${op.line}`);
-      } else if (op.type === "del") {
-        lines.push(`- ${op.line}`);
-      } else {
-        lines.push(`+ ${op.line}`);
-      }
+      if (op.type === "equal") lines.push(`  ${op.line}`);
+      else if (op.type === "del") lines.push(`- ${op.line}`);
+      else lines.push(`+ ${op.line}`);
     }
   }
   return lines.join("\n");

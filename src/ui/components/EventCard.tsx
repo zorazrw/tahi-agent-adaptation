@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Undo2 } from "lucide-react";
 import JsonView from "@uiw/react-json-view";
 import type {
   AppPermissionResult,
@@ -684,7 +685,17 @@ const PiSystemInfoCard = ({ message }: { message: PiSystemInitMessage }) => {
 };
 
 /* ── User Message Card ── */
-const UserMessageCard = ({ message }: { message: { type: "user_prompt"; prompt: string } }) => {
+const UserMessageCard = ({
+  message,
+  onRevertToBeforeMessage,
+  revertDisabled,
+  label,
+}: {
+  message: { type: "user_prompt"; prompt: string };
+  onRevertToBeforeMessage?: () => void;
+  revertDisabled?: boolean;
+  label?: string;
+}) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -707,8 +718,25 @@ const UserMessageCard = ({ message }: { message: { type: "user_prompt"; prompt: 
             <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>
           )}
         </button>
-        <div className="rounded-2xl rounded-tr-sm bg-surface-secondary border border-ink-900/8 px-4 py-3">
+        <div className="relative rounded-2xl rounded-tr-sm bg-surface-secondary border border-ink-900/8 px-4 py-3 pb-8">
+          {label ? (
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-primary/70 mb-1.5">
+              {label}
+            </div>
+          ) : null}
           <MessageResponse>{message.prompt}</MessageResponse>
+          {onRevertToBeforeMessage && (
+            <button
+              type="button"
+              onClick={onRevertToBeforeMessage}
+              disabled={revertDisabled}
+              className="absolute bottom-1.5 right-1.5 p-1 rounded-md text-ink-400 hover:text-ink-700 hover:bg-ink-900/8 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+              aria-label="Revert file preview to before this message"
+              title="Revert file preview to before this message"
+            >
+              <Undo2 className="h-3.5 w-3.5" strokeWidth={2} />
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -723,6 +751,9 @@ export function MessageCard({
   permissionRequest,
   onPermissionResult,
   skipTaskToolUse = false,
+  messageIndex,
+  onRevertToBeforeMessage,
+  revertDisabled,
 }: {
   message: StreamMessage;
   isLast?: boolean;
@@ -730,11 +761,33 @@ export function MessageCard({
   permissionRequest?: PermissionRequest;
   onPermissionResult?: (toolUseId: string, result: AppPermissionResult) => void;
   skipTaskToolUse?: boolean;
+  messageIndex?: number;
+  onRevertToBeforeMessage?: (messageIndex: number) => void;
+  revertDisabled?: boolean;
 }) {
   const showIndicator = isLast && isRunning;
 
   if (message.type === "user_prompt") {
-    return <UserMessageCard message={message} />;
+    return (
+      <UserMessageCard
+        message={message}
+        revertDisabled={revertDisabled}
+        onRevertToBeforeMessage={
+          onRevertToBeforeMessage && messageIndex != null
+            ? () => onRevertToBeforeMessage(messageIndex)
+            : undefined
+        }
+      />
+    );
+  }
+
+  if (message.type === "file_comment") {
+    return (
+      <UserMessageCard
+        message={{ type: "user_prompt", prompt: message.prompt }}
+        label={`Comment on ${message.path}`}
+      />
+    );
   }
 
   if (message.type === "verifier_label") {

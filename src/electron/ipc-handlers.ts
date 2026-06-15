@@ -35,13 +35,26 @@ import {
   buildExportEnvironmentSnapshot,
   buildExportEnvironmentSnapshotWithPreviewWrittenFile,
   shouldWriteSnapshotForSdkMessage,
+  snapshotFileEntryBeforeUserMessage,
+  readDiskFileAsSnapshotEntry,
+  writeDiskFileFromSnapshotEntry,
+  resolveUserPromptRowIndex,
+  type SnapshotFileEntry,
 } from "./libs/message-state-snapshot.js";
 import { classifyUserWorkflowTreeEdit } from "./libs/workflow-edit-classify.js";
 import { createPiSessionManager, getAgentSettings, getPiAgentDir, getPiSessionsDir } from "./libs/pi-config.js";
 import { generateUpdatedVerifiersForNode } from "./libs/verifier-generator.js";
-import { gatherHumanFileEditDiffs } from "./libs/file-edit-diffs.js";
-import { buildTextDiff } from "./libs/text-diff.js";
+import { gatherFileEditDiffsSinceAgentRound, gatherHumanFileEditDiffs } from "./libs/file-edit-diffs.js";
+import {
+  appendHumanEditsToContinuePrompt,
+  findHumanEditsWindowEnd,
+  findHumanEditsWindowStart,
+  formatFileCommentsForPrompt,
+  gatherPendingFileCommentsSinceAgentRound,
+  gatherVerifierEditDiffSinceAgentRound,
+} from "./libs/human-edits-prompt.js";
 import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
+import { syncTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
@@ -678,7 +691,11 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   sessionLastVerificationNodeId.set(sessionId, nodeId);
   sessionContinueVerificationNodeId.delete(sessionId);
   const pathContext = getNodePath(session.workflowTree, nodeId);
-  const nodePrompt = buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd);
+  const messageRows = store.getMessageRowsWithSnapshots(sessionId);
+  const pendingComments = gatherPendingFileCommentsSinceAgentRound(messageRows);
+  const nodePrompt =
+    buildPromptForNode(node.description, pathContext, node.outputFiles, humanEdits, session.cwd, node) +
+    formatFileCommentsForPrompt(pendingComments);
   store.updateSession(sessionId, { status: "running", lastPrompt: nodePrompt });
   broadcast({
     type: "session.status",
@@ -801,9 +818,11 @@ export function handleClientEvent(event: ClientEvent) {
   }
 
   if (event.type === "session.setAutoContextInduction") {
+    const autoContextInduction = Boolean(event.payload.autoContextInduction);
+    syncTinkerAutoUpdateWatcher(autoContextInduction);
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {
-      sessions.updateSession(sid, { autoContextInduction: Boolean(event.payload.autoContextInduction) });
+      sessions.updateSession(sid, { autoContextInduction });
     }
     return;
   }
@@ -954,8 +973,18 @@ export function handleClientEvent(event: ClientEvent) {
       }
     }
 
+    const messageRows = sessions.getMessageRowsWithSnapshots(session.id);
+    const editFrom = findHumanEditsWindowStart(messageRows);
+    const editTo = findHumanEditsWindowEnd(messageRows);
+    const promptWithHumanEdits = appendHumanEditsToContinuePrompt(
+      event.payload.prompt,
+      gatherFileEditDiffsSinceAgentRound(messageRows, session.cwd, editFrom, editTo),
+      gatherVerifierEditDiffSinceAgentRound(messageRows, editFrom, editTo, vNode),
+      gatherPendingFileCommentsSinceAgentRound(messageRows)
+    );
+
     runClaude({
-      prompt: event.payload.prompt,
+      prompt: promptWithHumanEdits,
       session,
       ...(session.workflowTree?.length
         ? { trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS }
@@ -986,6 +1015,51 @@ export function handleClientEvent(event: ClientEvent) {
     return;
   }
 
+  if (event.type === "session.addFileComment") {
+    const { sessionId, path, prompt } = event.payload;
+    const session = sessions.getSession(sessionId);
+    if (!session) {
+      emit({ type: "session.deleted", payload: { sessionId } });
+      emit({
+        type: "runner.error",
+        payload: { sessionId, message: "Session no longer exists." },
+      });
+      return;
+    }
+
+    if (session.engine === "legacy-claude") {
+      emitLegacyReadonlyError(session.id, "add a file comment");
+      return;
+    }
+
+    if (session.status === "running") {
+      broadcast({
+        type: "runner.error",
+        payload: { sessionId, message: "Session is still running. Please wait or stop it first." },
+      });
+      return;
+    }
+
+    const pathForMessage = path.trim();
+    const commentPrompt = prompt.trim();
+    if (!pathForMessage || !commentPrompt) return;
+
+    const rowId = sessions.recordMessage(sessionId, {
+      type: "file_comment",
+      path: pathForMessage,
+      prompt: commentPrompt,
+    });
+    sessions.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(session));
+    broadcast({
+      type: "stream.message",
+      payload: {
+        sessionId,
+        message: { type: "file_comment", path: pathForMessage, prompt: commentPrompt },
+      },
+    });
+    return;
+  }
+
   if (event.type === "session.solveNode") {
     const { sessionId, nodeId } = event.payload;
     if (isLegacySession(sessionId)) {
@@ -993,6 +1067,12 @@ export function handleClientEvent(event: ClientEvent) {
       return;
     }
     triggerNodeSolve(sessionId, nodeId);
+    return;
+  }
+
+  if (event.type === "session.labelVerifiers") {
+    const { sessionId, nodeId } = event.payload;
+    void runVerifierLabelingForNode(sessionId, nodeId);
     return;
   }
 
@@ -1186,6 +1266,85 @@ function fileEditPathForMessage(sess: Session, absNorm: string): string {
   return absNorm;
 }
 
+async function writeSnapshotEntryToDisk(
+  sessionId: string,
+  resolved: string,
+  entry: SnapshotFileEntry
+): Promise<void> {
+  await writeDiskFileFromSnapshotEntry(resolved, entry);
+  const pathForRecord = resolved.replace(/\\/g, "/");
+  if ((entry.content_encoding ?? "utf8") === "utf8") {
+    recordFileEditAfterPreviewSave(sessionId, pathForRecord, entry.content);
+  } else {
+    recordFileEditAfterPreviewSave(sessionId, pathForRecord);
+  }
+}
+
+/** Restore the preview file to its last saved state before the given user message was sent. */
+export async function revertPreviewToBeforeUserMessage(
+  sessionId: string,
+  messageIndex: number,
+  filePath: string
+): Promise<{ success: boolean; error?: string; latestVersion?: SnapshotFileEntry }> {
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (!session) return { success: false, error: "Session not found" };
+  const trimmedPath = String(filePath ?? "").trim();
+  if (!trimmedPath) return { success: false, error: "No file selected" };
+
+  const rows = store.getMessageRowsWithSnapshots(sessionId);
+  const uiMessages = store.getMessages(sessionId);
+  const rowIndex = resolveUserPromptRowIndex(rows, uiMessages, messageIndex);
+  if (rowIndex == null) {
+    return { success: false, error: "Message not found" };
+  }
+
+  const entry = snapshotFileEntryBeforeUserMessage(rows, rowIndex, trimmedPath, session.cwd);
+  if (!entry) {
+    return {
+      success: false,
+      error: "No earlier version of this file is saved before that message",
+    };
+  }
+
+  const base = session.cwd?.trim() || process.cwd();
+  const resolved = pathIsAbsolute(trimmedPath) ? trimmedPath : resolve(base, trimmedPath);
+
+  try {
+    const latestVersion = await readDiskFileAsSnapshotEntry(resolved);
+    await writeSnapshotEntryToDisk(sessionId, resolved, entry);
+    return { success: true, latestVersion: latestVersion ?? undefined };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Write a previously stashed on-disk version back to the preview file (undo a revert). */
+export async function restorePreviewLatestVersion(
+  sessionId: string,
+  filePath: string,
+  latestVersion: SnapshotFileEntry
+): Promise<{ success: boolean; error?: string }> {
+  const store = initializeSessions();
+  const session = store.getSession(sessionId);
+  if (!session) return { success: false, error: "Session not found" };
+  const trimmedPath = String(filePath ?? "").trim();
+  if (!trimmedPath) return { success: false, error: "No file selected" };
+  if (typeof latestVersion?.content !== "string") {
+    return { success: false, error: "No stashed version to restore" };
+  }
+
+  const base = session.cwd?.trim() || process.cwd();
+  const resolved = pathIsAbsolute(trimmedPath) ? trimmedPath : resolve(base, trimmedPath);
+
+  try {
+    await writeSnapshotEntryToDisk(sessionId, resolved, latestVersion);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** Called from main after a successful preview-panel ``write-file`` (``file_edit`` row + env snapshot including written HTML/text). */
 export function recordFileEditAfterPreviewSave(
   sessionId: string,
@@ -1207,13 +1366,6 @@ export function recordFileEditAfterPreviewSave(
     type: "stream.message",
     payload: { sessionId, message: { type: "file_edit", path: pathForMessage } },
   });
-
-  const vNode = sessionLastVerificationNodeId.get(sessionId);
-  if (vNode) {
-    void autoRefineVerifiersFromUserMessages(sessionId, [vNode]);
-  } else if (sess.workflowTree?.length) {
-    void autoRefineVerifiersFromUserMessages(sessionId, flattenWorkflowNodeIds(sess.workflowTree));
-  }
 }
 
 /** Best-effort fallback when renderer omits ``sessionId`` for preview writes. */

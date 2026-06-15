@@ -59,6 +59,13 @@ electron.contextBridge.exposeInMainWorld("electron", {
         ipcInvoke("logout-provider", provider),
     previewFile: (filePath: string, cwd?: string | null) =>
         ipcInvoke("preview-file", filePath, cwd ?? undefined),
+    revertPreviewBeforeUserMessage: (sessionId: string, messageIndex: number, filePath: string) =>
+        ipcInvoke("revert-preview-before-user-message", sessionId, messageIndex, filePath),
+    restorePreviewLatestVersion: (
+        sessionId: string,
+        filePath: string,
+        latestVersion: PreviewFileSnapshotEntry
+    ) => ipcInvoke("restore-preview-latest-version", sessionId, filePath, latestVersion),
     writeFile: (filePath: string, cwd?: string | null, content?: string, sessionId?: string | null) =>
         ipcInvoke("write-file", filePath, cwd ?? undefined, content ?? "", sessionId ?? undefined),
     writeXlsx: (filePath: string, cwd?: string | null, model?: import("../lib/xlsx-model.js").XlsxModel, sessionId?: string | null) =>
