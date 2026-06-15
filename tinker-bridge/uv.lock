@@ -2265,8 +2265,8 @@ wheels = [
 
 [[package]]
 name = "tinker-cookbook"
-version = "0.3.1.dev11+gcaf0a9de9"
-source = { git = "https://github.com/thinking-machines-lab/tinker-cookbook.git#caf0a9de936d5c12685ccc68e2dd47ccf6a81702" }
+version = "0.4.3.dev1+g86188b45e"
+source = { git = "https://github.com/thinking-machines-lab/tinker-cookbook.git#86188b45e1e364c3f56fefab8f93f7bef2b73a80" }
 dependencies = [
     { name = "aiohttp" },
     { name = "anyio" },

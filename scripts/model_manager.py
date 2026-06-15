@@ -62,6 +62,8 @@ TINKER_SUPPORTED_MODELS: list[str] = [
     "Qwen/Qwen3.5-35B-A3B",
     "Qwen/Qwen3.5-27B",
     "Qwen/Qwen3.5-4B",
+    "Qwen/Qwen3.6-35B-A3B",
+    "Qwen/Qwen3.6-27B",
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
@@ -94,6 +96,9 @@ TINKER_MODEL_TO_RENDERER_NAME: dict[str, str] = {
     "Qwen/Qwen3.5-35B-A3B": "qwen3_5",
     "Qwen/Qwen3.5-27B": "qwen3_5",
     "Qwen/Qwen3.5-4B": "qwen3_5",
+    # Qwen3.6 reuses the Qwen3.5 renderer (identical tokenizer/special tokens).
+    "Qwen/Qwen3.6-35B-A3B": "qwen3_5",
+    "Qwen/Qwen3.6-27B": "qwen3_5",
     "openai/gpt-oss-120b": "gpt_oss_high_reasoning",
     "openai/gpt-oss-20b": "gpt_oss_low_reasoning",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nemotron3",
