@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { NodeCompletedMessage, ServerEvent, SessionEngine, SessionStatus, StreamMessage, WorkflowNode } from "../types";
+import type { NodeCompletedMessage, NodeVerifierPatch, ServerEvent, SessionEngine, SessionStatus, StreamMessage, WorkflowNode } from "../types";
 import {
   clearAllPendingWorkflowAutoAdvance,
   clearPendingWorkflowAutoAdvance,
@@ -118,6 +118,27 @@ function findNode(tree: WorkflowNode[], id: string): WorkflowNode | undefined {
     if (found) return found;
   }
   return undefined;
+}
+
+function patchNodeVerifiersInTree(tree: WorkflowNode[], updates: NodeVerifierPatch[]): WorkflowNode[] {
+  if (updates.length === 0) return tree;
+  const byId = new Map(updates.map((u) => [u.nodeId, u]));
+  function walk(nodes: WorkflowNode[]): WorkflowNode[] {
+    let changed = false;
+    const next = nodes.map((node) => {
+      const patch = byId.get(node.id);
+      const nextChildren = walk(node.children);
+      if (!patch && nextChildren === node.children) return node;
+      changed = true;
+      return {
+        ...node,
+        ...(patch ? { verifiers: patch.verifiers, verifierMarks: patch.verifierMarks } : {}),
+        children: nextChildren,
+      };
+    });
+    return changed ? next : nodes;
+  }
+  return walk(tree);
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -356,6 +377,24 @@ export const useAppStore = create<AppState>((set, get) => ({
               ...state.sessions,
               [sessionId]: { ...existing, workflowTree }
             }
+          };
+        });
+        break;
+      }
+
+      case "session.nodeVerifiers": {
+        const { sessionId, updates } = event.payload;
+        set((state) => {
+          const existing = state.sessions[sessionId] ?? createSession(sessionId);
+          const tree = existing.workflowTree;
+          if (!tree?.length || updates.length === 0) return {};
+          const nextTree = patchNodeVerifiersInTree(tree, updates);
+          if (nextTree === tree) return {};
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...existing, workflowTree: nextTree },
+            },
           };
         });
         break;

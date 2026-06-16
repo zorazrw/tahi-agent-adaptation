@@ -1,5 +1,5 @@
 import { BrowserWindow } from "electron";
-import type { ClientEvent, ServerEvent, WorkflowNode } from "./types.js";
+import type { ClientEvent, NodeVerifierPatch, ServerEvent, VerifierMark, WorkflowNode } from "./types.js";
 import { runClaude, buildPromptForNode, buildRegenerateWorkflowPrompt, type RunnerHandle } from "./libs/runner.js";
 import { EXECUTION_CONTEXT_MAX_ACTIONS } from "./libs/session-context-trim.js";
 import { SessionStore, type Session } from "./libs/session-store.js";
@@ -141,6 +141,14 @@ function broadcast(event: ServerEvent) {
   }
 }
 
+function broadcastNodeVerifierUpdates(sessionId: string, updates: NodeVerifierPatch[]): void {
+  if (updates.length === 0) return;
+  broadcast({
+    type: "session.nodeVerifiers",
+    payload: { sessionId, updates },
+  });
+}
+
 setContextInductionNotifier((ev) => {
   if (ev.kind === "start") {
     broadcast({
@@ -213,8 +221,13 @@ async function runVerifierLabelingForNode(sessionId: string, nodeId: string): Pr
           const marks = await labelVerifiersForNode(session, session.workflowTree, node);
           node.verifierMarks = node.verifiers.map((_, i) => marks[i] ?? undefined);
           store.updateSession(sessionId, { workflowTree: session.workflowTree });
-          const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
-          broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
+          broadcastNodeVerifierUpdates(sessionId, [
+            {
+              nodeId,
+              verifiers: [...node.verifiers],
+              verifierMarks: [...node.verifierMarks] as VerifierMark[],
+            },
+          ]);
         } catch (e) {
           console.error("[ipc] verifier labeling failed:", e);
         }
@@ -504,6 +517,7 @@ async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNode
 
   const byNodeExamples = sessionVerifierExamplesByNodeId.get(sessionId) ?? new Map<string, VerifierExampleState>();
   let didChangeAny = false;
+  const patches: NodeVerifierPatch[] = [];
 
   for (const nodeId of targetNodeIds) {
     const node = findNodeById(session.workflowTree, nodeId);
@@ -524,6 +538,11 @@ async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNode
       if (nextVerifiers.length === 0 || verifiersEqual(node.verifiers, nextVerifiers)) continue;
       node.verifiers = nextVerifiers;
       node.verifierMarks = nextVerifiers.map(() => undefined);
+      patches.push({
+        nodeId,
+        verifiers: [...node.verifiers],
+        verifierMarks: [...node.verifierMarks] as VerifierMark[],
+      });
       didChangeAny = true;
     } catch (error) {
       console.error(`[ipc] auto verifier refinement failed for node ${nodeId}:`, error);
@@ -533,18 +552,19 @@ async function autoRefineVerifiersFromUserMessages(sessionId: string, targetNode
   if (!didChangeAny) return;
 
   store.updateSession(sessionId, { workflowTree: session.workflowTree });
-  const treePayload = JSON.parse(JSON.stringify(session.workflowTree)) as WorkflowNode[];
-  broadcast({ type: "session.workflowTree", payload: { sessionId, workflowTree: treePayload } });
+  broadcastNodeVerifierUpdates(sessionId, patches);
 
-  const rowId = store.recordMessage(sessionId, { type: "update_verifiers" });
-  const sessAfter = store.getSession(sessionId);
-  if (sessAfter) {
-    store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sessAfter));
+  for (const patch of patches) {
+    const rowId = store.recordMessage(sessionId, { type: "update_verifiers", nodeId: patch.nodeId });
+    const sessAfter = store.getSession(sessionId);
+    if (sessAfter) {
+      store.writeMessageSnapshot(rowId, buildExportEnvironmentSnapshot(sessAfter));
+    }
+    broadcast({
+      type: "stream.message",
+      payload: { sessionId, message: { type: "update_verifiers", nodeId: patch.nodeId } },
+    });
   }
-  broadcast({
-    type: "stream.message",
-    payload: { sessionId, message: { type: "update_verifiers" } },
-  });
 }
 
 /** Starts a task-solving LLM call for the given workflow node. */
@@ -986,6 +1006,7 @@ export function handleClientEvent(event: ClientEvent) {
     runClaude({
       prompt: promptWithHumanEdits,
       session,
+      preserveExistingWorkflow: true,
       ...(session.workflowTree?.length
         ? { trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS }
         : {}),

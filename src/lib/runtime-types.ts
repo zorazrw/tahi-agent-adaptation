@@ -4,6 +4,12 @@ export type SessionEngine = "legacy-claude" | "pi";
 
 export type VerifierMark = "check" | "cross" | undefined;
 
+export type NodeVerifierPatch = {
+  nodeId: string;
+  verifiers: string[];
+  verifierMarks: VerifierMark[];
+};
+
 export type WorkflowNodeResumePoint = { entryId: string } | { uuid: string; claudeSessionId: string };
 
 export type WorkflowNode = {
@@ -217,7 +223,7 @@ export type VerifierLabelMessage = { type: "verifier_label"; nodeId: string };
 export type EditWorkflowMessage = { type: "edit_workflow" };
 export type EditVerifierMessage = { type: "edit_verifier" };
 /** LLM auto-refinement of verifiers after user prompts / file edits (not manual sidebar edits). */
-export type UpdateVerifiersMessage = { type: "update_verifiers" };
+export type UpdateVerifiersMessage = { type: "update_verifiers"; nodeId: string };
 export type FileEditMessage = { type: "file_edit"; path: string };
 /** Quoted selection + comment on a txt/md preview file; does not trigger an agent run by itself. */
 export type FileCommentMessage = { type: "file_comment"; path: string; prompt: string };
@@ -329,6 +335,7 @@ export type ServerEvent =
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
   | { type: "session.history"; payload: { sessionId: string; status: SessionStatus; messages: StreamMessage[]; workflowTree?: WorkflowNode[]; verificationDepth?: number; title?: string; engine?: SessionEngine } }
   | { type: "session.workflowTree"; payload: { sessionId: string; workflowTree: WorkflowNode[] } }
+  | { type: "session.nodeVerifiers"; payload: { sessionId: string; updates: NodeVerifierPatch[] } }
   | { type: "session.verificationDepth"; payload: { sessionId: string; verificationDepth: number } }
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }

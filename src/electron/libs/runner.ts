@@ -45,6 +45,8 @@ export type RunnerOptions = {
   prompt: string;
   session: Session;
   regenerateWorkflow?: boolean;
+  /** When true, ignore workflow_plan tool calls that would replace an existing plan (follow-up messages). */
+  preserveExistingWorkflow?: boolean;
   branchEntryId?: string;
   bashEnv?: Record<string, string>;
   /** When set, compact Pi session context to the last N agent tool actions before prompting. */
@@ -314,7 +316,8 @@ function resolveRunStatus(planRegistered: boolean, regenerateWorkflow: boolean |
 function createWorkflowPlanTool(
   session: Session,
   onEvent: (event: ServerEvent) => void,
-  onPlanRegistered: () => void
+  onPlanRegistered: () => void,
+  preserveExistingWorkflow: boolean
 ): ToolDefinition {
   const workflowNodeSchema = Type.Recursive((Self) =>
     Type.Object({
@@ -335,6 +338,17 @@ function createWorkflowPlanTool(
       tasks: Type.Array(workflowNodeSchema),
     }),
     execute: async (_toolCallId, params) => {
+      if (preserveExistingWorkflow && hasExistingWorkflowPlan(session)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Workflow plan is already registered. Continue with the existing steps; do not re-register the plan.",
+            },
+          ],
+          details: { skipped: true },
+        };
+      }
       const tasks = extractTasksFromWorkflowPlanArgs(params);
       if (!tasks) {
         return {
@@ -440,6 +454,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
     prompt,
     session,
     regenerateWorkflow,
+    preserveExistingWorkflow = false,
     branchEntryId,
     bashEnv,
     trimExecutionContextToLastActions,
@@ -511,7 +526,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       customTools: [
         createWorkflowPlanTool(session, onEvent, () => {
           planRegistered = true;
-        }),
+        }, preserveExistingWorkflow),
         createAskUserQuestionTool(session, onEvent),
       ],
     });

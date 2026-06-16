@@ -13,6 +13,7 @@ export type {
   LegacyUserMessage,
   NodeCompletedMessage,
   NodeStatus,
+  NodeVerifierPatch,
   PiAssistantBlock,
   PiAssistantMessage,
   PiLlmDebugMessage,
