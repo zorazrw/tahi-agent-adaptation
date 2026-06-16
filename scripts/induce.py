@@ -39,8 +39,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
-DEFAULT_INDUCE_MODEL = "claude-haiku-4-5"
+DEFAULT_MODEL = "claude-haiku-4-5"
 _TASK_STEM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 _MAX_EXISTING_FILE_CHARS = 6000
 
@@ -140,7 +139,7 @@ def _pi_settings_model() -> str:
 
 def resolve_induce_llm(*, model_override: str | None = None) -> ResolvedRuntimeLlm:
     """Anthropic Haiku + ``auth.json``, like verifier-generator — not the task-solving model."""
-    model = (model_override or "").strip() or DEFAULT_INDUCE_MODEL
+    model = (model_override or "").strip() or DEFAULT_MODEL
     cfg = resolve_anthropic_config()
     return ResolvedRuntimeLlm(
         provider="anthropic",
@@ -242,13 +241,36 @@ def _is_user_message_action(action: str) -> bool:
     return action.strip().startswith("message(")
 
 
+_PLAN_EDIT_PREFIXES = ("edit_workflow(", "edit_plan(")
+
+
+def _tool_result_prefix(action: str) -> str:
+    a = action.strip()
+    if _is_user_message_action(a):
+        return ""
+    if a.startswith("edit_verifier("):
+        return "[USER EDIT — verifier rubric diff (Verifiers region)]\n"
+    if any(a.startswith(p) for p in _PLAN_EDIT_PREFIXES):
+        return "[USER EDIT — workflow plan diff (Progress region)]\n"
+    return "[USER EDIT — infer preferences from these changes]\n"
+
+
+def _is_msg_only_user_action(action: str) -> bool:
+    a = action.strip()
+    return (
+        _is_user_message_action(a)
+        or a.startswith("edit_verifier(")
+        or any(a.startswith(p) for p in _PLAN_EDIT_PREFIXES)
+    )
+
+
 def _format_action_entry(entry: dict[str, str], *, include_tool_result: bool = False) -> str:
     action = entry["action"]
     if not include_tool_result:
         return action
     tool_result = entry.get("tool_result")
     if isinstance(tool_result, str) and tool_result.strip():
-        prefix = "[USER EDIT — infer preferences from these changes]\n" if not _is_user_message_action(action) else ""
+        prefix = _tool_result_prefix(action)
         return f"{action}\n{prefix}tool_result: {tool_result.strip()}"
     return action
 
@@ -257,16 +279,12 @@ def _build_action_log(
     entries: list[dict[str, str]],
     *,
     actors: set[str] | None = None,
-    msg_only: bool = False,
     include_tool_results: bool = False,
 ) -> str:
     actions: list[str] = []
     for entry in entries:
         actor = entry.get("actor") or "user"
         if actors is not None and actor not in actors:
-            continue
-        action = entry["action"]
-        if msg_only and actor == "user" and not _is_user_message_action(action):
             continue
         actions.append(_format_action_entry(entry, include_tool_result=include_tool_results))
     return "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
@@ -281,8 +299,6 @@ def build_context_inputs(data: Any, *, msg_only: bool = False) -> list[dict[str,
         raw_traj = _normalized_trajectory(blob)
         if not raw_traj:
             continue
-        if not any(isinstance(s, dict) and s.get("actor") == "agent" for s in raw_traj):
-            continue
         nm = blob.get("name")
         name_str = nm if isinstance(nm, str) else ""
         action_entries: list[dict[str, str]] = []
@@ -296,6 +312,8 @@ def build_context_inputs(data: Any, *, msg_only: bool = False) -> list[dict[str,
             tool_result = entry.get("tool_result")
             if isinstance(tool_result, str) and tool_result.strip():
                 row_entry["tool_result"] = tool_result
+            if msg_only and row_entry["actor"] == "user" and not _is_msg_only_user_action(row_entry["action"]):
+                continue
             action_entries.append(row_entry)
         if not action_entries:
             continue
@@ -323,7 +341,11 @@ Your primary job is to extract NEW information from the current session Log (use
 
 Two kinds of user evidence — weigh both; do not ignore direct edits:
 1. message("...") actions: stated preferences in the user's own words.
-2. Non-message actions (edit(...), brain_edit(), etc.) with tool_result: the user changed files directly. Read tool_result carefully — diffs, removed/added lines, CSS/property changes, deleted memory/skill text — and infer preferences from what they changed, not only what they typed.
+2. Non-message actions with tool_result: the user changed artifacts directly. Read tool_result carefully:
+   - edit(...), brain_edit(), etc.: file diffs (styling, content, deleted memory/skill text).
+   - edit_workflow() / edit_plan(): workflow plan diff (Progress region — added/removed/reordered steps).
+   - edit_verifier(): rubric diff (Verifiers region — criterion text and pass/fail status changes).
+Infer preferences from what they changed, not only what they typed.
 When tool_result shows concrete changes (e.g. font-size 18px → 22px, grid removed, colors changed), turn those into Preference: lines even if no message says it explicitly.
 
 Example:
@@ -498,8 +520,8 @@ def extract_memories(
     user = (
         f"Task / session title:\n{task_block}\n\n"
         f"{_existing_file_block('Existing memory file', existing_memory)}"
-        "User action log (messages + direct edits; for edit/brain_edit steps, "
-        "mine tool_result diffs for preferences):\n"
+        "User action log (messages + direct edits; for edit/brain_edit, edit_workflow/edit_plan, "
+        "and edit_verifier steps, mine tool_result diffs for preferences):\n"
         f"{log or '(empty)'}\n"
         f"{_merge_tail_instruction(has_existing, 'memory')}"
     )
@@ -687,12 +709,13 @@ def main() -> None:
     p.add_argument(
         "--model",
         default=None,
-        help=f"Override induce model (default: {DEFAULT_INDUCE_MODEL}; always uses Anthropic auth)",
+        help=f"Override induce model (default: {DEFAULT_MODEL}; always uses Anthropic auth)",
     )
     p.add_argument(
         "--msg_only",
         action="store_true",
-        help="Only include user message(...) actions; drop other user actions (edit, brain_edit, etc.)",
+        help="Only user message(...), edit_workflow()/edit_plan(), and edit_verifier() actions; "
+        "drop other user actions (edit, brain_edit, etc.)",
     )
     p.add_argument(
         "--memory_only",
@@ -738,7 +761,7 @@ def main() -> None:
             task_for_llm = (name or "").strip() if isinstance(name, str) else ""
         entries = row.get("action_entries") or []
         memory_log = _build_action_log(
-            entries, actors={"user"}, msg_only=args.msg_only, include_tool_results=True
+            entries, actors={"user"}, include_tool_results=True
         )
         base = _output_stem(row)
         expertise_stem = _normalize_task_stem(
@@ -766,7 +789,7 @@ def main() -> None:
             )
 
         if not args.memory_only:
-            skill_log = _build_action_log(entries, msg_only=args.msg_only)
+            skill_log = _build_action_log(entries)
             skill = extract_skill(
                 runtime, task_for_llm, skill_log, existing_skill=existing_skill
             )

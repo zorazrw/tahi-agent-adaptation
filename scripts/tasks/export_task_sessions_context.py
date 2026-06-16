@@ -76,6 +76,7 @@ import base64
 import copy
 import difflib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -83,8 +84,35 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+logger = logging.getLogger(__name__)
+
+_SCRIPTS_ROOT = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_ROOT))
+
 # Cap per-file inlined content to keep exports bounded (bytes).
 MAX_OUTPUT_FILE_BYTES = 500_000
+_FILE_EDIT_DESCRIBE_MAX_CHARS = 12_000
+
+_FILE_EDIT_DESCRIBE_SYSTEM = """You summarize direct human edits to a file, for a training log.
+
+Part 1 — what changed: describe in plain language what would look different on the rendered result (page, chart, document), not as abstract developer jargon.
+
+Good summary: "Moved titles lower", "Removed gridlines and y-axis ticks", "Colored the All/750 bars light blue".
+Bad summary: "Updated layout mode attributes", "Applied inline transform styles".
+
+Part 2 — why: infer the user's preference or intention behind the edit — what they seem to want, care about, or be correcting (visual style, layout, emphasis, accuracy, polish, etc.). Ground this in the changes but state it as reusable intent, not a repeat of Part 1.
+
+Good intention: "Wants a cleaner chart with less clutter and more readable labels", "Prefers light blue for the baseline All/750 bar to distinguish it from the rest".
+Bad intention: "Edited the HTML file", "Changed some CSS properties".
+
+Rules:
+- Part 1: 1-3 short sentences, concrete (colors, sizes, positions, labels, elements added/removed).
+- Part 2: 1-2 short sentences on preference/intent; plain language, no code or markup.
+- Plain text only — no markdown, no bullet lists, no code fences, no reasoning or analysis steps.
+- Reply on exactly two lines:
+  Part 1: <what changed>
+  Part 2: <inferred preference or intent>"""
 
 
 def get_default_db_path() -> Optional[Path]:
@@ -1064,15 +1092,21 @@ def build_full_session_trajectory(
             wo_e = wf_timeline[idx] if idx < len(wf_timeline) else None
             m_e = mem_timeline[idx] if idx < len(mem_timeline) else {}
             s_e = sk_timeline[idx] if idx < len(sk_timeline) else {}
+            snap_wf_e = _snapshot_workflow_tree(m)
+            wf_after_e = snap_wf_e if isinstance(snap_wf_e, list) else wo_e
             step_env, _snap = environment_for_norm(
                 m,
                 final_env,
                 cwd=cwd_val,
-                workflow_override=wo_e,
+                workflow_override=wf_after_e,
                 memory=m_e,
                 skill=s_e,
             )
-            traj.append(trajectory_row("user", "edit_workflow()", step_env))
+            wf_prev_e = m.get("_synthetic_wf_before")
+            if not isinstance(wf_prev_e, list):
+                wf_prev_e = wf_timeline[idx - 1] if idx > 0 else None
+            ew_tr = _edit_workflow_tool_result_from_snapshots(wf_prev_e, wf_after_e)
+            traj.append(trajectory_row("user", "edit_workflow()", step_env, tool_result=ew_tr))
             idx += 1
             continue
         if m.get("role") == "user" and m.get("type") == "edit_verifier":
@@ -2157,6 +2191,116 @@ def _file_edit_diff_from_raw_strings(
     return _compact_file_edit_annotation(before_s, after_s, path_disp)
 
 
+def _clip_file_content_for_lm(text: Optional[str], *, max_chars: int = _FILE_EDIT_DESCRIBE_MAX_CHARS) -> str:
+    s = text if isinstance(text, str) else ""
+    s = s.strip()
+    if not s:
+        return "(empty)"
+    if len(s) <= max_chars:
+        return s
+    return s[: max_chars - 20].rstrip() + "\n...[truncated]"
+
+
+def _clean_file_edit_description(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[^\n]*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+    return text.strip()
+
+
+def _extract_part_line_content(line: str) -> Optional[str]:
+    """Return text after ``Part 1:`` or ``Part 2:`` if the label appears in the first 15 chars."""
+    head = line[:15].lower()
+    for label in ("part 1:", "part 2:"):
+        idx = head.find(label)
+        if idx < 0:
+            continue
+        return line[idx + len(label) :].strip() or None
+    return None
+
+
+def _parse_file_edit_description(raw: str) -> Optional[str]:
+    """Merge ``Part 1:`` / ``Part 2:`` lines (label in first 15 chars) into one description."""
+    text = _clean_file_edit_description(raw)
+    chunks: List[str] = []
+    for line in text.splitlines():
+        content = _extract_part_line_content(line)
+        if content:
+            chunks.append(content)
+    return " ".join(chunks) if chunks else None
+
+
+def describe_file_edit_with_llm(
+    runtime: Any,
+    path: str,
+    original: Optional[str],
+    edited: Optional[str],
+) -> Optional[str]:
+    """Ask the Pi runtime LM to summarize a human file edit (original vs edited)."""
+    from dataclasses import replace
+
+    from pi_llm import runtime_llm_text
+
+    path_disp = str(path).strip() or "(path)"
+    user = (
+        f"File path: {path_disp}\n"
+        "1) Describe what would look different on the rendered page or output.\n"
+        "2) Infer the user's preference or intention behind the edit.\n\n"
+        f"BEFORE:\n{_clip_file_content_for_lm(original)}\n\n"
+        f"AFTER:\n{_clip_file_content_for_lm(edited)}"
+    )
+    runtime_plain = (
+        replace(runtime, reasoning=None)
+        if getattr(runtime, "reasoning", None)
+        else runtime
+    )
+    try:
+        raw = runtime_llm_text(
+            runtime_plain, _FILE_EDIT_DESCRIBE_SYSTEM, user, max_tokens=1024
+        )
+    except Exception:
+        logger.exception("File-edit description LM failed for %s", path_disp)
+        return None
+    print(f"File-edit description raw ({path_disp}):\n{raw}\n", file=sys.stderr)
+    desc = _parse_file_edit_description(raw)
+    if desc is None:
+        logger.warning(
+            "No Part 1:/Part 2: lines in file-edit LM response for %s", path_disp
+        )
+    return desc
+
+
+def file_edit_human_entry(
+    *,
+    path: str,
+    original_content: Optional[str],
+    edited_content: Optional[str],
+    environment: dict,
+    describe_runtime: Optional[Any] = None,
+) -> Dict[str, Any]:
+    diff = _file_edit_diff_from_raw_strings(original_content, edited_content, path)
+    entry: Dict[str, Any] = {
+        "type": "file_edit",
+        "round_index": None,
+        "path": path,
+        "original": original_content,
+        "edited": edited_content,
+        "diff": diff,
+        "environment": environment,
+    }
+    if describe_runtime is not None:
+        desc = describe_file_edit_with_llm(
+            describe_runtime,
+            path,
+            original_content,
+            edited_content,
+        )
+        if desc is not None:
+            entry["description"] = desc
+    return entry
+
+
 def _one_line_verifier_field(val: Any) -> str:
     """Collapse internal newlines/whitespace for a single-line verifier representation."""
     if val is None:
@@ -2247,6 +2391,29 @@ def _compact_verifier_lines_annotation(
     if len(body) > max_out:
         body = body[: max_out - 50].rstrip() + f"\n… (annotation truncated, path={path_disp})"
     return f"path={path_disp}\n{body}"
+
+
+def _edit_workflow_tool_result_from_snapshots(
+    wf_before: Optional[list],
+    wf_after: Optional[list],
+) -> str:
+    """Compact workflow plan diff for ``edit_workflow`` / ``edit_plan`` (Progress region)."""
+
+    def _norm_wf(wf: Optional[list]) -> list:
+        if wf is None:
+            return []
+        return wf if isinstance(wf, list) else []
+
+    before_native = _to_llm_native_tree(_norm_wf(wf_before))
+    after_native = _to_llm_native_tree(_norm_wf(wf_after))
+    before_json = json.dumps(before_native, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    after_json = json.dumps(after_native, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if before_json == after_json:
+        return (
+            "(no changes to workflow plan between prior carried-forward snapshot "
+            "and this edit_workflow row)"
+        )
+    return _file_edit_diff_from_raw_strings(before_json, after_json, "workflow")
 
 
 def _edit_verifier_tool_result_from_snapshots(
