@@ -1573,7 +1573,7 @@ function writeSessions(path: string, sessions: SessionJson[], wrapper: boolean):
 }
 
 function copyPiConfig(sourceUserDataDir: string, targetUserDataDir: string): void {
-  const sourceDir = join(sourceUserDataDir, PI_AGENT_DIR_NAME);
+  const sourceDir = resolvePiConfigDir(sourceUserDataDir);
   const targetDir = join(targetUserDataDir, PI_AGENT_DIR_NAME);
   mkdirSync(targetDir, { recursive: true });
   for (const file of PI_CONFIG_FILES) {
@@ -1582,8 +1582,23 @@ function copyPiConfig(sourceUserDataDir: string, targetUserDataDir: string): voi
   }
 }
 
-function hasPiConfig(userDataDir: string): boolean {
-  const dir = join(userDataDir, PI_AGENT_DIR_NAME);
+function piConfigScore(dir: string): number {
+  let score = 0;
+  if (existsSync(join(dir, "settings.json"))) score += 4;
+  if (existsSync(join(dir, "models.json"))) score += 2;
+  if (existsSync(join(dir, "tinker-provider.json"))) score += 2;
+  if (existsSync(join(dir, "auth.json"))) score += 1;
+  return score;
+}
+
+function resolvePiConfigDir(sourceDir: string): string {
+  const nested = join(sourceDir, PI_AGENT_DIR_NAME);
+  if (piConfigScore(nested) > 0) return nested;
+  return sourceDir;
+}
+
+function hasPiConfig(sourceDir: string): boolean {
+  const dir = resolvePiConfigDir(sourceDir);
   return PI_CONFIG_FILES.some((file) => existsSync(join(dir, file)));
 }
 
@@ -1600,10 +1615,14 @@ function discoverSourceUserDataDir(defaultUserDataDir: string, explicit?: string
     defaultUserDataDir,
     join(homedir(), "Library", "Application Support", "agent-cowork"),
     join(homedir(), "Library", "Application Support", "Agent Cowork"),
+    join(homedir(), ".pi", "agent"),
   ];
+  let best: { dir: string; score: number } | undefined;
   for (const candidate of candidates) {
-    if (hasPiConfig(candidate)) return candidate;
+    const score = piConfigScore(resolvePiConfigDir(candidate));
+    if (score > 0 && (!best || score > best.score)) best = { dir: candidate, score };
   }
+  if (best) return best.dir;
   return defaultUserDataDir;
 }
 
