@@ -568,6 +568,43 @@ def extract_dpo_pairs(
     return pairs
 
 
+def extract_dpo_accepted_artifacts(
+    sessions: list[dict],
+    renderer: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Extract accepted artifact completions for online DPO.
+
+    Online DPO constructs the rejected side from the current policy's sampled
+    rollout. The exported weight JSON therefore only needs to provide the
+    accepted side: a prompt plus the artifact ``write(path, content)`` that we
+    want preferred over the sampled trajectory.
+    """
+    rows: list[dict[str, Any]] = []
+
+    for session in sessions:
+        file_index = _build_file_version_index(
+            session,
+            session.get("system_prompt", ""),
+            session.get("tool_schemas"),
+            renderer,
+        )
+        for versions in file_index.values():
+            for version in versions:
+                chosen, chosen_is_agent = _build_artifact_completion(
+                    [{"path": version["path"], "content": version["content"]}],
+                )
+                if not chosen:
+                    continue
+                rows.append({
+                    "prompt": list(version["prompt"]),
+                    "chosen": chosen,
+                    "chosen_is_agent": chosen_is_agent,
+                    "expected_path": version["path"],
+                })
+
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # OPD extraction (offline)
 # ---------------------------------------------------------------------------

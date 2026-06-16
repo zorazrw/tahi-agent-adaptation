@@ -38,14 +38,18 @@ except Exception as e:  # noqa: BLE001
 try:
     from weight.train.run_dpo import (
         Config as DPOConfig,
+        OnlineDPOAcceptedDataset,
         compute_dpo_loss,
         _print_example as _DPO_print_example,
+        _sample_online_dpo_pairs_async,
     )
     DPO_IMPORT_ERROR: Exception | None = None
 except Exception as e:  # noqa: BLE001
     DPOConfig = Any
+    OnlineDPOAcceptedDataset = Any
     compute_dpo_loss = None
     _DPO_print_example = None
+    _sample_online_dpo_pairs_async = None
     DPO_IMPORT_ERROR = e
 from weight.train.run_opd import (
     Config as ArtifactOPDConfig,
@@ -360,6 +364,7 @@ class DPOTrainer(Trainer):
         self.training_client = training_client
         self.service_client = service_client
         self.reference_client = reference_client
+        self.sampling_client = reference_client if config.online_rollout else None
         self.evaluators = [evaluator() for evaluator in config.evaluator_builders]
         self.infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
         self.ml_logger = ml_log.setup_logging(
@@ -371,6 +376,11 @@ class DPOTrainer(Trainer):
         )
         self.log_path = config.log_path
         self.tokenizer = get_tokenizer(config.model_name)
+        self.renderer = (
+            renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
+            if config.online_rollout and config.renderer_name is not None
+            else None
+        )
 
         self.rolling_mgr = checkpoint_utils.CheckpointManager(
             training_client=training_client,
@@ -400,7 +410,7 @@ class DPOTrainer(Trainer):
         
     async def do_update(
         self, 
-        dataset: SupervisedDataset,
+        dataset: SupervisedDataset | OnlineDPOAcceptedDataset,
     ) -> TrainingCheckpoint:
         """Run ``num_epochs`` passes over the incoming ``dataset`` and save a checkpoint.
 
@@ -470,7 +480,7 @@ class DPOTrainer(Trainer):
         self,
         epoch_idx: int,
         batch_idx: int,
-        dataset: SupervisedDataset,
+        dataset: SupervisedDataset | OnlineDPOAcceptedDataset,
     ):
         """Perform a single DPO training update step.
 
@@ -531,9 +541,53 @@ class DPOTrainer(Trainer):
                     eval_metrics = await run_evals(self.infrequent_evaluators, self.training_client, step)
                 metrics.update(eval_metrics)
 
-            # Prepare batch
-            with trace.scope_span_sync("get_batch"):
-                data = dataset.get_batch(batch_idx)
+            rollout_metrics: dict[str, float] = {}
+            if self.config.online_rollout:
+                if self.sampling_client is None or self.renderer is None:
+                    raise RuntimeError("DPO online rollout is missing sampling client or renderer")
+                async with trace.scope_span("sample_online_dpo"):
+                    rows = dataset.get_batch(batch_idx)  # type: ignore[union-attr]
+                    data, rollout_metrics = await _sample_online_dpo_pairs_async(
+                        rows,
+                        self.renderer,
+                        self.sampling_client,
+                        max_tokens=self.config.rollout_max_tokens,
+                        temperature=self.config.rollout_temperature,
+                        attempts=self.config.rollout_attempts,
+                        max_length=dataset._max_length,  # type: ignore[union-attr]
+                        step=step,
+                        sample_log_path=(
+                            Path(self.config.log_path) / "dpo_online_rollout_samples.jsonl"
+                            if self.config.log_rollout_samples else None
+                        ),
+                        sample_log_chars=self.config.rollout_sample_log_chars,
+                    )
+                metrics.update(rollout_metrics)
+                if not data:
+                    learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
+                        lr_schedule=self.config.lr_schedule,
+                        step=step,
+                        total_steps=self.total_steps,
+                    )
+                    metrics.update(
+                        {
+                            "dpo_online/no_valid_batch": 1.0,
+                            "learning_rate": learning_rate,
+                            "progress": step / max(self.total_steps, 1),
+                        }
+                    )
+                    self.ml_logger.log_metrics(metrics=metrics, step=step)
+                    self.logger.warning(
+                        "Skipping DPO step %d: no valid online artifact pairs (filter_rate=%.3f)",
+                        step,
+                        rollout_metrics.get("dpo_online/filter_rate", 0.0),
+                    )
+                    self.step_idx += 1
+                    return
+            else:
+                # Prepare batch
+                with trace.scope_span_sync("get_batch"):
+                    data = dataset.get_batch(batch_idx)  # type: ignore[union-attr]
 
             # Split data into chosen and rejected pairs
             chosen_data = [datum for i, datum in enumerate(data) if i % 2 == 0]
@@ -632,6 +686,11 @@ class DPOTrainer(Trainer):
 
                 optim_future = await self.training_client.optim_step_async(adam_params)
                 await optim_future.result_async()
+
+                if self.config.online_rollout:
+                    self.sampling_client = (
+                        await self.training_client.save_weights_and_get_sampling_client_async()
+                    )
 
             # Prepare metrics
             metrics.update(

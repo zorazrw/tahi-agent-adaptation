@@ -28,7 +28,7 @@ from tinker_cookbook import renderers
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from weight.train.formatter import WeightDPODataBuilder, WeightReinforceDataBuilder
-from weight.train.run_dpo import Config as DPOConfig
+from weight.train.run_dpo import Config as DPOConfig, OnlineDPOAcceptedDataset
 from weight.train.run_reinforce import Config as ReinforceConfig, OnlineReinforceRolloutDataset
 from weight.train.run_opd import Config as ArtifactOPDConfig, OnlineOPDRolloutDataset
 
@@ -67,6 +67,13 @@ class Config:
     dpo_pair_mode: Literal["first_last", "adjacent"] = "first_last"
     dpo_rpo_alpha: float = 0.0
     dpo_use_ipo: bool = False
+    dpo_online_rollout: bool = False
+    dpo_rollout_max_tokens: int = 4096
+    dpo_rollout_temperature: float = 1.0
+    dpo_rollout_attempts: int = 1
+    dpo_log_rollout_samples: bool = True
+    dpo_rollout_sample_log_chars: int = 4000
+    dpo_artifact_only_rollout_instruction: bool = False
 
     # -- OPD-specific --
     opd_max_tokens: int = 2048
@@ -610,17 +617,38 @@ class Server:
             os.unlink(train_path)
 
     def _prepare_dpo(self, train_path: str, model_name: str, renderer_name: str):
-        dataset_builder = WeightDPODataBuilder(
-            train_path=train_path,
-            pair_mode=self.config.dpo_pair_mode,
-            common_config=ChatDatasetBuilderCommonConfig(
-                model_name_for_tokenizer=model_name,
-                renderer_name=renderer_name,
+        if self.config.dpo_online_rollout:
+            tokenizer = get_tokenizer(model_name)
+            renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
+            dataset_builder = None
+            dataset = OnlineDPOAcceptedDataset.from_weight_json(
+                path=train_path,
+                renderer=renderer,
                 max_length=self.config.max_length,
                 batch_size=self.config.batch_size,
-            ),
-        )
-        dataset, _ = dataset_builder()
+                artifact_only_instruction=self.config.dpo_artifact_only_rollout_instruction,
+            )
+            if not dataset._rows:
+                raise ValueError(
+                    f"No DPO accepted artifact rows in {train_path} "
+                    "(need accepted output_files in the weight JSON)."
+                )
+            log.info(
+                "DPO online: %d accepted artifact rows, batch_size=%d",
+                len(dataset._rows), self.config.batch_size,
+            )
+        else:
+            dataset_builder = WeightDPODataBuilder(
+                train_path=train_path,
+                pair_mode=self.config.dpo_pair_mode,
+                common_config=ChatDatasetBuilderCommonConfig(
+                    model_name_for_tokenizer=model_name,
+                    renderer_name=renderer_name,
+                    max_length=self.config.max_length,
+                    batch_size=self.config.batch_size,
+                ),
+            )
+            dataset, _ = dataset_builder()
 
         log_path = f"logs/weight_dpo/{int(time.time())}"
         trainer_config = DPOConfig(
@@ -633,6 +661,13 @@ class Server:
             dpo_beta=self.config.dpo_beta,
             rpo_alpha=self.config.dpo_rpo_alpha,
             use_ipo=self.config.dpo_use_ipo,
+            online_rollout=self.config.dpo_online_rollout,
+            rollout_max_tokens=self.config.dpo_rollout_max_tokens,
+            rollout_temperature=self.config.dpo_rollout_temperature,
+            rollout_attempts=self.config.dpo_rollout_attempts,
+            log_rollout_samples=self.config.dpo_log_rollout_samples,
+            rollout_sample_log_chars=self.config.dpo_rollout_sample_log_chars,
+            artifact_only_rollout_instruction=self.config.dpo_artifact_only_rollout_instruction,
             num_epochs=self.config.num_epochs,
             lora_rank=self.config.lora_rank,
             save_every=self.config.save_every,

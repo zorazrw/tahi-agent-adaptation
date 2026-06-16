@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import random
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -23,9 +25,11 @@ import torch
 import torch.nn.functional as F
 import chz
 
-from tinker_cookbook import checkpoint_utils, model_info
+from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.eval.evaluators import EvaluatorBuilder
+from tinker_cookbook.renderers import TrainOnWhat
 from tinker_cookbook.supervised.train import run_evals
+from tinker_cookbook.supervised.data import conversation_to_datum
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.format_colorized import format_colorized
@@ -38,7 +42,17 @@ from tinker_cookbook.supervised.types import (
     SupervisedDataset,
 )
 
-from .formatter import WeightDPODataBuilder
+from .formatter import WeightDPODataBuilder, _hydrate_tool_calls, _load_sessions
+from .run_opd import (
+    _parse_valid_artifact_write_message,
+    _summarize_sample,
+    _with_artifact_only_instruction,
+)
+
+try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts.weight...`.
+    from weight.data.extract import extract_dpo_accepted_artifacts  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
+    from ..data.extract import extract_dpo_accepted_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +63,7 @@ class Config:
 
     log_path: str = chz.field(munger=lambda _, s: str(Path(s).expanduser()))
     model_name: str
-    dataset_builder: ChatDatasetBuilder
+    dataset_builder: ChatDatasetBuilder | None = None
     load_checkpoint_path: str | None = None
     renderer_name: str | None = None
 
@@ -59,6 +73,17 @@ class Config:
     dpo_beta: float = 0.1
     rpo_alpha: float = 0.0
     use_ipo: bool = False
+
+    # Online artifact DPO. When enabled, sampled current-policy artifact
+    # rollouts become rejected responses, while accepted artifact writes from
+    # the weight JSON become chosen responses.
+    online_rollout: bool = False
+    rollout_max_tokens: int = 4096
+    rollout_temperature: float = 1.0
+    rollout_attempts: int = 1
+    log_rollout_samples: bool = True
+    rollout_sample_log_chars: int = 4000
+    artifact_only_rollout_instruction: bool = False
 
     lora_rank: int = 32
     num_replicas: int = 8
@@ -333,6 +358,180 @@ def _print_example(datum: tinker.Datum, tokenizer: Tokenizer, label: str = "") -
     logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
 
 
+class OnlineDPOAcceptedDataset:
+    """Accepted artifact rows for online DPO rollout.
+
+    Each row supplies the chosen side from weight JSON. At train time the
+    current policy samples a fresh artifact write from the same prompt; that
+    sampled write becomes the rejected side.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+    ):
+        self._rows = rows
+        self._renderer = renderer
+        self._max_length = max_length
+        self._batch_size = batch_size
+        self._indices = list(range(len(rows)))
+
+    @classmethod
+    def from_weight_json(
+        cls,
+        path: str,
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+        artifact_only_instruction: bool = False,
+    ) -> "OnlineDPOAcceptedDataset":
+        accepted_rows = extract_dpo_accepted_artifacts(
+            _load_sessions(path),
+            renderer=renderer,
+        )
+        rows: list[dict[str, Any]] = []
+        for row in accepted_rows:
+            prompt = row["prompt"]
+            expected_path = row["expected_path"]
+            if artifact_only_instruction:
+                prompt = _with_artifact_only_instruction(prompt, expected_path)
+            prompt_messages = _hydrate_tool_calls(prompt)
+            chosen_messages = _hydrate_tool_calls(row["chosen"])
+            chosen_datum = conversation_to_datum(
+                prompt_messages + chosen_messages,
+                renderer,
+                max_length,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+            )
+            rows.append({
+                "prompt_messages": prompt_messages,
+                "prompt_input": renderer.build_generation_prompt(prompt_messages),
+                "chosen_datum": chosen_datum,
+                "expected_path": expected_path,
+            })
+        dataset = cls(rows, renderer, max_length, batch_size)
+        logger.info(
+            "Loaded %d online DPO accepted artifact rows from %s (raw=%d)",
+            len(dataset._rows), path, len(accepted_rows),
+        )
+        return dataset
+
+    def __len__(self) -> int:
+        if not self._rows:
+            return 0
+        return (len(self._rows) + self._batch_size - 1) // self._batch_size
+
+    def set_epoch(self, seed: int) -> None:
+        rng = random.Random(seed)
+        self._indices = list(range(len(self._rows)))
+        rng.shuffle(self._indices)
+
+    def get_batch(self, index: int) -> list[dict[str, Any]]:
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        return [self._rows[self._indices[i]] for i in range(start, end)]
+
+
+async def _sample_online_dpo_pairs_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    max_tokens: int,
+    temperature: float,
+    attempts: int,
+    max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+    sample_log_chars: int = 4000,
+) -> tuple[list[tinker.Datum], dict[str, float]]:
+    """Sample rejected artifact writes and interleave them with accepted chosen datums."""
+    data: list[tinker.Datum] = []
+    reason_counts: dict[str, int] = {}
+    total_attempts = 0
+
+    sample_log_f = None
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_log_f = sample_log_path.open("a", encoding="utf-8")
+
+    try:
+        pending = list(enumerate(rows))
+        for attempt_idx in range(max(1, attempts)):
+            if not pending:
+                break
+            total_attempts += len(pending)
+            results = await asyncio.gather(*[
+                sampling_client.sample_async(
+                    prompt=row["prompt_input"],
+                    num_samples=1,
+                    sampling_params=tinker.SamplingParams(
+                        stop=renderer.get_stop_sequences(),
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    ),
+                )
+                for _row_idx, row in pending
+            ])
+
+            next_pending: list[tuple[int, dict[str, Any]]] = []
+            for (row_idx, row), result in zip(pending, results, strict=True):
+                expected_path = row["expected_path"]
+                tokens = list(result.sequences[0].tokens)
+                ok, reason, rejected_message = _parse_valid_artifact_write_message(
+                    renderer, tokens, expected_path,
+                )
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                if sample_log_f is not None:
+                    rec = _summarize_sample(
+                        renderer,
+                        tokens,
+                        expected_path,
+                        ok,
+                        reason,
+                        row_idx,
+                        attempt_idx,
+                        step,
+                        sample_log_chars,
+                    )
+                    rec["mode"] = "dpo_online"
+                    sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    sample_log_f.flush()
+                if not ok:
+                    next_pending.append((row_idx, row))
+                    continue
+                assert rejected_message is not None
+                rejected_datum = conversation_to_datum(
+                    row["prompt_messages"] + _hydrate_tool_calls([rejected_message]),
+                    renderer,
+                    max_length,
+                    train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+                )
+                data.extend([row["chosen_datum"], rejected_datum])
+            pending = next_pending
+        if pending:
+            reason_counts["example_filtered"] = reason_counts.get("example_filtered", 0) + len(pending)
+    finally:
+        if sample_log_f is not None:
+            sample_log_f.close()
+
+    n_rows = float(len(rows))
+    n_valid = float(len(data) // 2)
+    metrics: dict[str, float] = {
+        "dpo_online/batch_examples": n_rows,
+        "dpo_online/valid_pairs": n_valid,
+        "dpo_online/filtered_examples": n_rows - n_valid,
+        "dpo_online/filter_rate": (n_rows - n_valid) / max(n_rows, 1.0),
+        "dpo_online/attempts": float(total_attempts),
+    }
+    for reason, count in reason_counts.items():
+        safe_reason = reason.replace("/", "_").replace(":", "_")
+        metrics[f"dpo_online/filter_reason/{safe_reason}"] = float(count)
+    return data, metrics
+
+
 def do_update(
     epoch_idx: int,
     batch_idx: int,
@@ -362,6 +561,8 @@ def do_update(
     log_path: str,
     tokenizer: Tokenizer,
     rolling_mgr: checkpoint_utils.CheckpointManager | None = None,
+    data_override: list[tinker.Datum] | None = None,
+    extra_metrics: dict[str, float] | None = None,
 ) -> None:
     step = epoch_idx * n_batches + batch_idx
     metrics: dict[str, int | float | str] = {"epoch": epoch_idx}
@@ -408,7 +609,9 @@ def do_update(
             metrics.update(eval_metrics)
 
         with trace.scope_span_sync("get_batch"):
-            data = dataset.get_batch(batch_idx)
+            data = data_override if data_override is not None else dataset.get_batch(batch_idx)
+        if extra_metrics:
+            metrics.update(extra_metrics)
 
         chosen_data = [datum for i, datum in enumerate(data) if i % 2 == 0]
         rejected_data = [datum for i, datum in enumerate(data) if i % 2 == 1]
@@ -557,6 +760,29 @@ def main() -> None:
             "--rpo-alpha for an anchored IPO variant."
         ),
     )
+    parser.add_argument(
+        "--online-rollout", action="store_true",
+        help=(
+            "Enable online artifact DPO: sample current-policy write(path, content) "
+            "rollouts as rejected responses, and use accepted artifact writes from "
+            "--train-path as chosen responses."
+        ),
+    )
+    parser.add_argument("--rollout-max-tokens", type=int, default=4096)
+    parser.add_argument("--rollout-temperature", type=float, default=1.0)
+    parser.add_argument("--rollout-attempts", type=int, default=1)
+    parser.add_argument(
+        "--no-log-rollout-samples", action="store_true",
+        help="Disable JSONL logging of online DPO rollout samples and filter reasons.",
+    )
+    parser.add_argument("--rollout-sample-log-chars", type=int, default=4000)
+    parser.add_argument(
+        "--artifact-only-rollout-instruction", action="store_true",
+        help=(
+            "Append a rollout-only instruction requiring exactly one write(path, content) "
+            "tool call. Default is off to keep rollout prompts matched to inference."
+        ),
+    )
     args = parser.parse_args()
 
     log_path = str(Path(args.log_path).expanduser())
@@ -576,18 +802,36 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     # Dataset                                                              #
     # ------------------------------------------------------------------ #
-    dataset_builder = WeightDPODataBuilder(
-        train_path=args.train_path,
-        test_path=args.test_path,
-        pair_mode=args.pair_mode,
-        common_config=ChatDatasetBuilderCommonConfig(
-            model_name_for_tokenizer=args.model_name,
-            renderer_name=args.renderer_name,
+    common_config = ChatDatasetBuilderCommonConfig(
+        model_name_for_tokenizer=args.model_name,
+        renderer_name=args.renderer_name,
+        max_length=args.max_length,
+        batch_size=args.batch_size,
+    )
+    online_renderer = None
+    if args.online_rollout:
+        if args.use_skyrl:
+            raise ValueError("--online-rollout requires Tinker sampling; do not use --use-skyrl")
+        online_renderer = renderers.get_renderer(
+            args.renderer_name,
+            tokenizer=get_tokenizer(args.model_name),
+        )
+        dataset_builder = None
+        dataset = OnlineDPOAcceptedDataset.from_weight_json(
+            path=args.train_path,
+            renderer=online_renderer,
             max_length=args.max_length,
             batch_size=args.batch_size,
-        ),
-    )
-    dataset, _ = dataset_builder()
+            artifact_only_instruction=args.artifact_only_rollout_instruction,
+        )
+    else:
+        dataset_builder = WeightDPODataBuilder(
+            train_path=args.train_path,
+            test_path=args.test_path,
+            pair_mode=args.pair_mode,
+            common_config=common_config,
+        )
+        dataset, _ = dataset_builder()
     n_batches = len(dataset)
     total_steps = n_batches * args.num_epochs
     if args.max_steps is not None:
@@ -656,6 +900,7 @@ def main() -> None:
         # Tinker cloud path: snapshot the initial weights once.
         # The returned SamplingClient is frozen and cheap to query per batch.
         reference_client = training_client.save_weights_and_get_sampling_client()
+        sampling_client = reference_client
         logger.info("Tinker mode: created frozen reference SamplingClient")
 
         def get_ref_logprobs(data: list[tinker.Datum]) -> list[torch.Tensor]:
@@ -683,6 +928,42 @@ def main() -> None:
             if args.max_steps is not None and step >= args.max_steps:
                 reached_max_steps = True
                 break
+            data_override = None
+            extra_metrics = None
+            if args.online_rollout:
+                assert online_renderer is not None
+                rows = dataset.get_batch(batch_idx)
+                data_override, extra_metrics = asyncio.run(
+                    _sample_online_dpo_pairs_async(
+                        rows,
+                        online_renderer,
+                        sampling_client,
+                        max_tokens=args.rollout_max_tokens,
+                        temperature=args.rollout_temperature,
+                        attempts=args.rollout_attempts,
+                        max_length=args.max_length,
+                        step=step,
+                        sample_log_path=(
+                            Path(log_path) / "dpo_online_rollout_samples.jsonl"
+                            if not args.no_log_rollout_samples else None
+                        ),
+                        sample_log_chars=args.rollout_sample_log_chars,
+                    )
+                )
+                if not data_override:
+                    metrics = {
+                        "epoch": epoch_idx,
+                        "dpo_online/no_valid_batch": 1.0,
+                        "progress": step / max(total_steps, 1),
+                        **(extra_metrics or {}),
+                    }
+                    ml_logger.log_metrics(metrics=metrics, step=step)
+                    logger.warning(
+                        "Skipping DPO step %d: no valid online artifact pairs (filter_rate=%.3f)",
+                        step,
+                        (extra_metrics or {}).get("dpo_online/filter_rate", 0.0),
+                    )
+                    continue
             do_update(
                 epoch_idx=epoch_idx,
                 batch_idx=batch_idx,
@@ -712,7 +993,11 @@ def main() -> None:
                 log_path=log_path,
                 tokenizer=tokenizer,
                 rolling_mgr=rolling_mgr,
+                data_override=data_override,
+                extra_metrics=extra_metrics,
             )
+            if args.online_rollout:
+                sampling_client = training_client.save_weights_and_get_sampling_client()
         if reached_max_steps:
             break
 
