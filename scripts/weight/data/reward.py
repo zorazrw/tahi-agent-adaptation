@@ -334,7 +334,10 @@ def _build_rubric_grader_prompt(
     *,
     max_file_chars: int = 14_000,
 ) -> str:
-    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(rubrics))
+    from verifier_label_prompt import format_numbered_lines, results_array_instructions  # noqa: PLC0415
+
+    n = len(rubrics)
+    numbered = format_numbered_lines(rubrics)
     rendered: list[str] = []
     for rel, text in file_blocks:
         body = _truncate_file_text(text, max_file_chars) if text else "(file missing or empty)"
@@ -346,7 +349,7 @@ def _build_rubric_grader_prompt(
             "You are an automated checker for a coding task output.",
             "Given rubric lines and the current output files (below), decide whether each rubric is satisfied.",
             'Reply with ONLY a JSON object of this exact shape: {"results":[{"pass":true},{"pass":false},...]}',
-            "The results array must have exactly one object per rubric line, in the same order (indices 0 .. n-1).",
+            results_array_instructions(count=n, item_word="rubric line"),
             "pass: true means satisfied; false means not satisfied.",
             "",
             "Rubric lines (in order):",
@@ -400,11 +403,12 @@ def _parse_rubric_results_json(text: str, n: int) -> tuple[list[bool | None], li
     results = parsed_json.get("results")
     if not isinstance(results, list):
         raise ValueError("Missing results array")
+    from verifier_label_prompt import validate_results_length  # noqa: PLC0415
+
+    validate_results_length(results, n)
     out: list[bool | None] = [None] * n
-    for i in range(n):
-        if i >= len(results):
-            break
-        out[i] = _pass_from_result_item(results[i])
+    for i, row in enumerate(results):
+        out[i] = _pass_from_result_item(row)
     return out, results
 
 
@@ -421,10 +425,11 @@ def compute_llm_rubric_file_blocks(
     if not rubrics:
         return 1.0, []
 
-    user_prompt = _build_rubric_grader_prompt(rubrics, file_blocks, max_file_chars=max_file_chars)
-
     _ensure_scripts_on_path()
     import induce  # noqa: PLC0415 — optional until this function runs
+    from verifier_label_prompt import results_length_retry_hint  # noqa: PLC0415
+
+    user_prompt = _build_rubric_grader_prompt(rubrics, file_blocks, max_file_chars=max_file_chars)
 
     if client is None or model is None:
         cfg = induce.resolve_anthropic_config()
@@ -438,7 +443,19 @@ def compute_llm_rubric_file_blocks(
         max_tokens=max_tokens,
         temperature=0.0,
     )
-    passes, results_list = _parse_rubric_results_json(raw, len(rubrics))
+    try:
+        passes, results_list = _parse_rubric_results_json(raw, len(rubrics))
+    except ValueError as exc:
+        if "Expected exactly" not in str(exc):
+            raise
+        raw = induce.anthropic_user_text(
+            client,
+            model,
+            f"{user_prompt}\n\n{results_length_retry_hint(len(rubrics))}",
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        passes, results_list = _parse_rubric_results_json(raw, len(rubrics))
     missing_idx = [i for i, p in enumerate(passes) if p is None]
     if missing_idx:
         logger.warning(

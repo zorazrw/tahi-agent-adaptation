@@ -33,6 +33,12 @@ for p in (_scripts, _tools):
         sys.path.insert(0, str(p))
 
 import extract_verifiers  # noqa: E402
+from verifier_label_prompt import (  # noqa: E402
+    format_numbered_lines,
+    results_array_instructions,
+    results_length_retry_hint,
+    validate_results_length,
+)
 
 try:
     from dotenv import load_dotenv  # type: ignore[import-not-found]  # noqa: E402
@@ -299,13 +305,14 @@ def _extract_image_data(path: str, text: str) -> tuple[str, str] | None:
 
 def build_message_content(criteria: list[str], file_blocks: list[tuple[str, str]]) -> list[dict[str, Any]]:
     """Anthropic message blocks for verifier labeling (matches app verifier-labeler contract)."""
-    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(criteria))
+    n = len(criteria)
+    numbered = format_numbered_lines(criteria)
     header = "\n".join(
         [
             "You are an automated checker for completed task output files.",
             "Given verifier criteria and current output files, decide whether each criterion is satisfied.",
             'Reply with ONLY a JSON object of this exact shape: {"results":[{"pass":true},{"pass":false},...]}',
-            "The results array must have exactly one object per verifier line, in the same order (indices 0 .. n-1).",
+            results_array_instructions(count=n, item_word="criterion"),
             "",
             "Verifier criteria (in order):",
             numbered,
@@ -410,9 +417,9 @@ def interpret_results(text: str, n: int) -> list[bool | None]:
         arr = None
     if not isinstance(arr, list):
         raise ValueError("Missing results array")
+    validate_results_length(arr, n)
     out: list[bool | None] = [None] * n
-    for i in range(min(n, len(arr))):
-        row = arr[i]
+    for i, row in enumerate(arr):
         if isinstance(row, bool):
             out[i] = row
         elif isinstance(row, dict) and "pass" in row:
@@ -422,6 +429,39 @@ def interpret_results(text: str, n: int) -> list[bool | None]:
             elif isinstance(value, str) and value.strip().lower() in {"true", "false"}:
                 out[i] = value.strip().lower() == "true"
     return out
+
+
+def grade(
+    criteria: list[str],
+    files: list[tuple[str, str]],
+    *,
+    client: Any,
+    model: str,
+    max_tokens: int,
+) -> tuple[list[bool | None], str]:
+    content = build_message_content(criteria, files)
+    n = len(criteria)
+
+    def fetch(extra: str = "") -> str:
+        blocks = list(content)
+        if extra:
+            blocks.append({"type": "text", "text": extra})
+        msg = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            messages=[{"role": "user", "content": blocks}],
+        )
+        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+
+    raw = fetch()
+    try:
+        return interpret_results(raw, n), raw
+    except ValueError as exc:
+        if "Expected exactly" not in str(exc):
+            raise
+        raw = fetch(results_length_retry_hint(n))
+        return interpret_results(raw, n), raw
 
 
 def print_summary(
@@ -440,24 +480,6 @@ def print_summary(
         print(f"model: {model}")
     print(f"criteria: {criteria_count}")
     print(f"artifacts: {', '.join(p for p, _ in files)}")
-
-
-def grade(
-    criteria: list[str],
-    files: list[tuple[str, str]],
-    *,
-    client: Any,
-    model: str,
-    max_tokens: int,
-) -> tuple[list[bool | None], str]:
-    msg = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=0.0,
-        messages=[{"role": "user", "content": build_message_content(criteria, files)}],
-    )
-    raw = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-    return interpret_results(raw, len(criteria)), raw
 
 
 def build_openai_input(criteria: list[str], file_blocks: list[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -515,16 +537,30 @@ def grade_openai(
                 print(f"image_url len={len(url)} preview={url[:72]}...", file=sys.stderr)
         print("=== end request blocks ===", file=sys.stderr)
 
-    response = client.responses.create(
-        model=model,
-        temperature=0.0,
-        max_output_tokens=max_tokens,
-        input=input_payload,
-    )
-    raw = getattr(response, "output_text", None)
-    if not isinstance(raw, str):
-        raw = str(response)
-    return interpret_results(raw, len(criteria)), raw
+    n = len(criteria)
+    base_content = list(input_payload[0]["content"])
+
+    def fetch(extra: str = "") -> str:
+        content = list(base_content)
+        if extra:
+            content.append({"type": "input_text", "text": extra})
+        response = client.responses.create(
+            model=model,
+            temperature=0.0,
+            max_output_tokens=max_tokens,
+            input=[{"role": "user", "content": content}],
+        )
+        raw = getattr(response, "output_text", None)
+        return raw if isinstance(raw, str) else str(response)
+
+    raw = fetch()
+    try:
+        return interpret_results(raw, n), raw
+    except ValueError as exc:
+        if "Expected exactly" not in str(exc):
+            raise
+        raw = fetch(results_length_retry_hint(n))
+        return interpret_results(raw, n), raw
 
 
 def main(argv: list[str] | None = None) -> int:

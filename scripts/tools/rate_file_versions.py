@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-LM-rate unique file snapshots per workflow step. Every version is graded against the
-**last** workflow step's verifiers (not the rubrics from the step that produced the file).
+LM-rate unique file snapshots for **one deliverable per session**: the output file from the
+latest workflow step that declares ``outputFiles`` (if that step lists several files, the last
+listed file is used). Every version is graded against the **last** workflow step's verifiers.
 
-Supports ``trajectory``, ``task_units`` (per-step ``trajectory``), and weight exports
-(``agent_trajectories`` + ``workflow_tree_final``). Identical (rubrics + file contents) share one
-LLM call. Use ``--endpoints-only`` for first/last snapshot only; ``--exported-status`` for
-human/exported marks (no LM). Per-version success %% is summarized on stderr; ``--plot`` writes a scatter PNG.
+Collects snapshots from agent steps **and** user/human-edit steps (e.g. agent ``abstract.md``
+then a human-edited ``abstract.md``). Supports ``trajectory``, ``task_units`` (per-step
+``trajectory``), and weight exports (``agent_trajectories`` + ``workflow_tree_final``).
+Identical (rubrics + file contents) share one LLM call. Use ``--endpoints-only`` for first/last
+snapshot only; ``--exported-status`` for human/exported marks (no LM). Per-version success %% is
+summarized on stderr; ``--plot`` writes a scatter PNG.
 
 Examples:
   python scripts/tools/rate_file_versions.py -j out.json -s <uuid> -o ratings.json --plot
@@ -32,6 +35,12 @@ if str(_scripts) not in sys.path:
 
 import induce  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
+from verifier_label_prompt import (  # noqa: E402
+    format_numbered_lines,
+    results_array_instructions,
+    results_length_retry_hint,
+    validate_results_length,
+)
 
 _TRUNCATE_LEN = 14_000
 DEFAULT_MODEL = "claude-haiku-4-5"
@@ -284,6 +293,20 @@ def last_workflow_node(wf: list[dict[str, Any]]) -> dict[str, Any] | None:
     return nodes[-1] if nodes else None
 
 
+def target_evaluation_node_and_file(wf: list[dict[str, Any]]) -> tuple[dict[str, Any], str] | None:
+    """Last workflow node with output files and the single deliverable file to grade."""
+    target_node: dict[str, Any] | None = None
+    target_file: str | None = None
+    for node in flatten_workflow_nodes(wf):
+        files = [str(p) for p in (node.get("outputFiles") or []) if p]
+        if files:
+            target_node = node
+            target_file = files[-1]
+    if target_node is None or not target_file:
+        return None
+    return target_node, target_file
+
+
 def last_workflow_rubrics(wf: list[dict[str, Any]]) -> list[str]:
     """Verifier criteria from the final workflow step (used for all file-version grading)."""
     node = last_workflow_node(wf)
@@ -319,12 +342,22 @@ def iter_agent_steps(traj: list[dict[str, Any]]) -> Iterator[tuple[int, dict[str
             yield step_idx, step
 
 
+def iter_file_environment_steps(traj: list[dict[str, Any]]) -> Iterator[tuple[int, dict[str, Any]]]:
+    """All trajectory steps whose environment carries a file snapshot (agent or user/human edits)."""
+    for step_idx, step in enumerate(traj):
+        if not isinstance(step, dict):
+            continue
+        env = step.get("environment")
+        if isinstance(env, dict) and env.get("file") is not None:
+            yield step_idx, step
+
+
 def collect_unique_snapshots(
     traj: list[dict[str, Any]], output_files: list[str]
 ) -> list[dict[str, Any]]:
     seen: set[tuple[str, ...]] = set()
     snapshots: list[dict[str, Any]] = []
-    for step_idx, step in iter_agent_steps(traj):
+    for step_idx, step in iter_file_environment_steps(traj):
         env = step.get("environment")
         if not isinstance(env, dict):
             continue
@@ -335,7 +368,13 @@ def collect_unique_snapshots(
         if key in seen:
             continue
         seen.add(key)
-        snapshots.append({"trajectory_step_index": step_idx, "file_blocks": blocks})
+        snapshots.append(
+            {
+                "trajectory_step_index": step_idx,
+                "actor": str(step.get("actor") or ""),
+                "file_blocks": blocks,
+            }
+        )
     return snapshots
 
 
@@ -351,6 +390,19 @@ def last_agent_file_snapshot(traj: list[dict[str, Any]]) -> tuple[list[tuple[str
     return blocks, idx
 
 
+def last_file_snapshot(traj: list[dict[str, Any]], filename: str) -> tuple[str | None, int | None]:
+    text: str | None = None
+    idx: int | None = None
+    for step_idx, step in iter_file_environment_steps(traj):
+        env = step.get("environment")
+        if not isinstance(env, dict):
+            continue
+        content = file_snapshot(env.get("file"), filename)
+        if isinstance(content, str) and content:
+            text, idx = content, step_idx
+    return text, idx
+
+
 # --- LM labeling ---
 
 
@@ -361,7 +413,8 @@ def truncate_file_text(text: str, max_len: int = _TRUNCATE_LEN) -> str:
 def build_labeler_user_message(
     *, step_path: str, step_description: str, criteria: list[str], file_blocks: list[tuple[str, str]]
 ) -> str:
-    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(criteria))
+    n = len(criteria)
+    numbered = format_numbered_lines(criteria)
     rendered = [
         f"### {rel}\n\n{truncate_file_text(text) if text else '(file missing or empty at this snapshot)'}"
         for rel, text in file_blocks
@@ -371,7 +424,7 @@ def build_labeler_user_message(
             "You are an automated checker for a completed workflow step.",
             "Given verifier criteria and the current output files (below), decide whether each criterion is satisfied.",
             'Reply with ONLY a JSON object of this exact shape: {"results":[{"pass":true},{"pass":false},...]}',
-            "The results array must have exactly one object per verifier line, in the same order (indices 0 .. n-1).",
+            results_array_instructions(count=n, item_word="criterion"),
             "pass: true means the criterion is satisfied; false means it is not.",
             "",
             f"Step path: {step_path}",
@@ -399,12 +452,28 @@ def interpret_results(text: str, n: int) -> list[bool | None]:
     arr = parse_json_from_model_text(text).get("results")
     if not isinstance(arr, list):
         raise ValueError("Missing results array")
+    validate_results_length(arr, n)
     out: list[bool | None] = [None] * n
-    for i in range(min(n, len(arr))):
-        row = arr[i]
+    for i, row in enumerate(arr):
         if isinstance(row, dict) and "pass" in row:
             out[i] = bool(row["pass"])
     return out
+
+
+def _call_verifier_llm_graded(
+    client: Any, model: str, msg: str, n: int, *, stats: dict[str, int]
+) -> tuple[str, list[bool | None]]:
+    """Call verifier LLM; retry once if results length does not match criteria count."""
+    stats["llm_calls"] += 1
+    raw = call_verifier_llm(client, model, msg)
+    try:
+        return raw, interpret_results(raw, n)
+    except ValueError as exc:
+        if "Expected exactly" not in str(exc):
+            raise
+        stats["llm_calls"] += 1
+        raw = call_verifier_llm(client, model, f"{msg}\n\n{results_length_retry_hint(n)}")
+        return raw, interpret_results(raw, n)
 
 
 def call_verifier_llm(client: Any, model: str, user_text: str, *, max_tokens: int = 1024) -> str:
@@ -470,10 +539,13 @@ def _score_one_snapshot(
     step = int(snap["trajectory_step_index"])
     n = len(criteria)
 
+    actor = str(snap.get("actor") or "")
+
     def base_entry(*, hit: bool, seq: int | None, cached: dict[str, Any] | None) -> dict[str, Any]:
         entry: dict[str, Any] = {
             "version_index": v_idx,
             "trajectory_step_index": step,
+            "actor": actor or None,
             "eval_cache_key_prefix": ek[:16],
             "eval_cache_hit": hit,
             "unique_eval_sequence": (cached or {}).get("unique_eval_sequence", seq),
@@ -511,9 +583,7 @@ def _score_one_snapshot(
         return entry
 
     try:
-        stats["llm_calls"] += 1
-        raw = call_verifier_llm(client, model, msg)
-        passes = interpret_results(raw, n)
+        raw, passes = _call_verifier_llm_graded(client, model, msg, n, stats=stats)
         lm = {"raw_text": raw, "pass_per_criterion": passes, "criteria": list(criteria)}
         eval_cache[ek] = {**payload, "prompt": None, "lm": lm, "error": None}
         entry = base_entry(hit=False, seq=seq, cached=eval_cache[ek])
@@ -556,53 +626,61 @@ def rate_session(
     last_desc = str(last_node.get("description") or "")
     last_step_path = get_node_path(wf, last_nid)
 
+    target = target_evaluation_node_and_file(wf)
+    if target is None:
+        return {
+            **session_meta(session),
+            "error": "no output files on workflow",
+            "tasks": [],
+            "scatter_plot_data": [],
+        }
+
+    eval_node, target_file = target
+    nid = str(eval_node.get("id") or "")
+    desc = str(eval_node.get("description") or "")
+
     report_tasks: list[dict[str, Any]] = []
     eval_cache: dict[str, dict[str, Any]] = {}
     stats = {"hits": 0, "misses": 0, "llm_calls": 0, "unique_seq": 0}
 
-    for node in flatten_workflow_nodes(wf):
-        output_files = [str(p) for p in (node.get("outputFiles") or []) if p]
-        if not output_files:
-            continue
+    snapshots = collect_unique_snapshots(traj, [target_file])
+    if endpoints_only and len(snapshots) > 1:
+        snapshots = [snapshots[0], snapshots[-1]]
 
-        nid = str(node.get("id") or "")
-        snapshots = collect_unique_snapshots(traj, output_files)
-        if endpoints_only and len(snapshots) > 1:
-            snapshots = [snapshots[0], snapshots[-1]]
-
-        desc = str(node.get("description") or "")
-        versions = [
-            _score_one_snapshot(
-                v_idx=i,
-                snap=snap,
-                criteria=final_criteria,
-                step_path=last_step_path,
-                desc=last_desc,
-                eval_cache=eval_cache,
-                dry_run=dry_run,
-                client=client,
-                model=model,
-                stats=stats,
-            )
-            for i, snap in enumerate(snapshots)
-        ]
-        report_tasks.append(
-            {
-                "node_id": nid,
-                "description": desc,
-                "output_files": output_files,
-                "final_rubrics": final_criteria,
-                "graded_against_workflow_step": last_desc,
-                "unique_agent_snapshots": len(snapshots),
-                "versions": versions,
-            }
+    versions = [
+        _score_one_snapshot(
+            v_idx=i,
+            snap=snap,
+            criteria=final_criteria,
+            step_path=last_step_path,
+            desc=last_desc,
+            eval_cache=eval_cache,
+            dry_run=dry_run,
+            client=client,
+            model=model,
+            stats=stats,
         )
+        for i, snap in enumerate(snapshots)
+    ]
+    report_tasks.append(
+        {
+            "node_id": nid,
+            "description": desc,
+            "output_file": target_file,
+            "output_files": [target_file],
+            "final_rubrics": final_criteria,
+            "graded_against_workflow_step": last_desc,
+            "unique_agent_snapshots": len(snapshots),
+            "versions": versions,
+        }
+    )
 
     out: dict[str, Any] = {
         **session_meta(session),
         "dry_run": dry_run,
         "grading_rubrics": final_criteria,
         "graded_against_workflow_step": last_desc,
+        "evaluated_output_file": target_file,
         "tasks": report_tasks,
         "scatter_plot_data": build_scatter_plot_data(report_tasks),
         "eval_cache_stats": {
@@ -630,12 +708,17 @@ def rate_session_exported_status(session: dict[str, Any]) -> dict[str, Any]:
     entries = last_workflow_verifier_entries(wf)
     criteria = [c for c, _, _ in entries]
     passes = [p for _, _, p in entries]
-    last_blocks, last_idx = last_agent_file_snapshot(traj)
+    target = target_evaluation_node_and_file(wf)
+    if target is None:
+        return {**base, "error": "no output files on workflow"}
+    _, target_file = target
+    last_text, last_idx = last_file_snapshot(traj, target_file)
 
     out: dict[str, Any] = {
         **base,
         "file_environment_index": last_idx,
-        "output_files": [p for p, _ in last_blocks],
+        "evaluated_output_file": target_file,
+        "output_files": [target_file] if last_text else [],
         "final_rubrics": criteria,
         "verifier_statuses": [s for _, s, _ in entries],
         "pass_per_criterion": passes,
@@ -669,6 +752,7 @@ def build_scatter_plot_data(report_tasks: list[dict[str, Any]]) -> list[dict[str
                         "node_id": task.get("node_id"),
                         "task_description": task.get("description"),
                         "version_index_within_task": ver.get("version_index"),
+                        "actor": ver.get("actor"),
                         "unique_eval_sequence": ver.get("unique_eval_sequence"),
                         "first_seen_trajectory_step_index": ver.get("first_seen_trajectory_step_index"),
                         "eval_cache_hit": ver.get("eval_cache_hit"),
@@ -717,13 +801,15 @@ def print_version_summary(report: dict[str, Any]) -> None:
             if not isinstance(ver, dict):
                 continue
             vi, si, pct = ver.get("version_index"), ver.get("trajectory_step_index"), ver.get("average_success_pct")
+            actor = str(ver.get("actor") or "").strip()
+            actor_tag = f" ({actor})" if actor else ""
             dedupe = " (deduplicated)" if ver.get("eval_cache_hit") else ""
             if isinstance(pct, (int, float)):
-                print(f"  [{nid}] {desc} | v{vi} @ traj {si}: {float(pct):.1f}%{dedupe}", file=sys.stderr)
+                print(f"  [{nid}] {desc} | v{vi} @ traj {si}{actor_tag}: {float(pct):.1f}%{dedupe}", file=sys.stderr)
             elif ver.get("error"):
-                print(f"  [{nid}] {desc} | v{vi} @ traj {si}: N/A — {str(ver['error'])[:100]}", file=sys.stderr)
+                print(f"  [{nid}] {desc} | v{vi} @ traj {si}{actor_tag}: N/A — {str(ver['error'])[:100]}", file=sys.stderr)
             elif dry:
-                print(f"  [{nid}] {desc} | v{vi} @ traj {si}: (dry-run)", file=sys.stderr)
+                print(f"  [{nid}] {desc} | v{vi} @ traj {si}{actor_tag}: (dry-run)", file=sys.stderr)
     print("--- end summary ---", file=sys.stderr)
 
 
