@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-LM-rate unique file snapshots for **one deliverable per session**: the output file from the
-latest workflow step that declares ``outputFiles`` (if that step lists several files, the last
-listed file is used). Every version is graded against the **last** workflow step's verifiers.
+LM-rate unique file snapshots for **one deliverable per session**: the last file path
+with non-null content in trajectory ``environment.file`` (dict or list-of-path entries).
+Rubrics come from the **last** workflow step whose ``outputFiles`` includes that path.
 
 Collects snapshots from agent steps **and** user/human-edit steps (e.g. agent ``abstract.md``
 then a human-edited ``abstract.md``). Supports ``trajectory``, ``task_units`` (per-step
@@ -15,6 +15,7 @@ Examples:
   python scripts/tools/rate_file_versions.py -j out.json -s <uuid> -o ratings.json --plot
   python scripts/tools/rate_file_versions.py -j out.json -s <uuid> --endpoints-only --dry-run
   python scripts/tools/rate_file_versions.py -j out.json -s <uuid> --exported-status
+  python scripts/tools/rate_file_versions.py -j out.json --extract -o extract.json
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from verifier_label_prompt import (  # noqa: E402
 )
 
 _TRUNCATE_LEN = 14_000
-DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_MODEL = "claude-sonnet-4-5"
 
 
 # --- Session I/O ---
@@ -288,34 +289,56 @@ def criteria_from_verifiers(verifiers: Any) -> list[str]:
     return [c for c, _, _ in parse_verifiers(verifiers)]
 
 
-def last_workflow_node(wf: list[dict[str, Any]]) -> dict[str, Any] | None:
-    nodes = flatten_workflow_nodes(wf)
-    return nodes[-1] if nodes else None
+def file_field_paths(file_field: Any) -> list[str]:
+    if isinstance(file_field, dict):
+        return [str(p) for p in file_field if isinstance(p, str) and p]
+    if isinstance(file_field, list):
+        return [
+            str(item["path"])
+            for item in file_field
+            if isinstance(item, dict) and item.get("path")
+        ]
+    return []
 
 
-def target_evaluation_node_and_file(wf: list[dict[str, Any]]) -> tuple[dict[str, Any], str] | None:
-    """Last workflow node with output files and the single deliverable file to grade."""
-    target_node: dict[str, Any] | None = None
-    target_file: str | None = None
+def target_file_from_traj(traj: list[dict[str, Any]]) -> str | None:
+    """Last path with content in ``environment.file``, else last path listed there."""
+    last_path: str | None = None
+    last_with_content: str | None = None
+    for _, step in iter_file_environment_steps(traj):
+        env = step.get("environment")
+        if not isinstance(env, dict):
+            continue
+        ff = env.get("file")
+        for rel in file_field_paths(ff):
+            last_path = rel
+            if file_snapshot(ff, rel):
+                last_with_content = rel
+    return last_with_content or last_path
+
+
+def eval_node_for_output_file(wf: list[dict[str, Any]], output_file: str) -> dict[str, Any] | None:
+    """Last workflow node whose ``outputFiles`` includes ``output_file``."""
+    eval_node: dict[str, Any] | None = None
     for node in flatten_workflow_nodes(wf):
-        files = [str(p) for p in (node.get("outputFiles") or []) if p]
-        if files:
-            target_node = node
-            target_file = files[-1]
-    if target_node is None or not target_file:
+        output_files = [str(p) for p in (node.get("outputFiles") or []) if p]
+        if output_file not in output_files:
+            continue
+        eval_node = node
+    return eval_node
+
+
+def target_evaluation_node_and_file(
+    wf: list[dict[str, Any]], traj: list[dict[str, Any]]
+) -> tuple[dict[str, Any], str] | None:
+    """Rubrics from the last workflow node whose ``outputFiles`` includes the trajectory file."""
+    target_file = target_file_from_traj(traj)
+    if not target_file:
         return None
-    return target_node, target_file
-
-
-def last_workflow_rubrics(wf: list[dict[str, Any]]) -> list[str]:
-    """Verifier criteria from the final workflow step (used for all file-version grading)."""
-    node = last_workflow_node(wf)
-    return criteria_from_verifiers(node.get("verifiers")) if node else []
-
-
-def last_workflow_verifier_entries(wf: list[dict[str, Any]]) -> list[tuple[str, str, bool]]:
-    node = last_workflow_node(wf)
-    return parse_verifiers(node.get("verifiers")) if node else []
+    eval_node = eval_node_for_output_file(wf, target_file)
+    if eval_node is None:
+        return None
+    return eval_node, target_file
 
 
 def get_node_path(tree: list[dict[str, Any]], node_id: str) -> str:
@@ -334,12 +357,6 @@ def get_node_path(tree: list[dict[str, Any]], node_id: str) -> str:
 
     walk(tree)
     return " > ".join(path)
-
-
-def iter_agent_steps(traj: list[dict[str, Any]]) -> Iterator[tuple[int, dict[str, Any]]]:
-    for step_idx, step in enumerate(traj):
-        if isinstance(step, dict) and step.get("actor") == "agent":
-            yield step_idx, step
 
 
 def iter_file_environment_steps(traj: list[dict[str, Any]]) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -378,16 +395,54 @@ def collect_unique_snapshots(
     return snapshots
 
 
-def last_agent_file_snapshot(traj: list[dict[str, Any]]) -> tuple[list[tuple[str, str]], int | None]:
-    blocks: list[tuple[str, str]] = []
-    idx: int | None = None
-    for step_idx, step in iter_agent_steps(traj):
-        env = step.get("environment")
-        if isinstance(env, dict):
-            b = file_blocks_from_env(env)
-            if b:
-                blocks, idx = b, step_idx
-    return blocks, idx
+def file_version_contents(snapshots: list[dict[str, Any]], output_file: str) -> list[str]:
+    contents: list[str] = []
+    for snap in snapshots:
+        for rel, text in snap.get("file_blocks") or []:
+            if rel == output_file and text:
+                contents.append(text)
+                break
+    return contents
+
+
+def extract_session_output_file(session: dict[str, Any], *, endpoints_only: bool = False) -> dict[str, Any]:
+    """Rubrics and unique file version strings for one task (no LM)."""
+    out: dict[str, Any] = {
+        "uuid": session.get("uuid"),
+        "rubrics": [],
+        "file_name": "",
+        "file_versions": [],
+    }
+    try:
+        traj, wf = workflow_from_session(session)
+    except ValueError:
+        return out
+    if not wf:
+        return out
+
+    target = target_evaluation_node_and_file(wf, traj)
+    if target is None:
+        return out
+
+    eval_node, output_file = target
+    out["file_name"] = output_file
+    out["rubrics"] = criteria_from_verifiers(eval_node.get("verifiers"))
+    snapshots = collect_unique_snapshots(traj, [output_file])
+    if endpoints_only and len(snapshots) > 1:
+        snapshots = [snapshots[0], snapshots[-1]]
+    out["file_versions"] = file_version_contents(snapshots, output_file)
+    return out
+
+
+def extract_tasks_report(
+    sessions: list[dict[str, Any]],
+    *,
+    session_id: str | None = None,
+    endpoints_only: bool = False,
+) -> list[dict[str, Any]]:
+    if session_id and str(session_id).strip():
+        sessions = [resolve_session(sessions, session_id)]
+    return [extract_session_output_file(session, endpoints_only=endpoints_only) for session in sessions]
 
 
 def last_file_snapshot(traj: list[dict[str, Any]], filename: str) -> tuple[str | None, int | None]:
@@ -612,32 +667,28 @@ def rate_session(
     if not wf:
         return {**session_meta(session), "error": "no workflow found in trajectory", "tasks": [], "scatter_plot_data": []}
 
-    final_criteria = last_workflow_rubrics(wf)
-    if not final_criteria:
-        return {
-            **session_meta(session),
-            "error": "no verifier criteria on last workflow step",
-            "tasks": [],
-            "scatter_plot_data": [],
-        }
-
-    last_node = last_workflow_node(wf) or {}
-    last_nid = str(last_node.get("id") or "")
-    last_desc = str(last_node.get("description") or "")
-    last_step_path = get_node_path(wf, last_nid)
-
-    target = target_evaluation_node_and_file(wf)
+    target = target_evaluation_node_and_file(wf, traj)
     if target is None:
         return {
             **session_meta(session),
-            "error": "no output files on workflow",
+            "error": "no file paths in trajectory environment.file",
             "tasks": [],
             "scatter_plot_data": [],
         }
 
     eval_node, target_file = target
+    final_criteria = criteria_from_verifiers(eval_node.get("verifiers"))
+    if not final_criteria:
+        return {
+            **session_meta(session),
+            "error": "no verifier criteria on workflow step for evaluated file",
+            "tasks": [],
+            "scatter_plot_data": [],
+        }
+
     nid = str(eval_node.get("id") or "")
     desc = str(eval_node.get("description") or "")
+    step_path = get_node_path(wf, nid)
 
     report_tasks: list[dict[str, Any]] = []
     eval_cache: dict[str, dict[str, Any]] = {}
@@ -652,8 +703,8 @@ def rate_session(
             v_idx=i,
             snap=snap,
             criteria=final_criteria,
-            step_path=last_step_path,
-            desc=last_desc,
+            step_path=step_path,
+            desc=desc,
             eval_cache=eval_cache,
             dry_run=dry_run,
             client=client,
@@ -669,7 +720,7 @@ def rate_session(
             "output_file": target_file,
             "output_files": [target_file],
             "final_rubrics": final_criteria,
-            "graded_against_workflow_step": last_desc,
+            "graded_against_workflow_step": desc,
             "unique_agent_snapshots": len(snapshots),
             "versions": versions,
         }
@@ -679,7 +730,7 @@ def rate_session(
         **session_meta(session),
         "dry_run": dry_run,
         "grading_rubrics": final_criteria,
-        "graded_against_workflow_step": last_desc,
+        "graded_against_workflow_step": desc,
         "evaluated_output_file": target_file,
         "tasks": report_tasks,
         "scatter_plot_data": build_scatter_plot_data(report_tasks),
@@ -705,13 +756,13 @@ def rate_session_exported_status(session: dict[str, Any]) -> dict[str, Any]:
     if not wf:
         return {**base, "error": "no workflow found in trajectory"}
 
-    entries = last_workflow_verifier_entries(wf)
+    target = target_evaluation_node_and_file(wf, traj)
+    if target is None:
+        return {**base, "error": "no file paths in trajectory environment.file"}
+    eval_node, target_file = target
+    entries = parse_verifiers(eval_node.get("verifiers"))
     criteria = [c for c, _, _ in entries]
     passes = [p for _, _, p in entries]
-    target = target_evaluation_node_and_file(wf)
-    if target is None:
-        return {**base, "error": "no output files on workflow"}
-    _, target_file = target
     last_text, last_idx = last_file_snapshot(traj, target_file)
 
     out: dict[str, Any] = {
@@ -724,7 +775,7 @@ def rate_session_exported_status(session: dict[str, Any]) -> dict[str, Any]:
         "pass_per_criterion": passes,
         "tasks": [],
         "scatter_plot_data": [],
-        "error": None if criteria else "no verifier criteria in final workflow",
+        "error": None if criteria else "no verifier criteria on workflow step for evaluated file",
     }
     pct = average_success_percent(passes, len(criteria))
     if pct is not None:
@@ -954,6 +1005,14 @@ def resolve_client(args: argparse.Namespace) -> tuple[Any | None, str, dict[str,
     return induce.make_anthropic_client(cfg), model, meta
 
 
+def run_extract(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return extract_tasks_report(
+        load_sessions(args.json),
+        session_id=args.session,
+        endpoints_only=args.endpoints_only,
+    )
+
+
 def run_report(args: argparse.Namespace) -> dict[str, Any]:
     session = resolve_session(load_sessions(args.json), args.session)
     if args.exported_status:
@@ -984,6 +1043,11 @@ def main() -> int:
     p.add_argument("--exported-status", action="store_true", help="Use exported verifier marks (no LM)")
     p.add_argument("--endpoints-only", action="store_true", help="Rate only first and last snapshot per step")
     p.add_argument("-o", "--out", type=Path, default=None)
+    p.add_argument(
+        "--extract",
+        action="store_true",
+        help="Extract rubrics and file versions per task to JSON (no LM)",
+    )
     p.add_argument("--force", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--api-key", default=None)
@@ -999,6 +1063,19 @@ def main() -> int:
 
     if args.exported_status and (args.dry_run or args.endpoints_only):
         raise SystemExit("--exported-status cannot combine with --dry-run or --endpoints-only")
+    if args.extract:
+        if args.exported_status or args.plot or args.dry_run:
+            raise SystemExit("--extract cannot combine with --dry-run, --plot, or --exported-status")
+        report = run_extract(args)
+        text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+        if args.out:
+            args.out.write_text(text, encoding="utf-8")
+            print(f"Wrote extract to {args.out.resolve()}", file=sys.stderr)
+        else:
+            sys.stdout.write(text)
+        ok = sum(1 for t in report if t.get("rubrics") and t.get("file_versions"))
+        print(f"extracted {ok}/{len(report)} tasks with rubrics and file versions", file=sys.stderr)
+        return 0
 
     report: dict[str, Any] | None = None
     loaded_existing = False
