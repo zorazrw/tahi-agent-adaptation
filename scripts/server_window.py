@@ -67,10 +67,10 @@ class WindowServer(Server):
         while True:
             session_data = await self.sessions_queue.get()
             try:
-                if self.config.mode not in ("dpo", "opd", "reinforce"):
+                if self.config.mode not in ("dpo", "opd", "reinforce", "grpo_opd"):
                     raise ValueError(
                         f"Unknown training mode: {self.config.mode} "
-                        "(expected one of 'dpo', 'opd', 'reinforce')"
+                        "(expected one of 'dpo', 'opd', 'reinforce', 'grpo_opd')"
                     )
 
                 order = self._next_order

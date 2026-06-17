@@ -1,0 +1,77 @@
+# Rolling-window training proxy (server_window.py) for combined GRPO+OPD.
+# Same rolling-window semantics as config_window.yaml, but mode=grpo_opd.
+# Keep state_path / proxy_port distinct from the default server and the
+# REINFORCE window experiment so checkpoints and ports do not collide.
+
+# -- Mode --
+mode: grpo_opd
+
+# -- Update --
+# Train every new session, on the latest `training_window_sessions` sessions.
+# The first (training_window_sessions - 1) submissions only fill the window.
+update_every_n_sessions: 1
+training_window_sessions: 4
+
+# -- Inference --
+temperature: 0.3
+logprobs: false
+
+# -- Training (shared) --
+lora_rank: 64
+dry_run: false
+learning_rate: 1.0e-4
+num_epochs: 1
+batch_size: 4
+lr_schedule: cosine
+max_steps: null
+max_length: null
+save_every: 20
+
+# -- OPD-specific (reused by grpo_opd) --
+opd_max_tokens: 4096
+opd_temperature: 1.0
+opd_topk: 20
+opd_max_context_length: 65536
+opd_pair_mode: first_last
+opd_use_gt: true
+opd_use_student: true
+opd_rollout_attempts: 1
+opd_teacher_temperature: 1.0
+opd_log_rollout_samples: true
+opd_rollout_sample_log_chars: 16384
+opd_log_teacher_prompts: true
+opd_artifact_only_rollout_instruction: false
+# grpo_opd forces 'agentic' internally; set it explicitly for clarity.
+opd_extract_version: agentic
+opd_strip_thinking_from_history: false
+opd_rollout_pipeline: current
+
+# -- OPD agentic mode --
+opd_agentic_max_turns: 48
+opd_agentic_max_turns_per_step: 10
+opd_agentic_max_steps: 6
+opd_agentic_enable_bash: true
+opd_agentic_tool_timeout_s: 20
+opd_agentic_max_trajectory_tokens: 48000
+
+# -- Combined GRPO+OPD --
+# Per session, grpo_group_size on-policy episodes are sampled once and reused
+# for BOTH the GRPO importance-sampling loss and the OPD top-K cross-entropy
+# loss, weighted by lambda_grpo / lambda_opd in a single optimizer step.
+grpo_group_size: 4
+lambda_grpo: 1.0
+lambda_opd: 1.0
+
+# -- Logging --
+wandb_project: null
+wandb_name: null
+
+# -- Model lifecycle --
+preload_model: Qwen/Qwen3.5-35B-A3B
+
+# -- Proxy Server --
+# Distinct state + port from server.py (8000) and the REINFORCE window (8001).
+proxy_host: localhost
+proxy_port: 8000
+state_path: scripts/state_window_grpo_opd.json
+block_during_training: true
