@@ -1325,14 +1325,57 @@ def load_initial_task_from_pi_session_file(path: Optional[str]) -> str:
 def resolve_pi_session_file(
     db_pi_session_file: Optional[str],
     raw_msgs: Optional[List[dict]] = None,
+    *,
+    db_root: Optional[Path] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[str]:
+    """Resolve pi jsonl on disk; remap absolute paths from another machine to bundle layout."""
+    raw_paths: List[str] = []
     if isinstance(db_pi_session_file, str) and db_pi_session_file.strip():
-        return db_pi_session_file.strip()
+        raw_paths.append(db_pi_session_file.strip())
     for m in raw_msgs or []:
         if m.get("type") == "system_init":
             sf = m.get("sessionFile")
             if isinstance(sf, str) and sf.strip():
-                return sf.strip()
+                raw_paths.append(sf.strip())
+
+    tried: Set[str] = set()
+    bundle_root = db_root.resolve() if db_root is not None else None
+
+    for raw in raw_paths:
+        if raw in tried:
+            continue
+        tried.add(raw)
+        p = Path(raw)
+        if p.is_file():
+            return str(p)
+
+        if bundle_root is None:
+            continue
+
+        parts = p.parts
+        for i, part in enumerate(parts):
+            if part == "pi-agent":
+                candidate = bundle_root.joinpath(*parts[i:])
+                if candidate.is_file():
+                    return str(candidate)
+
+        if session_id:
+            candidate = bundle_root / "pi-agent" / "sessions" / session_id / p.name
+            if candidate.is_file():
+                return str(candidate)
+
+        if not p.is_absolute():
+            candidate = bundle_root / p
+            if candidate.is_file():
+                return str(candidate)
+
+    if bundle_root and session_id:
+        session_dir = bundle_root / "pi-agent" / "sessions" / session_id
+        if session_dir.is_dir():
+            for child in sorted(session_dir.glob("*.jsonl")):
+                return str(child)
+
     return None
 
 
@@ -1341,7 +1384,17 @@ def extract_initial_task_instruction(
     fallback: str,
     *,
     pi_session_file: Optional[str] = None,
+    stored_initial_prompt: Optional[str] = None,
 ) -> str:
+    if isinstance(stored_initial_prompt, str):
+        stripped = strip_interface_user_prompt(stored_initial_prompt)
+        if stripped and not is_backend_node_user_prompt(stripped):
+            return stripped
+
+    from_pi = load_initial_task_from_pi_session_file(pi_session_file)
+    if from_pi:
+        return from_pi
+
     for m in action_trajectory:
         if m.get("role") == "user" and m.get("type") == "user_prompt":
             prompt = m.get("prompt", "")
@@ -1350,9 +1403,6 @@ def extract_initial_task_instruction(
             stripped = strip_interface_user_prompt(prompt)
             if stripped:
                 return stripped
-    from_pi = load_initial_task_from_pi_session_file(pi_session_file)
-    if from_pi:
-        return from_pi
     fb = strip_interface_user_prompt(fallback)
     if fb and not is_backend_node_user_prompt(fb):
         return fb
@@ -1586,7 +1636,22 @@ def filter_out_stream_events(trajectory: List[dict]) -> List[dict]:
     return [msg for msg in trajectory if not _is_export_noise_message(msg)]
 
 
-def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
+def _session_initial_prompt(cursor: sqlite3.Cursor, session_id: str) -> Optional[str]:
+    try:
+        row = cursor.execute(
+            "SELECT initial_prompt FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except sqlite3.OperationalError:
+        pass
+    return None
+
+
+def extract_session(
+    cursor: sqlite3.Cursor, session_id: str, *, db_root: Optional[Path] = None
+) -> Optional[dict]:
     try:
         row = cursor.execute(
             """SELECT id, title, engine, last_prompt, workflow_tree, steps, output_files, verification_criteria, verifier_marks,
@@ -1655,7 +1720,10 @@ def extract_session(cursor: sqlite3.Cursor, session_id: str) -> Optional[dict]:
     initial_task_instruction = extract_initial_task_instruction(
         action_trajectory,
         last_prompt or "",
-        pi_session_file=resolve_pi_session_file(pi_session_file_raw, raw_msgs_for_sf),
+        pi_session_file=resolve_pi_session_file(
+            pi_session_file_raw, raw_msgs_for_sf, db_root=db_root, session_id=session_id
+        ),
+        stored_initial_prompt=_session_initial_prompt(cursor, session_id),
     )
     node_id_to_segment = segment_trajectory_by_persisted_node_prompts(action_trajectory, workflow_tree)
     if engine != "pi" and not node_id_to_segment:
@@ -3227,7 +3295,7 @@ WORKFLOW_PLAN_INSTRUCTION = "\n".join([
 
 
 def build_weight_based_session(
-    cursor: sqlite3.Cursor, session_id: str
+    cursor: sqlite3.Cursor, session_id: str, *, db_root: Optional[Path] = None
 ) -> Optional[dict]:
     """Build the weight-based export for a single session."""
     try:
@@ -3333,7 +3401,10 @@ def build_weight_based_session(
     initial_task_instruction = extract_initial_task_instruction(
         action_trajectory,
         last_prompt or "",
-        pi_session_file=resolve_pi_session_file(pi_session_file_raw, all_msgs),
+        pi_session_file=resolve_pi_session_file(
+            pi_session_file_raw, all_msgs, db_root=db_root, session_id=session_id
+        ),
+        stored_initial_prompt=_session_initial_prompt(cursor, session_id),
     )
     action_trajectory = reclassify_auto_verifier_edits(action_trajectory)
     action_trajectory = inject_synthetic_human_edits(action_trajectory, export_cwd)
@@ -3471,21 +3542,25 @@ def build_weight_based_session(
     return result
 
 
-def extract_all_sessions_weight_based(cursor: sqlite3.Cursor) -> List[dict]:
+def extract_all_sessions_weight_based(
+    cursor: sqlite3.Cursor, *, db_root: Optional[Path] = None
+) -> List[dict]:
     rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
     sessions = []
     for (session_id,) in rows:
-        sess = build_weight_based_session(cursor, session_id)
+        sess = build_weight_based_session(cursor, session_id, db_root=db_root)
         if sess:
             sessions.append(sess)
     return sessions
 
 
-def extract_all_sessions(cursor: sqlite3.Cursor) -> List[dict]:
+def extract_all_sessions(
+    cursor: sqlite3.Cursor, *, db_root: Optional[Path] = None
+) -> List[dict]:
     rows = cursor.execute("SELECT id FROM sessions ORDER BY updated_at DESC").fetchall()
     out = []
     for (session_id,) in rows:
-        sess = extract_session(cursor, session_id)
+        sess = extract_session(cursor, session_id, db_root=db_root)
         if sess:
             out.append(sess)
     return out
@@ -3510,16 +3585,17 @@ def main() -> int:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    db_root = db_path.parent
 
     try:
         if args.session_id:
-            sess = build_weight_based_session(cursor, args.session_id)
+            sess = build_weight_based_session(cursor, args.session_id, db_root=db_root)
             if not sess:
                 print(f"Error: session not found: {args.session_id}", file=sys.stderr)
                 return 1
             payload = [sess]
         else:
-            payload = extract_all_sessions_weight_based(cursor)
+            payload = extract_all_sessions_weight_based(cursor, db_root=db_root)
 
         json_str = json.dumps(payload, indent=2, ensure_ascii=False)
         if args.output:

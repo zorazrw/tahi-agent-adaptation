@@ -158,8 +158,8 @@ export class SessionStore {
     this.db
       .prepare(
         `insert into sessions
-          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, workflow_tree, verification_depth, auto_context_induction, expertise_task, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, title, engine, claude_session_id, pi_session_file, status, cwd, allowed_tools, last_prompt, initial_prompt, workflow_tree, verification_depth, auto_context_induction, expertise_task, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -171,6 +171,7 @@ export class SessionStore {
         session.cwd ?? null,
         session.allowedTools ?? null,
         session.lastPrompt ?? null,
+        options.prompt?.trim() || null,
         serializeWorkflowTree(session.workflowTree),
         session.verificationDepth ?? 0,
         session.autoContextInduction ? 1 : 0,
@@ -519,6 +520,7 @@ export class SessionStore {
     try { this.db.exec(`alter table sessions add column pi_session_file text`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column auto_context_induction integer default 1`); } catch { /* exists */ }
     try { this.db.exec(`alter table sessions add column expertise_task text`); } catch { /* exists */ }
+    try { this.db.exec(`alter table sessions add column initial_prompt text`); } catch { /* exists */ }
     try { this.db.exec(`update sessions set engine = 'legacy-claude' where engine is null or trim(engine) = ''`); } catch { /* ignore */ }
 
     this.db.exec(

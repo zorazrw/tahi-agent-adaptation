@@ -5,7 +5,7 @@ import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { cp, mkdir, readdir, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
-import { join, relative } from "path";
+import { join, relative, basename } from "path";
 
 /** Never include API keys or auth tokens in research bundles. */
 const EXCLUDED_REL_PATHS = new Set([
@@ -25,6 +25,26 @@ function checkpointSessionsDb(dbPath: string): void {
   const db = new Database(dbPath);
   try {
     db.pragma("wal_checkpoint(TRUNCATE)");
+  } finally {
+    db.close();
+  }
+}
+
+/** Rewrite pi_session_file to bundle-relative paths so exports work on other machines. */
+function normalizeExportedSessionsDb(bundleRoot: string): void {
+  const dbPath = join(bundleRoot, "sessions.db");
+  if (!existsSync(dbPath)) return;
+
+  const db = new Database(dbPath);
+  try {
+    const rows = db
+      .prepare(`select id, pi_session_file from sessions where pi_session_file is not null and trim(pi_session_file) != ''`)
+      .all() as Array<{ id: string; pi_session_file: string }>;
+    const update = db.prepare(`update sessions set pi_session_file = ? where id = ?`);
+    for (const row of rows) {
+      const rel = join("pi-agent", "sessions", row.id, basename(row.pi_session_file.trim())).replace(/\\/g, "/");
+      if (existsSync(join(bundleRoot, rel))) update.run(rel, row.id);
+    }
   } finally {
     db.close();
   }
@@ -112,6 +132,7 @@ export async function exportRecordingsBundleToZip(zipPath: string): Promise<void
 
   try {
     await copyFilteredTree(userData, bundleRoot);
+    normalizeExportedSessionsDb(bundleRoot);
 
     const manifest = {
       exportedAt: new Date().toISOString(),
