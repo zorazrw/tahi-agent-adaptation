@@ -11,6 +11,11 @@
             "from": "scripts",
             "to": "scripts",
             "filter": ["**/*"]
+        },
+        {
+            "from": "tinker-bridge",
+            "to": "tinker-bridge",
+            "filter": ["**/*", "!.venv/**", "!**/__pycache__/**", "!**/*.pyc"]
         }
     ],
     "icon": "./claude-color.png",

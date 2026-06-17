@@ -1,6 +1,10 @@
 import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { fileURLToPath } from "url";
 import type { ChildProcessWithoutNullStreams } from "child_process";
+import { app } from "electron";
 import {
   calculateCost,
   createAssistantMessageEventStream,
@@ -100,8 +104,51 @@ type BridgeResolveCheckpointResult =
       error: string;
     };
 
-const bridgeProjectPath = fileURLToPath(new URL("../../../tinker-bridge", import.meta.url));
 const TINKER_BRIDGE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Directories where `uv` is commonly installed. GUI apps launched from Finder
+// inherit a minimal PATH that omits these, so we resolve uv explicitly.
+const UV_CANDIDATE_DIRS = [
+  join(homedir(), ".local", "bin"),
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+];
+
+/**
+ * Location of the tinker-bridge Python project. In dev it lives next to the
+ * source; in the packaged app it is shipped via electron-builder extraResources
+ * to Contents/Resources/tinker-bridge (outside the asar so Python can run it).
+ */
+function getBridgeProjectPath(): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, "tinker-bridge");
+  }
+  return fileURLToPath(new URL("../../../tinker-bridge", import.meta.url));
+}
+
+function resolveUvCommand(): string {
+  for (const dir of UV_CANDIDATE_DIRS) {
+    const candidate = join(dir, "uv");
+    if (existsSync(candidate)) return candidate;
+  }
+  return "uv";
+}
+
+/**
+ * Run the bridge with uv discoverable on PATH and the virtualenv pointed at a
+ * writable location under userData (the app bundle itself is read-only / signed,
+ * so uv must not create `.venv` inside Resources/tinker-bridge).
+ */
+function buildBridgeEnv(): NodeJS.ProcessEnv {
+  const extraPath = UV_CANDIDATE_DIRS.join(":");
+  const existingPath = process.env.PATH ?? "";
+  return {
+    ...process.env,
+    PATH: existingPath ? `${extraPath}:${existingPath}` : extraPath,
+    UV_PROJECT_ENVIRONMENT: join(app.getPath("userData"), "tinker-bridge-venv"),
+  };
+}
 
 type BridgePendingRequest = {
   resolve: (value: unknown) => void;
@@ -144,10 +191,16 @@ function ensurePersistentBridgeServer(): ChildProcessWithoutNullStreams {
     return persistentBridgeChild;
   }
 
-  const child = spawn("uv", ["run", "--project", bridgeProjectPath, "python", "-m", "tinker_bridge", "--serve"], {
-    cwd: bridgeProjectPath,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const bridgeProjectPath = getBridgeProjectPath();
+  const child = spawn(
+    resolveUvCommand(),
+    ["run", "--frozen", "--project", bridgeProjectPath, "python", "-m", "tinker_bridge", "--serve"],
+    {
+      cwd: bridgeProjectPath,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: buildBridgeEnv(),
+    },
+  );
   persistentBridgeChild = child;
 
   child.stdout.setEncoding("utf8");
