@@ -328,8 +328,6 @@ function emit(event: ServerEvent) {
         type: "session.status",
         payload: { sessionId, status: "idle", title: session.title, cwd: session.cwd }
       });
-      // Force verifier refinement from latest user prompts right after initial plan registration.
-      void autoRefineVerifiersFromUserMessages(sessionId, flattenWorkflowNodeIds(workflowTree));
     }
     return;
   }
