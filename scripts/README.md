@@ -122,7 +122,7 @@ python3 scripts/server.py --config scripts/config.yaml
 python3 scripts/server_window.py --config scripts/config_window.yaml
 ```
 
-Uses `training_window_sessions` and a separate `state_path` / port so it does not overwrite the default experiment state.
+Uses `training_window_sessions` and a separate port so it does not overwrite the default experiment state. By default, each server run gets its own timestamped experiment directory under `log_root`, and `state_path` is stored there unless you explicitly pin `experiment_name` or `state_path`.
 
 `GET /healthz` returns `{"ok": true}` when the process is up.
 
@@ -142,7 +142,7 @@ The session is queued for training. Once `update_every_n_sessions` sessions have
 
 After training completes, the server broadcasts a `model-update` SSE event to the frontend. The frontend automatically points at the new checkpoint, so you normally do not need to switch models manually. If the new checkpoint is not visible in the model picker, click **Load models** to refresh the list.
 
-The server persists the model registry, latest model path, and latest model-update event to `state_path` (default: `scripts/state.json`). On restart, this state is loaded so trained checkpoint slugs and the active model pointer are restored.
+The server persists the model registry, latest model path, and latest model-update event to `state_path`. When `state_path: null` (the default in the sample configs), it is stored under `log_root/<experiment_name>/state.json`; with `experiment_name: null`, the server auto-creates a fresh timestamped experiment directory on startup. On restart, the state file for that experiment is loaded so trained checkpoint slugs and the active model pointer are restored.
 
 ## Scoring Redo Sessions
 

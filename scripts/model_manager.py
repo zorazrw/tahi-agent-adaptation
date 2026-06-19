@@ -60,6 +60,7 @@ TINKER_SUPPORTED_MODELS: list[str] = [
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "Qwen/Qwen3.5-397B-A17B",
     "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.6-35B-A3B",
     "Qwen/Qwen3.5-27B",
     "Qwen/Qwen3.5-4B",
     "Qwen/Qwen3.6-35B-A3B",
@@ -94,6 +95,7 @@ TINKER_MODEL_TO_RENDERER_NAME: dict[str, str] = {
     "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen3_vl_instruct",
     "Qwen/Qwen3.5-397B-A17B": "qwen3_5",
     "Qwen/Qwen3.5-35B-A3B": "qwen3_5",
+    "Qwen/Qwen3.6-35B-A3B": "qwen3_5",
     "Qwen/Qwen3.5-27B": "qwen3_5",
     "Qwen/Qwen3.5-4B": "qwen3_5",
     # Qwen3.6 reuses the Qwen3.5 renderer (identical tokenizer/special tokens).
