@@ -6,6 +6,7 @@ import logging
 import asyncio
 import argparse
 import time
+import datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -137,11 +138,13 @@ class Config:
     # -- Logging --
     wandb_project: str | None = None
     wandb_name: str | None = None
+    log_root: str = "logs/online_training"
+    experiment_name: str | None = None
 
     # -- Proxy Server --
     proxy_host: str = "localhost"
     proxy_port: int = 8000
-    state_path: str = "state.json"
+    state_path: str | None = None
     # When true, /v1/chat/completions requests are rejected with HTTP 503
     # while a training round (or checkpoint swap) is in progress, rather
     # than being forwarded to Tinker. When false (default), inference
@@ -199,11 +202,23 @@ class Server:
             raise RuntimeError("TINKER_API_KEY environment variable is required")
 
         self.config = config
+        self.experiment_name = self._resolve_experiment_name(config.experiment_name, config.mode)
+        self.experiment_dir = Path(config.log_root).expanduser() / self.experiment_name
+        self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        resolved_state_path = self._resolve_state_path(config.state_path)
+        self.config.state_path = str(resolved_state_path)
+
+        log.info(
+            "Experiment initialized: name=%s dir=%s state_path=%s",
+            self.experiment_name,
+            self.experiment_dir,
+            self.config.state_path,
+        )
 
         self.model_manager = ModelManager(
             tinker_api_key=self._API_KEY,
             tinker_base_url=self._TINKER_BASE_URL,
-            state_path=config.state_path,
+            state_path=self.config.state_path,
             mode=config.mode,
             lora_rank=config.lora_rank,
             preload_model=config.preload_model,
@@ -213,6 +228,26 @@ class Server:
         self.training_queue: asyncio.Queue = asyncio.Queue()
         self.training_event = asyncio.Event()
         self.training_lock = asyncio.Lock()
+
+    def _resolve_experiment_name(self, configured: str | None, mode: str) -> str:
+        name = (configured or "").strip()
+        if not name:
+            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            return f"{mode}_{stamp}"
+        sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in name)
+        return sanitized or f"{mode}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    def _resolve_state_path(self, configured: str | None) -> Path:
+        raw = (configured or "").strip()
+        if not raw:
+            return self.experiment_dir / "state.json"
+        return Path(raw).expanduser()
+
+    def _new_round_log_path(self, mode: str) -> str:
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = self.experiment_dir / mode / stamp
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
         
     def _build_app(self) -> FastAPI:
         app = FastAPI(title=self._TITLE, lifespan=lifespan)
@@ -622,7 +657,7 @@ class Server:
         )
         dataset, _ = dataset_builder()
 
-        log_path = f"logs/weight_dpo/{int(time.time())}"
+        log_path = self._new_round_log_path("dpo")
         trainer_config = DPOConfig(
             log_path=log_path,
             model_name=model_name,
@@ -657,7 +692,7 @@ class Server:
         return dataset, build
 
     def _prepare_reinforce(self, train_path: str, model_name: str, renderer_name: str):
-        log_path = f"logs/weight_reinforce/{int(time.time())}"
+        log_path = self._new_round_log_path("reinforce")
         is_online = self.config.reinforce_version == "online"
 
         if is_online:
@@ -760,7 +795,7 @@ class Server:
             extract_version=self.config.opd_extract_version,
         )
 
-        log_path = f"logs/weight_opd/{int(time.time())}"
+        log_path = self._new_round_log_path("opd")
         trainer_config = ArtifactOPDConfig(
             model_name=model_name,
             renderer_name=renderer_name,

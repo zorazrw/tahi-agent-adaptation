@@ -11,12 +11,16 @@
 #   HOLDOUT_LAST=1          # hold back the last session as test data
 #   WAIT_FOR_TRAINING=0     # enqueue all sessions without waiting/timing
 #   TRAINING_TIMEOUT_SECONDS=7200
+#   TRAINING_WINDOW_SESSIONS=2
+#   TRAINING_WINDOW_MIN_SESSIONS=2  # first min_sessions-1 uploads are warmup only
 set -euo pipefail
 
 PROXY_URL="${AGENT_COWORK_PROXY_URL:-http://localhost:8000}"
 HOLDOUT_LAST="${HOLDOUT_LAST:-0}"
 WAIT_FOR_TRAINING="${WAIT_FOR_TRAINING:-1}"
 TRAINING_TIMEOUT_SECONDS="${TRAINING_TIMEOUT_SECONDS:-7200}"
+TRAINING_WINDOW_SESSIONS="${TRAINING_WINDOW_SESSIONS:-0}"
+TRAINING_WINDOW_MIN_SESSIONS="${TRAINING_WINDOW_MIN_SESSIONS:-$TRAINING_WINDOW_SESSIONS}"
 
 shopt -s nullglob
 sessions=( scripts/sessions/*.json )
@@ -43,7 +47,9 @@ current_model_state() {
   curl -fsS "${PROXY_URL%/}/v1/tinker/current" 2>/dev/null || true
 }
 
+session_idx=0
 for task in "${sessions[@]:0:$upload_count}"; do
+  session_idx=$((session_idx + 1))
   echo "Uploading $task"
   before="$(current_model_state)"
   start_ts="$(date +%s)"
@@ -54,6 +60,12 @@ for task in "${sessions[@]:0:$upload_count}"; do
   echo
 
   if [ "$WAIT_FOR_TRAINING" != "1" ]; then
+    sleep 0.05
+    continue
+  fi
+
+  if [ "$TRAINING_WINDOW_MIN_SESSIONS" -gt 1 ] && [ "$session_idx" -lt "$TRAINING_WINDOW_MIN_SESSIONS" ]; then
+    echo "Warmup upload ${session_idx}/${upload_count}: sliding window has not reached min training sessions (${TRAINING_WINDOW_MIN_SESSIONS}); not waiting for model update."
     sleep 0.05
     continue
   fi
