@@ -8,19 +8,76 @@
 #
 # Environment:
 #   AGENT_COWORK_PROXY_URL=http://localhost:8000
+#   TRAINING_CONFIG=scripts/config-dpo-window-adj.yaml
 #   HOLDOUT_LAST=1          # hold back the last session as test data
 #   WAIT_FOR_TRAINING=0     # enqueue all sessions without waiting/timing
 #   TRAINING_TIMEOUT_SECONDS=7200
 #   TRAINING_WINDOW_SESSIONS=2
 #   TRAINING_WINDOW_MIN_SESSIONS=2  # first min_sessions-1 uploads are warmup only
+# If TRAINING_WINDOW_MIN_SESSIONS is unset, the script will try to infer it
+# from TRAINING_CONFIG. If TRAINING_CONFIG is also unset, it will scan
+# scripts/config*.yaml for a matching proxy_port.
 set -euo pipefail
 
 PROXY_URL="${AGENT_COWORK_PROXY_URL:-http://localhost:8000}"
+TRAINING_CONFIG="${TRAINING_CONFIG:-}"
 HOLDOUT_LAST="${HOLDOUT_LAST:-0}"
 WAIT_FOR_TRAINING="${WAIT_FOR_TRAINING:-1}"
 TRAINING_TIMEOUT_SECONDS="${TRAINING_TIMEOUT_SECONDS:-7200}"
 TRAINING_WINDOW_SESSIONS="${TRAINING_WINDOW_SESSIONS:-0}"
 TRAINING_WINDOW_MIN_SESSIONS="${TRAINING_WINDOW_MIN_SESSIONS:-$TRAINING_WINDOW_SESSIONS}"
+
+yaml_get_key() {
+  local file="$1"
+  local key="$2"
+  awk -F':' -v want="$key" '
+    $0 ~ "^[[:space:]]*" want "[[:space:]]*:" {
+      val = substr($0, index($0, ":") + 1)
+      sub(/[[:space:]]*#.*$/, "", val)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+      print val
+      exit
+    }
+  ' "$file"
+}
+
+infer_training_config_from_port() {
+  local port="$1"
+  local match=""
+  local file
+  for file in scripts/config*.yaml; do
+    [[ -f "$file" ]] || continue
+    local file_port
+    file_port="$(yaml_get_key "$file" "proxy_port")"
+    [[ "$file_port" == "$port" ]] || continue
+    if [[ -n "$(yaml_get_key "$file" "training_window_min_sessions")" ]]; then
+      echo "$file"
+      return 0
+    fi
+    if [[ -z "$match" ]]; then
+      match="$file"
+    fi
+  done
+  [[ -n "$match" ]] && echo "$match"
+}
+
+if [[ "$TRAINING_WINDOW_MIN_SESSIONS" == "0" ]]; then
+  inferred_port="${PROXY_URL##*:}"
+  inferred_port="${inferred_port%%/*}"
+  if [[ -z "$TRAINING_CONFIG" && -n "$inferred_port" ]]; then
+    TRAINING_CONFIG="$(infer_training_config_from_port "$inferred_port" || true)"
+  fi
+  if [[ -n "$TRAINING_CONFIG" && -f "$TRAINING_CONFIG" ]]; then
+    inferred_min="$(yaml_get_key "$TRAINING_CONFIG" "training_window_min_sessions")"
+    if [[ -z "$inferred_min" ]]; then
+      inferred_min="$(yaml_get_key "$TRAINING_CONFIG" "training_window_sessions")"
+    fi
+    if [[ -n "$inferred_min" && "$inferred_min" != "null" ]]; then
+      TRAINING_WINDOW_MIN_SESSIONS="$inferred_min"
+      echo "Inferred TRAINING_WINDOW_MIN_SESSIONS=${TRAINING_WINDOW_MIN_SESSIONS} from ${TRAINING_CONFIG}"
+    fi
+  fi
+fi
 
 shopt -s nullglob
 sessions=( scripts/sessions/*.json )

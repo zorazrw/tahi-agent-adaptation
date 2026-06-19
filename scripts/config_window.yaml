@@ -43,11 +43,13 @@ reinforce_rollout_sample_log_chars: 4000
 # -- Logging --
 wandb_project: null
 wandb_name: null
+log_root: logs/online_training
+experiment_name: null  # null => auto-create a timestamped experiment directory per server run
 
-preload_model: Qwen3.5-35B-A3B
+preload_model: Qwen3.6-35B-A3B
 
 # Separate state from server.py experiments
 proxy_host: localhost
 proxy_port: 8001
-state_path: scripts/state_window.json
+state_path: null  # null => store state under <log_root>/<experiment_name>/state.json
 block_during_training: true
