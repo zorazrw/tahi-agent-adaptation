@@ -1,13 +1,12 @@
-# Standard last-k DPO config for session-by-session streaming experiments.
-# This keeps only the fields needed by `server_lastk.py`.
+# Standard capped-replay DPO config for session-by-session streaming experiments.
+# This keeps only the fields needed by `server_capped_replay.py`.
 
 # -- Mode --
 mode: dpo
 
 # -- Update --
 update_every_n_sessions: 1
-training_window_sessions: 4
-training_window_min_sessions: 4
+training_min_sessions: 4
 training_session_max_uses: 4
 
 # -- Inference --
@@ -42,7 +41,7 @@ dpo_artifact_only_rollout_instruction: false
 wandb_project: null
 wandb_name: null
 log_root: logs/online_training
-experiment_name: null  # null => auto-create a timestamped experiment directory per server run
+experiment_name: null
 
 # -- Model lifecycle --
 preload_model: Qwen/Qwen3.6-35B-A3B
@@ -50,5 +49,5 @@ preload_model: Qwen/Qwen3.6-35B-A3B
 # -- Proxy Server --
 proxy_host: localhost
 proxy_port: 8002
-state_path: null  # null => store state under <log_root>/<experiment_name>/state.json
+state_path: null
 block_during_training: true

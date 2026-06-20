@@ -50,7 +50,7 @@ infer_training_config_from_port() {
     local file_port
     file_port="$(yaml_get_key "$file" "proxy_port")"
     [[ "$file_port" == "$port" ]] || continue
-    if [[ -n "$(yaml_get_key "$file" "training_window_min_sessions")" ]]; then
+    if [[ -n "$(yaml_get_key "$file" "training_min_sessions")" ]] || [[ -n "$(yaml_get_key "$file" "training_window_min_sessions")" ]]; then
       echo "$file"
       return 0
     fi
@@ -68,7 +68,13 @@ if [[ "$TRAINING_WINDOW_MIN_SESSIONS" == "0" ]]; then
     TRAINING_CONFIG="$(infer_training_config_from_port "$inferred_port" || true)"
   fi
   if [[ -n "$TRAINING_CONFIG" && -f "$TRAINING_CONFIG" ]]; then
-    inferred_min="$(yaml_get_key "$TRAINING_CONFIG" "training_window_min_sessions")"
+    inferred_min="$(yaml_get_key "$TRAINING_CONFIG" "training_min_sessions")"
+    if [[ -z "$inferred_min" ]]; then
+      inferred_min="$(yaml_get_key "$TRAINING_CONFIG" "training_window_min_sessions")"
+    fi
+    if [[ -z "$inferred_min" ]]; then
+      inferred_min="$(yaml_get_key "$TRAINING_CONFIG" "training_sample_sessions")"
+    fi
     if [[ -z "$inferred_min" ]]; then
       inferred_min="$(yaml_get_key "$TRAINING_CONFIG" "training_window_sessions")"
     fi

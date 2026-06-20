@@ -124,6 +124,14 @@ python3 scripts/server_window.py --config scripts/config_window.yaml
 
 Uses `training_window_sessions` and a separate port so it does not overwrite the default experiment state. By default, each server run gets its own timestamped experiment directory under `log_root`, and `state_path` is stored there unless you explicitly pin `experiment_name` or `state_path`.
 
+**Capped replay server** (train on all eligible previously seen sessions, separate from the default server):
+
+```bash
+python3 scripts/server_capped_replay.py --config scripts/config_capped_replay.yaml
+```
+
+Uses `training_min_sessions` and `training_session_max_uses`. Unlike the rolling window server, this mode trains on the full eligible session history rather than truncating to the most recent K sessions.
+
 `GET /healthz` returns `{"ok": true}` when the process is up.
 
 **Frontend**

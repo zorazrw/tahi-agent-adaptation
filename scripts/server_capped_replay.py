@@ -1,14 +1,14 @@
-"""Tinker proxy with capped last-K replay.
+"""Tinker proxy with capped replay over all previously seen sessions.
 
 This variant keeps the same HTTP API as ``server.py`` and ``server_window.py``.
-It stores submitted sessions in arrival order, then each training round selects
-the most recent K sessions whose replay count is still below
-``training_session_max_uses``. Selected sessions have their use count incremented
-when the round is drained for training.
+It stores submitted sessions in arrival order, then each training round uses
+the full eligible history, where eligibility means the session's replay count
+is still below ``training_session_max_uses``. Every eligible session included
+in a round has its use count incremented when the round is drained for training.
 
 Run::
 
-    python server_lastk.py --config config-dpo-lastk.yaml
+    python server_capped_replay.py --config config-dpo-capped-replay.yaml
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import asyncio
 import logging
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
 
 import uvicorn
 import yaml
@@ -31,18 +30,20 @@ _TRAIN_TRIGGER = object()
 
 
 @dataclass
-class LastKConfig(Config):
+class CappedReplayConfig(Config):
     """``Config`` plus capped replay controls."""
 
-    training_window_sessions: int = 4
-    training_window_min_sessions: int | None = None
+    training_min_sessions: int | None = None
     training_session_max_uses: int = 4
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "LastKConfig":
+    def from_yaml(cls, path: str | Path) -> "CappedReplayConfig":
         path = Path(path)
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
+        # Backward compatibility for older configs.
+        if "training_min_sessions" not in raw and "training_window_min_sessions" in raw:
+            raw["training_min_sessions"] = raw["training_window_min_sessions"]
         valid_keys = {fld.name for fld in fields(cls)}
         unknown = set(raw) - valid_keys
         if unknown:
@@ -50,25 +51,18 @@ class LastKConfig(Config):
         return cls(**{k: v for k, v in raw.items() if k in valid_keys})
 
 
-class LastKServer(Server):
-    """Train on the most recent K sessions that have not hit the replay cap."""
+class CappedReplayServer(Server):
+    """Train on all eligible previously seen sessions."""
 
-    def __init__(self, config: LastKConfig):
-        if config.training_window_sessions < 1:
-            raise ValueError("training_window_sessions must be >= 1")
+    def __init__(self, config: CappedReplayConfig):
         if config.training_session_max_uses < 1:
             raise ValueError("training_session_max_uses must be >= 1")
-        min_sessions = (
-            config.training_window_sessions
-            if config.training_window_min_sessions is None
-            else config.training_window_min_sessions
-        )
+        min_sessions = 1 if config.training_min_sessions is None else config.training_min_sessions
         if min_sessions < 1:
-            raise ValueError("training_window_min_sessions must be >= 1")
+            raise ValueError("training_min_sessions must be >= 1")
         super().__init__(config)
         self._min_training_sessions = min_sessions
-        # (order, session_id, payload) in arrival order.
-        self._session_history: list[tuple[int, str | None, dict[str, Any]]] = []
+        self._session_history: list[tuple[int, str | None, dict]] = []
         self._session_use_counts: dict[int, int] = {}
         self._next_order = 0
 
@@ -131,7 +125,7 @@ class LastKServer(Server):
                 self.sessions_queue.task_done()
 
     def _drain_queue(self) -> list:
-        """Consume triggers and return capped-replay payloads."""
+        """Consume triggers and return all currently eligible payloads."""
         cap = self.config.update_every_n_sessions
         n = 0
         while not self.training_queue.empty() and n < cap:
@@ -142,17 +136,12 @@ class LastKServer(Server):
             except asyncio.QueueEmpty:
                 break
 
-        k = self.config.training_window_sessions
         max_uses = self.config.training_session_max_uses
-        selected: list[tuple[int, str | None, dict[str, Any]]] = []
-        for record in reversed(self._session_history):
-            order, _sid, _data = record
-            if self._session_use_counts.get(order, 0) >= max_uses:
-                continue
-            selected.append(record)
-            if len(selected) >= k:
-                break
-        selected.reverse()
+        selected = [
+            record
+            for record in self._session_history
+            if self._session_use_counts.get(record[0], 0) < max_uses
+        ]
 
         for order, _sid, _data in selected:
             self._session_use_counts[order] = self._session_use_counts.get(order, 0) + 1
@@ -161,32 +150,31 @@ class LastKServer(Server):
             f"{order}:{sid or '?'}#{self._session_use_counts.get(order, 0)}"
             for order, sid, _ in selected
         )
-        eligible = sum(
-            1
-            for order, _sid, _data in self._session_history
-            if self._session_use_counts.get(order, 0) < max_uses
-        )
         log.info(
-            "Last-K training: using %d session(s), history=%d eligible=%d "
-            "K=%d max_uses=%d orders=[%s]",
+            "Capped replay training: using %d eligible session(s), history=%d "
+            "max_uses=%d orders=[%s]",
             len(selected),
             len(self._session_history),
-            eligible,
-            k,
             max_uses,
             orders,
         )
         return [data for _order, _sid, data in selected]
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tinker proxy with capped last-K replay")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Tinker proxy with capped replay over all eligible sessions"
+    )
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
     args = parser.parse_args()
     if not args.config.endswith(".yaml"):
         raise SystemExit("Config file must be a YAML file")
 
-    config = LastKConfig.from_yaml(args.config)
-    server = LastKServer(config)
+    config = CappedReplayConfig.from_yaml(args.config)
+    server = CappedReplayServer(config)
     app = server._build_app()
     uvicorn.run(app, host=config.proxy_host, port=config.proxy_port)
+
+
+if __name__ == "__main__":
+    main()
