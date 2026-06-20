@@ -204,6 +204,11 @@ cd $REPO_ROOT/scripts
 # Use --use-skyrl to avoid per-batch Tinker ref-logprob calls (~55% wall-clock savings)
 # epoch: 8 is a conservative middle ground — less verbatim memorisation than 20-40,
 #          but enough signal to learn style preferences (border removal, font size)
+# --pair-mode supports:
+#   "first_last"    → first revision vs last revision per file
+#   "adjacent"      → consecutive revision pairs
+#   "all_pairs"     → every earlier/later revision pair
+#   "min_gap_pairs" → every earlier/later pair with gap >= --pair-min-gap
 python -m weight.train.run_dpo \
   --train-path $TRAIN_DATA \
   --model-name Qwen/Qwen3.5-35B-A3B \

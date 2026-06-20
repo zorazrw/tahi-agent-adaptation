@@ -728,13 +728,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--pair-mode",
-        choices=["adjacent", "first_last"],
+        choices=["adjacent", "first_last", "all_pairs", "min_gap_pairs"],
         default="first_last",
         help=(
-            "DPO preference pair construction. Both modes scan the whole session "
+            "DPO preference pair construction. All modes scan the whole session "
             "by output filename (cross-unit). "
             "'first_last' (default): one pair per file, first write vs last write. "
-            "'adjacent': one pair per consecutive version step per file."
+            "'adjacent': one pair per consecutive version step per file. "
+            "'all_pairs': every ordered earlier/later version pair. "
+            "'min_gap_pairs': every earlier/later pair with version gap >= --pair-min-gap."
+        ),
+    )
+    parser.add_argument(
+        "--pair-min-gap",
+        type=int,
+        default=1,
+        help=(
+            "Minimum version-index gap used by --pair-mode min_gap_pairs. "
+            "For example, 3 keeps pairs such as (v0, v3) and (v1, v4). "
+            "Ignored by other pair modes."
         ),
     )
     parser.add_argument(
@@ -829,6 +841,7 @@ def main() -> None:
             train_path=args.train_path,
             test_path=args.test_path,
             pair_mode=args.pair_mode,
+            pair_min_gap=args.pair_min_gap,
             common_config=common_config,
         )
         dataset, _ = dataset_builder()

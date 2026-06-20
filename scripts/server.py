@@ -65,7 +65,8 @@ class Config:
 
     # -- DPO-specific --
     dpo_beta: float = 0.1
-    dpo_pair_mode: Literal["first_last", "adjacent"] = "first_last"
+    dpo_pair_mode: Literal["first_last", "adjacent", "all_pairs", "min_gap_pairs"] = "first_last"
+    dpo_pair_min_gap: int = 1
     dpo_rpo_alpha: float = 0.0
     dpo_use_ipo: bool = False
     dpo_online_rollout: bool = False
@@ -676,6 +677,7 @@ class Server:
             dataset_builder = WeightDPODataBuilder(
                 train_path=train_path,
                 pair_mode=self.config.dpo_pair_mode,
+                pair_min_gap=self.config.dpo_pair_min_gap,
                 common_config=ChatDatasetBuilderCommonConfig(
                     model_name_for_tokenizer=model_name,
                     renderer_name=renderer_name,
