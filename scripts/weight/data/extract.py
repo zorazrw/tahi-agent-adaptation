@@ -494,10 +494,55 @@ def _build_file_version_index(
     return file_index
 
 
+_DPO_PAIR_MODES: frozenset[str] = frozenset({
+    "adjacent",
+    "first_last",
+    "all_pairs",
+    "min_gap_pairs",
+})
+
+
+def _build_dpo_version_pairs(
+    versions: list[dict],
+    *,
+    pair_mode: str,
+    pair_min_gap: int,
+) -> list[tuple[dict, dict]]:
+    """Enumerate ordered ``(rejected, chosen)`` file-version pairs for DPO."""
+    if pair_mode not in _DPO_PAIR_MODES:
+        raise ValueError(
+            "pair_mode must be one of "
+            f"{sorted(_DPO_PAIR_MODES)}, got {pair_mode!r}"
+        )
+    if pair_min_gap < 1:
+        raise ValueError(f"pair_min_gap must be >= 1, got {pair_min_gap}")
+
+    if len(versions) < 2:
+        return []
+
+    if pair_mode == "first_last":
+        return [(versions[0], versions[-1])]
+    if pair_mode == "adjacent":
+        return [(versions[k], versions[k + 1]) for k in range(len(versions) - 1)]
+    if pair_mode == "all_pairs":
+        return [
+            (versions[a], versions[b])
+            for a in range(len(versions) - 1)
+            for b in range(a + 1, len(versions))
+        ]
+    return [
+        (versions[a], versions[b])
+        for a in range(len(versions) - 1)
+        for b in range(a + 1, len(versions))
+        if (b - a) >= pair_min_gap
+    ]
+
+
 def extract_dpo_pairs(
     sessions: list[dict],
     renderer: Any | None = None,
     pair_mode: str = "adjacent",
+    pair_min_gap: int = 1,
 ) -> list[dict[str, Any]]:
     """Extract DPO preference pairs from weight-format sessions.
 
@@ -517,6 +562,14 @@ def extract_dpo_pairs(
       k, chosen = version k+1, prompt = context at the time version k was
       written. Produces more pairs and preserves fine-grained preference signal.
 
+    - ``"all_pairs"``: every ordered pair ``(a, b)`` with ``a < b``. The
+      prompt always comes from version ``a``'s context.
+
+    - ``"min_gap_pairs"``: every ordered pair ``(a, b)`` with ``a < b`` and
+      ``b - a >= pair_min_gap``. This keeps only revision pairs that are at
+      least ``pair_min_gap`` iterations apart while still enumerating all
+      eligible later versions.
+
     Completions are artifact-only: each version is reconstructed as a single
     ``write`` tool_call. Pairs where either side has no string content are
     skipped. Files with only one version (no revisions) are skipped.
@@ -525,10 +578,13 @@ def extract_dpo_pairs(
 
         {prompt, chosen, rejected, chosen_is_agent, rejected_is_agent}
     """
-    if pair_mode not in {"adjacent", "first_last"}:
+    if pair_mode not in _DPO_PAIR_MODES:
         raise ValueError(
-            f"pair_mode must be 'adjacent' or 'first_last', got {pair_mode!r}"
+            "pair_mode must be one of "
+            f"{sorted(_DPO_PAIR_MODES)}, got {pair_mode!r}"
         )
+    if pair_min_gap < 1:
+        raise ValueError(f"pair_min_gap must be >= 1, got {pair_min_gap}")
 
     pairs: list[dict[str, Any]] = []
 
@@ -540,13 +596,11 @@ def extract_dpo_pairs(
             renderer,
         )
         for versions in file_index.values():
-            if len(versions) < 2:
-                continue
-
-            if pair_mode == "first_last":
-                candidates = [(versions[0], versions[-1])]
-            else:  # adjacent
-                candidates = [(versions[k], versions[k + 1]) for k in range(len(versions) - 1)]
+            candidates = _build_dpo_version_pairs(
+                versions,
+                pair_mode=pair_mode,
+                pair_min_gap=pair_min_gap,
+            )
 
             for rej, cho in candidates:
                 rej_msgs, rej_is_agent = _build_artifact_completion(
@@ -1525,13 +1579,25 @@ def main() -> None:
     parser.add_argument("-o", "--output", default=None, help="Write JSON output to file")
     parser.add_argument(
         "--pair-mode",
-        choices=["adjacent", "first_last"],
+        choices=["adjacent", "first_last", "all_pairs", "min_gap_pairs"],
         default="first_last",
         help=(
             "Pair construction mode for DPO and OPD (ignored for reinforce). "
-            "Both modes scan the whole session by file (cross-unit). "
+            "All DPO modes scan the whole session by file (cross-unit). "
             "'first_last' = one pair per file, first write vs last write (default). "
-            "'adjacent' = one pair per consecutive version step per file."
+            "'adjacent' = one pair per consecutive version step per file. "
+            "'all_pairs' = every earlier/later revision pair per file. "
+            "'min_gap_pairs' = earlier/later pairs whose version gap is at least "
+            "--pair-min-gap. OPD still accepts only first_last/adjacent."
+        ),
+    )
+    parser.add_argument(
+        "--pair-min-gap",
+        type=int,
+        default=1,
+        help=(
+            "Minimum version-index gap used by --pair-mode min_gap_pairs. "
+            "Ignored by other modes."
         ),
     )
     parser.add_argument(
@@ -1560,7 +1626,11 @@ def main() -> None:
         sessions = [sessions]
 
     if args.mode == "dpo":
-        units = extract_dpo_pairs(sessions, pair_mode=args.pair_mode)
+        units = extract_dpo_pairs(
+            sessions,
+            pair_mode=args.pair_mode,
+            pair_min_gap=args.pair_min_gap,
+        )
         print(f"Extracted {len(units)} DPO pairs")
         for i, u in enumerate(units):
             print(f"\n── Pair {i} ──")
