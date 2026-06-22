@@ -37,6 +37,7 @@ trash/*
 **/__pycache__/
 scripts/**/*.json
 scripts/runs
+scripts/brain
 scripts/config*
 !scripts/config_lastk.yaml
 runs/*

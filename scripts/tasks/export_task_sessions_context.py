@@ -64,9 +64,11 @@ step is its own agent task_unit, followed by execution agent units.
 
 Usage:
   conda activate code   # optional: use "code" env
-  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID]
+  python export_task_sessions.py [--db PATH] [--output FILE] [--session-id ID] [--task-category CATEGORY]
   # Use AGENT_COWORK_DB to override DB path:
   AGENT_COWORK_DB=/path/to/sessions.db python export_task_sessions.py
+  # Only abstract-writing sessions:
+  python export_task_sessions.py --task-category abstract-writing -o out.json
 """
 
 from __future__ import annotations
@@ -3542,6 +3544,223 @@ def build_weight_based_session(
     return result
 
 
+def _last_workflow_node_verifiers(workflow: Any) -> Tuple[Tuple[str, str], ...]:
+    """Verifiers on the last top-level ``workflow`` node (criterion + status)."""
+    if not isinstance(workflow, list) or not workflow:
+        return ()
+    last = workflow[-1]
+    if not isinstance(last, dict):
+        return ()
+    vs = last.get("verifiers") or []
+    return tuple(
+        (str(v.get("criterion", "")), str(v.get("status", "")))
+        for v in vs
+        if isinstance(v, dict)
+    )
+
+
+def _last_workflow_node_description(workflow: Any) -> str:
+    if not isinstance(workflow, list) or not workflow:
+        return ""
+    last = workflow[-1]
+    if not isinstance(last, dict):
+        return ""
+    return str(last.get("description", "")).strip()
+
+
+def _last_workflow_node_criteria(workflow: Any) -> Tuple[str, ...]:
+    return tuple(c for c, _ in _last_workflow_node_verifiers(workflow))
+
+
+def _collect_last_node_verifier_versions(session: dict) -> List[Tuple[Tuple[str, str], ...]]:
+    """Distinct last-node verifier snapshots in task_unit order (first appearance per criteria set)."""
+    seen: Set[Tuple[str, ...]] = set()
+    versions: List[Tuple[Tuple[str, str], ...]] = []
+    for unit in session.get("task_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        env = unit.get("environment")
+        if not isinstance(env, dict):
+            continue
+        sig = _last_workflow_node_verifiers(env.get("workflow"))
+        if not sig:
+            continue
+        crit = tuple(c for c, _ in sig)
+        if crit in seen:
+            continue
+        seen.add(crit)
+        versions.append(sig)
+    return versions
+
+
+def _verifier_status_glyph(status: str) -> str:
+    s = status.strip().lower()
+    if s == "success":
+        return "✓"
+    if s == "failure":
+        return "✗"
+    if s == "unchecked":
+        return "○"
+    return "·"
+
+
+def log_exported_session_verifier_versions(sessions: List[dict]) -> None:
+    """Pretty-print each exported session's uuid and last-workflow-node verifier versions."""
+    if not sessions:
+        logger.info("No exported sessions.")
+        return
+
+    bar = "═" * 72
+    for sess in sessions:
+        uuid = str(sess.get("uuid", "?"))
+        name = str(sess.get("name", "")).strip()
+        versions = _collect_last_node_verifier_versions(sess)
+
+        step_desc = ""
+        for unit in sess.get("task_units") or []:
+            if not isinstance(unit, dict):
+                continue
+            env = unit.get("environment")
+            if not isinstance(env, dict):
+                continue
+            desc = _last_workflow_node_description(env.get("workflow"))
+            if desc:
+                step_desc = desc
+                break
+
+        logger.info("")
+        logger.info(bar)
+        logger.info("Session %s", uuid)
+        if name:
+            logger.info("  %s", name)
+        if step_desc:
+            logger.info("  Last workflow step: %s", step_desc)
+        logger.info("  Verifier versions: %d", len(versions))
+
+        if not versions:
+            logger.info("  (no verifiers on last workflow node)")
+            continue
+
+        for i, verifiers in enumerate(versions, start=1):
+            logger.info("")
+            logger.info("  ── Version %d (%d criteria) ──", i, len(verifiers))
+            for criterion, status in verifiers:
+                glyph = _verifier_status_glyph(status)
+                logger.info("    %s [%s] %s", glyph, status, criterion)
+
+    logger.info("")
+    logger.info(bar)
+    logger.info("Logged verifier versions for %d exported session(s)", len(sessions))
+
+
+def _session_last_node_verifiers_unchanged_first_to_last(session: dict) -> bool:
+    """True when workflow[-1] criteria at the first and last task_unit snapshots match."""
+    first: Tuple[str, ...] = ()
+    last: Tuple[str, ...] = ()
+    for unit in session.get("task_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        env = unit.get("environment")
+        if not isinstance(env, dict):
+            continue
+        crit = _last_workflow_node_criteria(env.get("workflow"))
+        if not crit:
+            continue
+        if not first:
+            first = crit
+        last = crit
+    if not first:
+        return True
+    return first == last
+
+
+def filter_sessions_with_unchanged_workflow_verifiers(sessions: List[dict]) -> List[dict]:
+    """Drop sessions whose last workflow node's verifiers are unchanged (first vs last snapshot)."""
+    kept: List[dict] = []
+    removed = 0
+    for sess in sessions:
+        if _session_last_node_verifiers_unchanged_first_to_last(sess):
+            removed += 1
+            logger.info(
+                "Skipping session %s (%s): last workflow node verifiers unchanged "
+                "(first and last snapshot match)",
+                sess.get("uuid", "?"),
+                sess.get("name", ""),
+            )
+        else:
+            kept.append(sess)
+    if removed:
+        logger.info(
+            "Filtered %d session(s) with unchanged last-node verifiers (%d kept)",
+            removed,
+            len(kept),
+        )
+    return kept
+
+
+def _session_user_unit_count(session: dict) -> int:
+    return sum(
+        1
+        for unit in session.get("task_units") or []
+        if isinstance(unit, dict) and unit.get("actor") == "user"
+    )
+
+
+def filter_sessions_without_follow_up_user_actions(sessions: List[dict]) -> List[dict]:
+    """Drop sessions with only the initial user message (fewer than 2 user task_units)."""
+    kept: List[dict] = []
+    removed = 0
+    for sess in sessions:
+        n_user = _session_user_unit_count(sess)
+        if n_user < 2:
+            removed += 1
+            logger.info(
+                "Skipping session %s (%s): only %d user action(s) (need at least 2)",
+                sess.get("uuid", "?"),
+                sess.get("name", ""),
+                n_user,
+            )
+        else:
+            kept.append(sess)
+    if removed:
+        logger.info(
+            "Filtered %d session(s) without follow-up user actions (%d kept)",
+            removed,
+            len(kept),
+        )
+    return kept
+
+
+TASK_CATEGORIES = ("abstract-writing", "data-viz-html")
+
+
+def filter_sessions_by_task_category(sessions: List[dict], category: str) -> List[dict]:
+    """Keep only sessions whose ``expertise_task`` matches ``category``."""
+    kept: List[dict] = []
+    removed = 0
+    for sess in sessions:
+        et = sess.get("expertise_task")
+        if isinstance(et, str) and et.strip() == category:
+            kept.append(sess)
+        else:
+            removed += 1
+            logger.info(
+                "Skipping session %s (%s): expertise_task=%r (want %r)",
+                sess.get("uuid", "?"),
+                sess.get("name", ""),
+                et,
+                category,
+            )
+    if removed:
+        logger.info(
+            "Filtered %d session(s) outside task category %r (%d kept)",
+            removed,
+            category,
+            len(kept),
+        )
+    return kept
+
+
 def extract_all_sessions_weight_based(
     cursor: sqlite3.Cursor, *, db_root: Optional[Path] = None
 ) -> List[dict]:
@@ -3571,7 +3790,14 @@ def main() -> int:
     parser.add_argument("--db", type=Path, help="Path to sessions.db (default: Electron userData location)")
     parser.add_argument("--output", "-o", type=Path, help="Output single JSON file (default: stdout)")
     parser.add_argument("--session-id", type=str, help="Export only this session ID")
+    parser.add_argument(
+        "--task-category",
+        choices=TASK_CATEGORIES,
+        help="Only export sessions with this expertise_task value (default: all categories)",
+    )
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     db_path = args.db or get_default_db_path()
     if not db_path or not db_path.exists():
@@ -3596,6 +3822,13 @@ def main() -> int:
             payload = [sess]
         else:
             payload = extract_all_sessions_weight_based(cursor, db_root=db_root)
+
+        payload = filter_sessions_with_unchanged_workflow_verifiers(payload)
+        payload = filter_sessions_without_follow_up_user_actions(payload)
+        if args.task_category:
+            payload = filter_sessions_by_task_category(payload, args.task_category)
+
+        log_exported_session_verifier_versions(payload)
 
         json_str = json.dumps(payload, indent=2, ensure_ascii=False)
         if args.output:
