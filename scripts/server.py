@@ -14,6 +14,15 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+def _default_config_label(path: "Path", mode: str) -> str:
+    stem = path.stem.strip()
+    for prefix in ("config-", "config_"):
+        if stem.startswith(prefix):
+            stem = stem[len(prefix):]
+            break
+    return stem or mode
+
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Literal
@@ -148,6 +157,7 @@ class Config:
     wandb_name: str | None = None
     log_root: str = "logs/online_training"
     experiment_name: str | None = None
+    config_name: str | None = None
 
     # -- Proxy Server --
     proxy_host: str = "localhost"
@@ -171,6 +181,8 @@ class Config:
         path = Path(path)
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
+        if not raw.get("config_name"):
+            raw["config_name"] = _default_config_label(path, raw.get("mode", cls.mode))
         valid_keys = {fld.name for fld in fields(cls)}
         unknown = set(raw) - valid_keys
         if unknown:
@@ -210,7 +222,11 @@ class Server:
             raise RuntimeError("TINKER_API_KEY environment variable is required")
 
         self.config = config
-        self.experiment_name = self._resolve_experiment_name(config.experiment_name, config.mode)
+        self.experiment_name = self._resolve_experiment_name(
+            config.experiment_name,
+            config.mode,
+            config.config_name,
+        )
         self.experiment_dir = Path(config.log_root).expanduser() / self.experiment_name
         self.experiment_dir.mkdir(parents=True, exist_ok=True)
         resolved_state_path = self._resolve_state_path(config.state_path)
@@ -237,12 +253,21 @@ class Server:
         self.training_event = asyncio.Event()
         self.training_lock = asyncio.Lock()
 
-    def _resolve_experiment_name(self, configured: str | None, mode: str) -> str:
+    def _resolve_experiment_name(
+        self,
+        configured: str | None,
+        mode: str,
+        config_name: str | None,
+    ) -> str:
+        def _sanitize(value: str) -> str:
+            return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
+
         name = (configured or "").strip()
         if not name:
             stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            return f"{mode}_{stamp}"
-        sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in name)
+            prefix = _sanitize((config_name or mode).strip()) or mode
+            return f"{prefix}_{stamp}"
+        sanitized = _sanitize(name)
         return sanitized or f"{mode}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     def _resolve_state_path(self, configured: str | None) -> Path:

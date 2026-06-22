@@ -23,7 +23,7 @@ from typing import Any
 import uvicorn
 import yaml
 
-from server import Config, Server
+from server import Config, Server, _default_config_label
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +43,8 @@ class LastKConfig(Config):
         path = Path(path)
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
+        if not raw.get("config_name"):
+            raw["config_name"] = _default_config_label(path, raw.get("mode", cls.mode))
         valid_keys = {fld.name for fld in fields(cls)}
         unknown = set(raw) - valid_keys
         if unknown:
