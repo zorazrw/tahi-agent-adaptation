@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Grade a redo session's final artifacts against rubrics from ``verifiers.json``.
+Grade redo session final artifacts against rubrics from ``verifiers.json``.
 
 Matches rubrics by instruction overlap. Sends only the file(s) required by the **last**
 workflow step (walking back one step if that step has no ``outputFiles``). Calls the
 verifier LM once (Haiku by default) and prints per-criterion PASS/FAIL plus average success rate.
 
+Grades every session in the JSON by default. Pass ``--session-id`` to grade one session.
+
 Examples:
   python scripts/tools/grade_redo.py -j runs/.../session.json --verifiers verifiers.json
-  python scripts/tools/grade_redo.py -j session.json --dry-run --log-file grade_report.txt
+  python scripts/tools/grade_redo.py -j sessions.json --dry-run --log-file grade_report.txt
+  python scripts/tools/grade_redo.py -j sessions.json --session-id <uuid> --verifiers verifiers.json
   python scripts/tools/grade_redo.py -j session.json --verifiers verifiers.json \
       --backend openai --model gpt-4.1-mini --json-out ratings.json
 """
@@ -95,16 +98,16 @@ def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_session(path: Path) -> dict[str, Any]:
-    raw = load_json(path)
-    if isinstance(raw, list) and raw:
-        return raw[0]
-    if isinstance(raw, dict):
-        sessions = raw.get("sessions")
-        if isinstance(sessions, list) and sessions:
-            return sessions[0]
-        return raw
-    raise ValueError(f"{path.name}: expected a session object")
+def resolve_sessions(sessions: list[dict[str, Any]], session_id: str | None) -> list[dict[str, Any]]:
+    if not sessions:
+        raise SystemExit("No sessions in JSON.")
+    if session_id and str(session_id).strip():
+        sid = str(session_id).strip()
+        for session in sessions:
+            if session.get("uuid") == sid:
+                return [session]
+        raise SystemExit(f"No session with uuid {sid!r}")
+    return sessions
 
 
 def load_catalog(path: Path) -> list[dict[str, Any]]:
@@ -566,6 +569,10 @@ def grade_openai(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-j", "--session-json", type=Path, required=True)
+    p.add_argument(
+        "--session-id",
+        help="Grade only the session with this uuid (default: grade all sessions in the JSON)",
+    )
     p.add_argument("--verifiers", type=Path, default=Path("verifiers.json"))
     p.add_argument("--min-overlap", type=float, default=0.55)
     p.add_argument("--backend", choices=["anthropic", "openai"], default="anthropic")
@@ -591,106 +598,123 @@ def main(argv: list[str] | None = None) -> int:
 
     session_path = resolve_path(args.session_json)
     verifiers_path = resolve_path(args.verifiers)
-    session = load_session(session_path)
-    instruction = session_instruction(session)
-    if not instruction:
-        raise SystemExit("No initial task instruction in session JSON.")
+    sessions = resolve_sessions(extract_verifiers.load_sessions_from_path(session_path), args.session_id)
+    catalog = load_catalog(verifiers_path)
 
-    entry, overlap = match_rubrics(load_catalog(verifiers_path), instruction, args.min_overlap)
-    criteria = criteria_list(entry)
-    files, required_paths = grading_artifact_blocks(session)
-    if not criteria:
-        raise SystemExit("Matched rubric entry has no criteria.")
+    anthropic_client: Any | None = None
+    if not args.dry_run and args.backend == "anthropic":
+        import induce  # noqa: PLC0415
 
-    last_step = (final_workflow_nodes(session) or [None])[-1]
-    last_step_desc = ""
-    if isinstance(last_step, dict):
-        last_step_desc = str(last_step.get("description") or "").strip()
+        cfg = induce.resolve_anthropic_config(
+            skip_api_config=args.no_api_config,
+            skip_claude_settings=args.no_claude_settings,
+        )
+        anthropic_client = induce.make_anthropic_client(cfg)
 
-    report: dict[str, Any] = {
-        "session_uuid": session.get("uuid"),
-        "session_name": session.get("name"),
-        "matched_verifier_uuid": entry.get("uuid"),
-        "instruction_overlap": round(overlap, 4),
-        "last_workflow_step": last_step_desc,
-        "required_output_files": required_paths,
-        "grading_files": [path for path, _ in files],
-        "verifiers": criteria,
-    }
-
+    reports: list[dict[str, Any]] = []
     with tee_stdout(args.log_file):
-        if args.dry_run:
-            print_summary(
-                session=session, entry=entry, overlap=overlap, files=files, criteria_count=len(criteria)
-            )
-        else:
-            if args.backend == "openai":
-                model = args.model or DEFAULT_OPENAI_MODEL
-                labels, raw_response = grade_openai(
-                    criteria,
-                    files,
-                    model=model,
-                    api_key=args.api_key,
-                    base_url=args.base_url,
-                    request_timeout=args.request_timeout,
-                    max_retries=args.max_retries,
-                    max_tokens=args.max_tokens,
-                    debug_prompts=args.debug_prompts,
+        for i, session in enumerate(sessions):
+            if i:
+                print("\n" + "=" * 72 + "\n")
+
+            instruction = session_instruction(session)
+            if not instruction:
+                raise SystemExit("No initial task instruction in session JSON.")
+
+            entry, overlap = match_rubrics(catalog, instruction, args.min_overlap)
+            criteria = criteria_list(entry)
+            files, required_paths = grading_artifact_blocks(session)
+            if not criteria:
+                raise SystemExit("Matched rubric entry has no criteria.")
+
+            last_step = (final_workflow_nodes(session) or [None])[-1]
+            last_step_desc = ""
+            if isinstance(last_step, dict):
+                last_step_desc = str(last_step.get("description") or "").strip()
+
+            report: dict[str, Any] = {
+                "session_uuid": session.get("uuid"),
+                "session_name": session.get("name"),
+                "matched_verifier_uuid": entry.get("uuid"),
+                "instruction_overlap": round(overlap, 4),
+                "last_workflow_step": last_step_desc,
+                "required_output_files": required_paths,
+                "grading_files": [path for path, _ in files],
+                "verifiers": criteria,
+            }
+
+            if args.dry_run:
+                print_summary(
+                    session=session, entry=entry, overlap=overlap, files=files, criteria_count=len(criteria)
                 )
             else:
-                import induce  # noqa: PLC0415
+                if args.backend == "openai":
+                    model = args.model or DEFAULT_OPENAI_MODEL
+                    labels, raw_response = grade_openai(
+                        criteria,
+                        files,
+                        model=model,
+                        api_key=args.api_key,
+                        base_url=args.base_url,
+                        request_timeout=args.request_timeout,
+                        max_retries=args.max_retries,
+                        max_tokens=args.max_tokens,
+                        debug_prompts=args.debug_prompts,
+                    )
+                else:
+                    model = args.model or DEFAULT_MODEL
 
-                cfg = induce.resolve_anthropic_config(
-                    skip_api_config=args.no_api_config,
-                    skip_claude_settings=args.no_claude_settings,
+                    if args.debug_prompts:
+                        for j, block in enumerate(build_message_content(criteria, files)):
+                            print(f"[{j}] {block.get('type')}", file=sys.stderr)
+
+                    labels, raw_response = grade(
+                        criteria, files, client=anthropic_client, model=model, max_tokens=args.max_tokens
+                    )
+                results = [{"index": j, "criterion": c, "pass": labels[j]} for j, c in enumerate(criteria)]
+
+                n_pass = sum(1 for x in labels if x is True)
+                n_fail = sum(1 for x in labels if x is False)
+                n_unknown = len(labels) - n_pass - n_fail
+                total = len(criteria)
+                rate = n_pass / total if total else 0.0
+
+                for j, (c, lab) in enumerate(zip(criteria, labels)):
+                    print(f"[{j:02d}] {label_tag(lab)} - {c}")
+
+                print()
+                print_summary(
+                    session=session,
+                    entry=entry,
+                    overlap=overlap,
+                    files=files,
+                    criteria_count=total,
+                    model=model,
                 )
-                model = args.model or DEFAULT_MODEL
-                client = induce.make_anthropic_client(cfg)
+                print(f"pass/fail/unknown: {n_pass}/{n_fail}/{n_unknown} of {total}")
+                print(f"average_success_rate: {n_pass}/{total} = {rate:.4f}")
+                if n_unknown and (n_pass + n_fail):
+                    print(
+                        f"average_success_rate (scored only): {n_pass}/{n_pass + n_fail} = {n_pass / (n_pass + n_fail):.4f}"
+                    )
 
-                if args.debug_prompts:
-                    for i, block in enumerate(build_message_content(criteria, files)):
-                        print(f"[{i}] {block.get('type')}", file=sys.stderr)
+                report |= {
+                    "backend": args.backend,
+                    "model": model,
+                    "raw_response": raw_response,
+                    "results": results,
+                    "n_pass": n_pass,
+                    "n_fail": n_fail,
+                    "n_unknown": n_unknown,
+                    "average_success_rate": round(rate, 4),
+                }
 
-                labels, raw_response = grade(criteria, files, client=client, model=model, max_tokens=args.max_tokens)
-            results = [{"index": i, "criterion": c, "pass": labels[i]} for i, c in enumerate(criteria)]
-
-            n_pass = sum(1 for x in labels if x is True)
-            n_fail = sum(1 for x in labels if x is False)
-            n_unknown = len(labels) - n_pass - n_fail
-            total = len(criteria)
-            rate = n_pass / total if total else 0.0
-
-            for i, (c, lab) in enumerate(zip(criteria, labels)):
-                print(f"[{i:02d}] {label_tag(lab)} - {c}")
-
-            print()
-            print_summary(
-                session=session,
-                entry=entry,
-                overlap=overlap,
-                files=files,
-                criteria_count=total,
-                model=model,
-            )
-            print(f"pass/fail/unknown: {n_pass}/{n_fail}/{n_unknown} of {total}")
-            print(f"average_success_rate: {n_pass}/{total} = {rate:.4f}")
-            if n_unknown and (n_pass + n_fail):
-                print(f"average_success_rate (scored only): {n_pass}/{n_pass + n_fail} = {n_pass / (n_pass + n_fail):.4f}")
-
-            report |= {
-                "backend": args.backend,
-                "model": model,
-                "raw_response": raw_response,
-                "results": results,
-                "n_pass": n_pass,
-                "n_fail": n_fail,
-                "n_unknown": n_unknown,
-                "average_success_rate": round(rate, 4),
-            }
+            reports.append(report)
 
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        args.json_out.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        payload: Any = reports[0] if len(reports) == 1 else reports
+        args.json_out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"Wrote JSON to {args.json_out}", file=sys.stderr)
 
     if args.log_file:
