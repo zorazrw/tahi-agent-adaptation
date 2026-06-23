@@ -47,15 +47,46 @@ def _load_sessions_file(path: Path) -> list[dict[str, Any]]:
     raise ValueError(f"{path.name}: JSON root must be a session object or array")
 
 
-def session_instruction(session: dict[str, Any]) -> str:
-    raw = session.get("initial_task_instruction")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
+def _parse_action_message_payload(action: str) -> str | None:
+    """Parse a leading ``message("...")`` segment and return decoded text."""
+    if not isinstance(action, str):
+        return None
+    s = action.strip()
+    if not (s.startswith("message(") and s.endswith(")")):
+        return None
+    inner = s[len("message(") : -1].strip()
+    if len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+        try:
+            return str(json.loads(inner))
+        except json.JSONDecodeError:
+            return inner[1:-1]
+    return inner or None
 
-    for task in session.get("task_units") or []:
-        if not isinstance(task, dict):
+
+def _instruction_from_trajectory_steps(steps: list[Any]) -> str:
+    for step in steps:
+        if not isinstance(step, dict):
             continue
-        for traj in task.get("agent_trajectories") or []:
+        msg = _parse_action_message_payload(step.get("action", ""))
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
+    return ""
+
+
+def session_instruction(session: dict[str, Any]) -> str:
+    for key in ("initial_task_instruction", "task"):
+        raw = session.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+
+    for unit in session.get("task_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if unit.get("actor") == "user":
+            found = _instruction_from_trajectory_steps(unit.get("trajectory") or [])
+            if found:
+                return found
+        for traj in unit.get("agent_trajectories") or []:
             if not isinstance(traj, dict):
                 continue
             for m in traj.get("messages") or []:
@@ -69,14 +100,9 @@ def session_instruction(session: dict[str, Any]) -> str:
         for step in traj:
             if not isinstance(step, dict) or step.get("actor") != "user":
                 continue
-            action = step.get("action")
-            if isinstance(action, str) and action.startswith('message("'):
-                # message("...") — best-effort unwrap
-                inner = action[len('message("') :]
-                if inner.endswith('")'):
-                    inner = inner[:-2]
-                if inner.strip():
-                    return inner.strip()
+            msg = _parse_action_message_payload(step.get("action", ""))
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()
     return ""
 
 
