@@ -267,7 +267,12 @@ class HeadlessSessionRuntime {
     }
   };
 
-  async runPrompt(prompt: string, session: Session, branchEntryId?: string): Promise<RunOutcome> {
+  async runPrompt(
+    prompt: string,
+    session: Session,
+    branchEntryId?: string,
+    preserveExistingWorkflow?: boolean
+  ): Promise<RunOutcome> {
     this.lastError = undefined;
     const result = new Promise<RunOutcome>((resolve) => {
       this.waiter = resolve;
@@ -276,6 +281,7 @@ class HeadlessSessionRuntime {
       prompt,
       session,
       branchEntryId,
+      preserveExistingWorkflow,
       bashEnv: this.bashEnv,
       onEvent: this.emit,
       onSessionUpdate: (updates) => this.store.updateSession(session.id, updates),
@@ -299,7 +305,7 @@ class HeadlessSessionRuntime {
     );
     const headlessPrompt = addHeadlessExecutionNote(prompt);
     this.emit({ type: "stream.user_prompt", payload: { sessionId: session.id, prompt: headlessPrompt } });
-    return await this.runPrompt(headlessPrompt, session);
+    return await this.runPrompt(headlessPrompt, session, undefined, true);
   }
 
   private finish(outcome: RunOutcome): void {
