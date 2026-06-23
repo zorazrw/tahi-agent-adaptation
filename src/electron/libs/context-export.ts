@@ -217,6 +217,16 @@ function scriptsRootDir(): string | null {
 }
 
 function pythonExecutable(): string {
+  const root = scriptsRootDir();
+  if (root) {
+    const venvPy =
+      process.platform === "win32"
+        ? join(root, ".venv", "Scripts", "python.exe")
+        : join(root, ".venv", "bin", "python3");
+    const venvPyAlt = join(root, ".venv", "bin", "python");
+    if (existsSync(venvPy)) return venvPy;
+    if (existsSync(venvPyAlt)) return venvPyAlt;
+  }
   return process.platform === "win32" ? "python" : "python3";
 }
 

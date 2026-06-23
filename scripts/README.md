@@ -55,7 +55,7 @@ python scripts/tools/session_file_versions_to_gif.py -j sessions/export.json -s 
 
 ## Context-Based Update
 
-`induce.py` is a standalone Python 3 script (stdlib only) to extract memories and skills from session JSON (e.g. ``memories/{task-name}.md`` and ``skills/{task-name}.md``).
+`induce.py` extracts memories and skills from session JSON (e.g. ``memories/{task-name}.md`` and ``skills/{task-name}.md``). The Electron app runs it via the brain icon; you can also invoke it from the CLI.
 
 **Usage:**
 
@@ -98,7 +98,6 @@ python3 -m scripts.weight.train.run_reinforce \
 **Prerequisites**
 
 - Set `TINKER_API_KEY` in the environment (or `.env` under the root directory).
-- Install the dependencies: `pip install -r scripts/requirements.txt`
 
 **Configuration**
 

@@ -1,5 +1,6 @@
 pyyaml
 uvicorn
+anthropic
 openai
 fastapi
 tinker>=0.22.3

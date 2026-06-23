@@ -42,5 +42,6 @@ scripts/config*
 !scripts/config_lastk.yaml
 runs/*
 
-# Local Tinker bridge environment
+# Local Python environments
+scripts/.venv/
 tinker-bridge/.venv/
