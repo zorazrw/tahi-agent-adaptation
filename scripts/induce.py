@@ -255,13 +255,16 @@ def _tool_result_prefix(action: str) -> str:
     return "[USER EDIT — infer preferences from these changes]\n"
 
 
+_QUOTE_COMMENT_RE = re.compile(r"Quote\s*\(")
+
+
 def _is_msg_only_user_action(action: str) -> bool:
     a = action.strip()
-    return (
-        _is_user_message_action(a)
-        or a.startswith("edit_verifier(")
-        or any(a.startswith(p) for p in _PLAN_EDIT_PREFIXES)
-    )
+    if _is_user_message_action(a):
+        # Inline file-quote comments (e.g. "Human comments on text files:\nQuote (from abstract.md)")
+        # are not user-authored preferences; skip them like edit/brain_edit actions.
+        return _QUOTE_COMMENT_RE.search(a) is None
+    return a.startswith("edit_verifier(") or any(a.startswith(p) for p in _PLAN_EDIT_PREFIXES)
 
 
 def _format_action_entry(entry: dict[str, str], *, include_tool_result: bool = False) -> str:
@@ -715,7 +718,7 @@ def main() -> None:
         "--msg_only",
         action="store_true",
         help="Only user message(...), edit_workflow()/edit_plan(), and edit_verifier() actions; "
-        "drop other user actions (edit, brain_edit, etc.)",
+        "drop other user actions (edit, brain_edit, etc.) and message actions containing Quote(",
     )
     p.add_argument(
         "--memory_only",
