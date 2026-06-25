@@ -40,6 +40,7 @@ scripts/runs
 scripts/config*
 !scripts/config_lastk.yaml
 runs/*
+scripts/eval.sh
 
 # Local Tinker bridge environment
 tinker-bridge/.venv/

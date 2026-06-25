@@ -29,7 +29,11 @@ from tinker_cookbook import renderers
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from weight.train.formatter import WeightDPODataBuilder, WeightReinforceDataBuilder
-from weight.train.run_dpo import Config as DPOConfig, OnlineDPOAcceptedDataset
+from weight.train.run_dpo import (
+    Config as DPOConfig,
+    OnlineDPOAcceptedDataset,
+    OnlineDPOAgenticDataset,
+)
 from weight.train.run_reinforce import Config as ReinforceConfig, OnlineReinforceRolloutDataset
 from weight.train.run_opd import Config as ArtifactOPDConfig, OnlineOPDRolloutDataset
 
@@ -75,6 +79,35 @@ class Config:
     dpo_log_rollout_samples: bool = True
     dpo_rollout_sample_log_chars: int = 4000
     dpo_artifact_only_rollout_instruction: bool = False
+
+    # -- DPO agentic mode (dpo_agentic_rollout=True) --
+    # The rejected side is produced by a full multi-turn tool-using rollout in a
+    # live sandbox; the student's final artifact (matched to the chosen file by
+    # basename) becomes the rejected write. Only the artifact write is trained on.
+    dpo_agentic_rollout: bool = False
+    # "on_policy": refresh the sampler each step so negatives track the current
+    # policy. "off_policy": keep the frozen initial snapshot (== reference model)
+    # for the whole run, using rollouts as a one-shot negative-augmentation source.
+    dpo_agentic_policy_mode: Literal["on_policy", "off_policy"] = "on_policy"
+    dpo_agentic_num_rollouts: int = 1        # parallel rejected rollouts per session
+    # batch_size is the target #preference-pairs per batch; each batch draws
+    # batch_size // dpo_agentic_pairs_per_session sessions, each contributing
+    # exactly that many pairs (subsampled if it yields more, oversampled if fewer).
+    dpo_agentic_pairs_per_session: int = 1
+    # extra sessions fetched per batch to replace sessions that yield zero pairs
+    dpo_agentic_session_reserve: int = 0
+    # cap on rollouts running concurrently (0 = unlimited); bounds peak memory
+    dpo_agentic_max_concurrent_rollouts: int = 0
+    # min content-similarity (0..1) for matching a student file to a chosen
+    # artifact by content/type rather than filename (lower => more, looser pairs)
+    dpo_agentic_match_min_similarity: float = 0.05
+    dpo_agentic_max_turns: int = 48          # overall safety ceiling per episode
+    dpo_agentic_max_turns_per_step: int = 8  # inner agent-loop cap within a step
+    dpo_agentic_max_steps: int = 6           # max planned steps replayed
+    dpo_agentic_enable_bash: bool = True
+    dpo_agentic_tool_timeout_s: int = 20
+    dpo_agentic_max_trajectory_tokens: int | None = None
+    dpo_min_artifact_versions: int = 1
 
     # -- OPD-specific --
     opd_max_tokens: int = 2048
@@ -652,7 +685,30 @@ class Server:
             os.unlink(train_path)
 
     def _prepare_dpo(self, train_path: str, model_name: str, renderer_name: str):
-        if self.config.dpo_online_rollout:
+        if self.config.dpo_agentic_rollout:
+            tokenizer = get_tokenizer(model_name)
+            renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
+            dataset_builder = None
+            dataset = OnlineDPOAgenticDataset.from_weight_json(
+                path=train_path,
+                renderer=renderer,
+                max_length=self.config.max_length,
+                batch_size=self.config.batch_size,
+                pairs_per_session=self.config.dpo_agentic_pairs_per_session,
+                session_reserve=self.config.dpo_agentic_session_reserve,
+                min_versions=self.config.dpo_min_artifact_versions,
+                artifact_only_instruction=self.config.dpo_artifact_only_rollout_instruction,
+            )
+            if not dataset._rows:
+                raise ValueError(
+                    f"No DPO final-artifact session rows in {train_path} "
+                    "(need accepted output_files + an initial task in the weight JSON)."
+                )
+            log.info(
+                "DPO agentic: %d session rows, batch_size=%d",
+                len(dataset._rows), self.config.batch_size,
+            )
+        elif self.config.dpo_online_rollout:
             tokenizer = get_tokenizer(model_name)
             renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
             dataset_builder = None
@@ -703,6 +759,20 @@ class Server:
             log_rollout_samples=self.config.dpo_log_rollout_samples,
             rollout_sample_log_chars=self.config.dpo_rollout_sample_log_chars,
             artifact_only_rollout_instruction=self.config.dpo_artifact_only_rollout_instruction,
+            agentic_rollout=self.config.dpo_agentic_rollout,
+            agentic_policy_mode=self.config.dpo_agentic_policy_mode,
+            agentic_num_rollouts=self.config.dpo_agentic_num_rollouts,
+            agentic_pairs_per_session=self.config.dpo_agentic_pairs_per_session,
+            agentic_session_reserve=self.config.dpo_agentic_session_reserve,
+            agentic_max_concurrent_rollouts=self.config.dpo_agentic_max_concurrent_rollouts,
+            agentic_match_min_similarity=self.config.dpo_agentic_match_min_similarity,
+            agentic_max_turns=self.config.dpo_agentic_max_turns,
+            agentic_max_turns_per_step=self.config.dpo_agentic_max_turns_per_step,
+            agentic_max_steps=self.config.dpo_agentic_max_steps,
+            agentic_enable_bash=self.config.dpo_agentic_enable_bash,
+            agentic_tool_timeout_s=self.config.dpo_agentic_tool_timeout_s,
+            agentic_max_trajectory_tokens=self.config.dpo_agentic_max_trajectory_tokens,
+            min_artifact_versions=self.config.dpo_min_artifact_versions,
             num_epochs=self.config.num_epochs,
             lora_rank=self.config.lora_rank,
             save_every=self.config.save_every,

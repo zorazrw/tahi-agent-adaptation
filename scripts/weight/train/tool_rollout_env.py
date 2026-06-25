@@ -60,6 +60,31 @@ logger = logging.getLogger(__name__)
 # Output cap applied to every tool result to keep observations bounded.
 _MAX_TOOL_OUTPUT_CHARS = 50_000
 
+# Per-file size cap for filesystem snapshots. Larger files (and binaries/images)
+# are skipped so a single rollout's snapshot can't pull huge blobs into memory.
+_MAX_SNAPSHOT_FILE_BYTES = 5_000_000
+
+# Binary image/asset extensions. Reading these as text dumps massive base64/garbled
+# bytes into the rollout context (a frequent cause of context-window overflow), so
+# the ``read`` tool returns a compact placeholder for them instead.
+_IMAGE_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico",
+    ".tif", ".tiff", ".heic", ".heif", ".avif",
+})
+
+
+def _is_image_path(path: str) -> bool:
+    return os.path.splitext((path or "").strip().replace("\\", "/"))[1].lower() in _IMAGE_EXTENSIONS
+
+
+def _human_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024.0 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} GB"
+
 RewardResult = tuple[float, dict[str, float]]
 MessageRewardFn = Callable[[list[Message]], Awaitable[RewardResult]]
 SandboxRewardFn = Callable[[list[Message], "WorkspaceSandbox"], Awaitable[RewardResult]]
@@ -135,16 +160,30 @@ class WorkspaceSandbox:
         )
         return proc.returncode, proc.stdout, proc.stderr
 
-    def snapshot(self) -> dict[str, str]:
-        """Return ``{relpath: content}`` for all text files (for future grading)."""
+    def snapshot(self, max_file_bytes: int = _MAX_SNAPSHOT_FILE_BYTES) -> dict[str, str]:
+        """Return ``{relpath: content}`` for text files (for artifact matching).
+
+        Skips image/binary files and files larger than ``max_file_bytes``. Reading
+        such files as text would pull megabytes of garbled bytes into memory for
+        every rollout (a major source of the high RSS), and they are never valid
+        training artifacts anyway.
+        """
         out: dict[str, str] = {}
         for dirpath, _dirnames, filenames in os.walk(self.root):
             for fn in filenames:
                 full = os.path.join(dirpath, fn)
                 rel = os.path.relpath(full, self.root)
+                if _is_image_path(fn):
+                    continue
                 try:
-                    with open(full, "r", encoding="utf-8", errors="replace") as f:
-                        out[rel] = f.read()
+                    if os.path.getsize(full) > max_file_bytes:
+                        continue
+                    with open(full, "rb") as fb:
+                        head = fb.read(8192)
+                        if b"\x00" in head:  # binary file -> skip
+                            continue
+                        rest = fb.read()
+                    out[rel] = (head + rest).decode("utf-8", errors="replace")
                 except OSError:
                     continue
         return out
@@ -226,6 +265,25 @@ class FileToolset:
         limit: Annotated[int, "Maximum number of lines to read"] = 2000,
     ) -> ToolResult:
         """Read the contents of a file. Use offset/limit for large files."""
+        # Image files would dump huge base64/garbled bytes into the context if read
+        # as text, blowing up the prompt. Return a compact placeholder instead so
+        # the agent knows the asset exists without ingesting its raw bytes.
+        if _is_image_path(path):
+            try:
+                real = self.sandbox._resolve(path)
+                size = os.path.getsize(real)
+            except FileNotFoundError:
+                return error_tool_result(f"File not found: {path}", name="read", error_type="not_found")
+            except (OSError, ValueError) as e:
+                return error_tool_result(str(e), name="read", error_type="read_failed")
+            ext = (os.path.splitext(path)[1].lstrip(".") or "image").upper()
+            return simple_tool_result(
+                f"[image file omitted: {os.path.basename(path)} "
+                f"({ext}, {_human_size(size)})] Binary image content is not shown. "
+                "Treat it as an existing image asset and reference it by path; do "
+                "not attempt to read its raw bytes.",
+                name="read",
+            )
         try:
             text = self.sandbox.read_text(path)
         except FileNotFoundError:

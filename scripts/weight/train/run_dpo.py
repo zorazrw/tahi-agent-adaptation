@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -42,6 +43,7 @@ from tinker_cookbook.supervised.types import (
     SupervisedDataset,
 )
 
+from .dpo_rollout import rollout_one_dpo_episode
 from .formatter import WeightDPODataBuilder, _hydrate_tool_calls, _load_sessions
 from .run_opd import (
     _parse_valid_artifact_write_message,
@@ -50,9 +52,15 @@ from .run_opd import (
 )
 
 try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts.weight...`.
-    from weight.data.extract import extract_dpo_accepted_artifacts  # type: ignore[import-not-found]
+    from weight.data.extract import (  # type: ignore[import-not-found]
+        extract_dpo_accepted_artifacts,
+        extract_dpo_final_artifacts,
+    )
 except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
-    from ..data.extract import extract_dpo_accepted_artifacts
+    from ..data.extract import (
+        extract_dpo_accepted_artifacts,
+        extract_dpo_final_artifacts,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +92,41 @@ class Config:
     log_rollout_samples: bool = True
     rollout_sample_log_chars: int = 4000
     artifact_only_rollout_instruction: bool = False
+
+    # Agentic online DPO. When enabled, the rejected side is produced by a full
+    # multi-turn tool-using rollout in a sandbox; the student's final artifact
+    # (matched to the chosen file by basename) becomes the rejected response,
+    # while the session's final accepted artifact remains the chosen response.
+    # Only the artifact write is trained on, not the intermediate tool calls.
+    agentic_rollout: bool = False
+    # "on_policy": refresh the sampler after every optim step so rejected
+    # rollouts track the current policy. "off_policy": keep the frozen initial
+    # snapshot (== reference model) for the whole run, using the rollouts purely
+    # as a one-shot negative-augmentation source.
+    agentic_policy_mode: str = "off_policy"
+    agentic_num_rollouts: int = 8
+    # batch_size is the target #preference-pairs per batch; each batch draws
+    # batch_size // agentic_pairs_per_session sessions, each contributing exactly
+    # agentic_pairs_per_session pairs (subsampled if it yields more, oversampled
+    # by cycling if fewer). agentic_session_reserve fetches extra sessions per
+    # batch so zero-yield sessions can be replaced.
+    agentic_pairs_per_session: int = 1
+    agentic_session_reserve: int = 0
+    # Cap on rollouts running concurrently (0 = unlimited). Bounds peak memory
+    # since each in-flight rollout holds a sandbox + growing prompt.
+    agentic_max_concurrent_rollouts: int = 0
+    # Min content-similarity (0..1) for matching a student file to a chosen
+    # artifact by CONTENT/type rather than filename. Lower => more pairs (looser
+    # matches); higher => fewer but tighter. Single same-extension candidates and
+    # single-artifact/single-file rollouts bypass this floor.
+    agentic_match_min_similarity: float = 0.05
+    agentic_max_turns: int = 48
+    agentic_max_turns_per_step: int = 8
+    agentic_max_steps: int = 6
+    agentic_enable_bash: bool = True
+    agentic_tool_timeout_s: int = 20
+    agentic_max_trajectory_tokens: int | None = None
+    min_artifact_versions: int = 1
 
     lora_rank: int = 32
     num_replicas: int = 8
@@ -532,6 +575,676 @@ async def _sample_online_dpo_pairs_async(
     return data, metrics
 
 
+# ---------------------------------------------------------------------------
+# Agentic online DPO (full multi-turn tool-using rollout for the rejected side)
+# ---------------------------------------------------------------------------
+
+
+def _artifact_write_content(messages: list[dict[str, Any]]) -> str | None:
+    """Read the ``write()`` content from an artifact-only completion (dict form)."""
+    for msg in messages:
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            if not isinstance(fn, dict) or fn.get("name") != "write":
+                continue
+            args_text = fn.get("arguments")
+            if not isinstance(args_text, str):
+                continue
+            try:
+                args = json.loads(args_text)
+            except json.JSONDecodeError:
+                continue
+            content = args.get("content")
+            if isinstance(content, str):
+                return content
+    return None
+
+
+class OnlineDPOAgenticDataset:
+    """Per-session rollout seeds + final accepted artifacts for agentic DPO.
+
+    Each row carries the agentic rollout seed (initial task + system_prompt +
+    tool_schemas) and one or more chosen artifacts (the session's final accepted
+    file versions). At train time the current policy runs a full multi-turn
+    rollout; its final sandbox files become the rejected side, matched to each
+    chosen artifact by basename. Both sides are trained as artifact-only single
+    ``write`` messages under the chosen version's prompt (LAST_ASSISTANT_MESSAGE),
+    so intermediate tool calls drive the sandbox but are never trained on.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+        pairs_per_session: int = 1,
+        session_reserve: int = 0,
+    ):
+        self._rows = rows
+        self._renderer = renderer
+        self._max_length = max_length
+        # ``batch_size`` is the target number of preference pairs (training
+        # samples) per batch. Each batch draws ``sessions_per_batch`` sessions,
+        # each contributing exactly ``pairs_per_session`` pairs, so
+        # sessions_per_batch * pairs_per_session == batch_size.
+        self._batch_size = batch_size
+        self._pairs_per_session = max(1, pairs_per_session)
+        self._sessions_per_batch = max(1, batch_size // self._pairs_per_session)
+        # Extra sessions fetched per batch so the sampler can replace sessions
+        # whose rollouts yield zero valid pairs.
+        self._session_reserve = max(0, session_reserve)
+        if batch_size % self._pairs_per_session != 0:
+            logger.warning(
+                "batch_size=%d is not a multiple of pairs_per_session=%d; "
+                "realized batch will be %d pairs (sessions_per_batch=%d)",
+                batch_size, self._pairs_per_session,
+                self._sessions_per_batch * self._pairs_per_session,
+                self._sessions_per_batch,
+            )
+        self._indices = list(range(len(rows)))
+
+    @property
+    def sessions_per_batch(self) -> int:
+        return self._sessions_per_batch
+
+    @property
+    def pairs_per_session(self) -> int:
+        return self._pairs_per_session
+
+    @classmethod
+    def from_weight_json(
+        cls,
+        path: str,
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+        pairs_per_session: int = 1,
+        session_reserve: int = 0,
+        min_versions: int = 1,
+        artifact_only_instruction: bool = False,
+    ) -> "OnlineDPOAgenticDataset":
+        seed_rows = extract_dpo_final_artifacts(
+            _load_sessions(path),
+            renderer=renderer,
+            min_versions=min_versions,
+        )
+        rows: list[dict[str, Any]] = []
+        for seed in seed_rows:
+            chosen_artifacts: list[dict[str, Any]] = []
+            for art in seed["chosen_artifacts"]:
+                prompt = art["prompt"]
+                expected_path = art["expected_path"]
+                if artifact_only_instruction:
+                    prompt = _with_artifact_only_instruction(prompt, expected_path)
+                prompt_messages = _hydrate_tool_calls(prompt)
+                chosen_messages = _hydrate_tool_calls(art["chosen"])
+                chosen_datum = conversation_to_datum(
+                    prompt_messages + chosen_messages,
+                    renderer,
+                    max_length,
+                    train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+                )
+                chosen_artifacts.append({
+                    "expected_path": expected_path,
+                    "basename": art["basename"],
+                    "prompt_messages": prompt_messages,
+                    "chosen_datum": chosen_datum,
+                    "chosen_content": _artifact_write_content(art["chosen"]),
+                })
+            if not chosen_artifacts:
+                continue
+            rows.append({
+                "system_prompt": seed["system_prompt"],
+                "tool_schemas": seed["tool_schemas"],
+                "prompt_messages": _hydrate_tool_calls(seed["prompt_messages"]),
+                "chosen_artifacts": chosen_artifacts,
+                "meta": seed.get("meta") or {},
+            })
+        dataset = cls(
+            rows, renderer, max_length, batch_size,
+            pairs_per_session=pairs_per_session,
+            session_reserve=session_reserve,
+        )
+        logger.info(
+            "Loaded %d agentic DPO session rows from %s (raw_sessions=%d, "
+            "artifacts=%d, sessions_per_batch=%d, pairs_per_session=%d, reserve=%d)",
+            len(dataset._rows), path, len(seed_rows),
+            sum(len(r["chosen_artifacts"]) for r in rows),
+            dataset._sessions_per_batch, dataset._pairs_per_session,
+            dataset._session_reserve,
+        )
+        return dataset
+
+    def __len__(self) -> int:
+        if not self._rows:
+            return 0
+        return (len(self._rows) + self._sessions_per_batch - 1) // self._sessions_per_batch
+
+    def set_epoch(self, seed: int) -> None:
+        rng = random.Random(seed)
+        self._indices = list(range(len(self._rows)))
+        rng.shuffle(self._indices)
+
+    def get_batch(self, index: int) -> list[dict[str, Any]]:
+        # Return a pool of ``sessions_per_batch + session_reserve`` sessions.
+        # The stride is ``sessions_per_batch`` (the reserve overlaps into the
+        # next batch's primary sessions, which is fine for online sampling).
+        # The pool is capped to the number of *distinct* sessions so the same
+        # session is never rolled out more than once per batch (to get multiple
+        # rollouts per session, use ``num_rollouts``, not this pool). Indices
+        # wrap around so the pool is always full even at epoch end.
+        n = len(self._indices)
+        if n == 0:
+            return []
+        pool = min(self._sessions_per_batch + self._session_reserve, n)
+        start = index * self._sessions_per_batch
+        return [self._rows[self._indices[(start + off) % n]] for off in range(pool)]
+
+
+# Char cap for similarity scoring (bounds difflib cost on large artifacts).
+_SIM_CAP = 20_000
+# Tie-break bonus when basenames happen to match: a hint, never a hard key.
+_NAME_BONUS = 0.25
+
+
+def _content_similarity(a: str, b: str) -> float:
+    """Cheap 0..1 content-similarity ratio (capped for cost)."""
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a[:_SIM_CAP], b[:_SIM_CAP]).quick_ratio()
+
+
+def _match_student_artifacts(
+    chosen_artifacts: list[dict[str, Any]],
+    snapshot: dict[str, str],
+    *,
+    min_similarity: float = 0.05,
+) -> dict[int, tuple[str, str, float]]:
+    """Map ``chosen_idx -> (student_content, matched_by, similarity)`` by CONTENT.
+
+    The rollout starts from an empty sandbox, so the student picks its own
+    filename/path; matching the chosen artifact by basename misses most of the
+    time. Instead we correspond by content/type (the rejected write is re-framed
+    under the chosen artifact's canonical path anyway, so only the *content* of
+    the student's attempt matters):
+
+    1. **Positional fallback** -- one chosen artifact + one produced file => pair
+       them directly regardless of name/type (the common single-file task).
+    2. **Extension gating** -- candidates are restricted to files sharing the
+       chosen artifact's extension when any exist (else all text files).
+    3. **Content similarity** -- each (chosen, candidate) is scored; pairs are
+       assigned greedily best-first, each student file used at most once.
+    4. **Name as a tie-break bonus only** -- a matching basename nudges the score
+       but is never required.
+
+    A sole same-extension candidate (``extension_unique``) and the positional
+    fallback bypass ``min_similarity`` (strong structural signals); everything
+    else must clear the floor to avoid pairing unrelated files.
+    """
+    files = list(snapshot.items())  # [(relpath, content)]
+    if not files or not chosen_artifacts:
+        return {}
+
+    if len(chosen_artifacts) == 1 and len(files) == 1:
+        return {0: (files[0][1], "positional", 1.0)}
+
+    # (adj_score, raw_similarity, matched_by, chosen_idx, file_idx)
+    scored: list[tuple[float, float, str, int, int]] = []
+    for ci, art in enumerate(chosen_artifacts):
+        cext = os.path.splitext(art.get("expected_path", ""))[1].lower()
+        cbase = art.get("basename")
+        cc = art.get("chosen_content") or ""
+        same_ext = [
+            (fi, p, c)
+            for fi, (p, c) in enumerate(files)
+            if os.path.splitext(p)[1].lower() == cext
+        ]
+        gated = bool(same_ext)
+        pool = same_ext if gated else list(
+            (fi, p, c) for fi, (p, c) in enumerate(files)
+        )
+        unique_in_pool = len(pool) == 1
+        for fi, p, c in pool:
+            sim = _content_similarity(cc, c)
+            adj = sim
+            matched_by = "extension" if gated else "similarity"
+            if os.path.basename(p) == cbase:
+                adj += _NAME_BONUS
+                matched_by = "name"
+            if gated and unique_in_pool:
+                matched_by = "extension_unique"
+            scored.append((adj, sim, matched_by, ci, fi))
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    used_c: set[int] = set()
+    used_f: set[int] = set()
+    out: dict[int, tuple[str, str, float]] = {}
+    for _adj, sim, matched_by, ci, fi in scored:
+        if ci in used_c or fi in used_f:
+            continue
+        if matched_by != "extension_unique" and sim < min_similarity:
+            continue
+        out[ci] = (files[fi][1], matched_by, sim)
+        used_c.add(ci)
+        used_f.add(fi)
+    return out
+
+
+async def _sample_agentic_dpo_pairs_async(
+    rows: list[dict[str, Any]],
+    renderer: renderers.Renderer,
+    sampling_client: tinker.SamplingClient,
+    *,
+    num_rollouts: int = 1,
+    pairs_per_session: int = 1,
+    target_sessions: int = 1,
+    max_concurrent_rollouts: int = 0,
+    match_min_similarity: float = 0.05,
+    max_tokens: int,
+    temperature: float,
+    max_turns: int,
+    max_turns_per_step: int,
+    max_steps: int,
+    enable_bash: bool,
+    tool_timeout_s: int,
+    max_trajectory_tokens: int | None,
+    max_length: int | None,
+    step: int,
+    sample_log_path: Path | None = None,
+    sample_log_chars: int = 4000,
+    finish_log_path: Path | None = None,
+    raw_trajectory_log_path: Path | None = None,
+) -> tuple[list[tinker.Datum], dict[str, float]]:
+    """Run agentic rollouts and assemble a fixed-size, session-balanced batch.
+
+    ``rows`` is a *pool* of session seeds (``target_sessions`` plus a reserve).
+    The current policy runs ``num_rollouts`` independent multi-turn tool-using
+    rollouts per pooled session, all dispatched in parallel. Each rollout's final
+    sandbox files are matched to each chosen artifact by CONTENT/type (see
+    ``_match_student_artifacts``, ``match_min_similarity``) rather than filename;
+    every matched, non-empty, non-identical student file becomes a rejected
+    ``write`` paired with that artifact's chosen ``write`` (both trained
+    artifact-only under the chosen version's prompt).
+
+    The batch is then assembled to a fixed size: up to ``target_sessions``
+    sessions that produced >=1 valid pair are selected, and EACH contributes
+    exactly ``pairs_per_session`` pairs -- subsampled if it produced more,
+    oversampled (cycled) if it produced fewer. Pairs are interleaved round-robin
+    so adjacent samples come from different sessions. The realized batch therefore
+    holds ``selected_sessions * pairs_per_session`` pairs, which equals the target
+    ``target_sessions * pairs_per_session`` whenever enough pooled sessions yield
+    at least one valid pair (the reserve covers zero-yield sessions).
+    """
+    num_rollouts = max(1, num_rollouts)
+    pairs_per_session = max(1, pairs_per_session)
+    target_sessions = max(1, target_sessions)
+
+    # A finished-rollout record (turns + token footprint) is written to a
+    # SEPARATE log file the moment each rollout completes -- i.e. before the
+    # training step and independently of whether sibling rollouts or the forward/
+    # backward later fail. The file is opened up front and writes are serialized.
+    finish_log_f = None
+    if finish_log_path is not None:
+        finish_log_path.parent.mkdir(parents=True, exist_ok=True)
+        finish_log_f = finish_log_path.open("a", encoding="utf-8")
+    finish_lock = asyncio.Lock()
+
+    # Raw (untruncated) trajectory dump, also written the instant each rollout
+    # finishes, to diagnose what inflates the prompt to context-overflow sizes.
+    raw_traj_f = None
+    if raw_trajectory_log_path is not None:
+        raw_trajectory_log_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_traj_f = raw_trajectory_log_path.open("a", encoding="utf-8")
+    raw_traj_lock = asyncio.Lock()
+    collect_raw = raw_trajectory_log_path is not None
+
+    # Cap how many rollouts run concurrently (0/negative = unlimited). Each
+    # in-flight rollout holds a sandbox + growing prompt in memory, so this is the
+    # main lever for bounding peak RSS when a batch dispatches many rollouts.
+    rollout_sem = (
+        asyncio.Semaphore(max_concurrent_rollouts)
+        if max_concurrent_rollouts and max_concurrent_rollouts > 0
+        else None
+    )
+
+    def _drop_reason_from_metrics(m: dict[str, float]) -> str | None:
+        if m.get("agentic/rollout_error"):
+            return "rollout_error"
+        if m.get("agentic/sample_error"):
+            return "sample_error"
+        if m.get("agentic/parse_failed"):
+            return "parse_failed"
+        if m.get("agentic/context_overflow"):
+            return "context_overflow"
+        if m.get("agentic/empty_trajectory"):
+            return "empty_trajectory"
+        return None
+
+    async def _run_episode(row: dict[str, Any]) -> Any:
+        if rollout_sem is None:
+            return await rollout_one_dpo_episode(
+                row, renderer, sampling_client,
+                max_tokens=max_tokens, temperature=temperature, max_turns=max_turns,
+                max_turns_per_step=max_turns_per_step, max_steps=max_steps,
+                enable_bash=enable_bash, tool_timeout_s=tool_timeout_s,
+                max_trajectory_tokens=max_trajectory_tokens,
+                collect_transcript=sample_log_path is not None,
+                collect_raw_trajectory=collect_raw, log_field_chars=sample_log_chars,
+            )
+        async with rollout_sem:
+            return await rollout_one_dpo_episode(
+                row, renderer, sampling_client,
+                max_tokens=max_tokens, temperature=temperature, max_turns=max_turns,
+                max_turns_per_step=max_turns_per_step, max_steps=max_steps,
+                enable_bash=enable_bash, tool_timeout_s=tool_timeout_s,
+                max_trajectory_tokens=max_trajectory_tokens,
+                collect_transcript=sample_log_path is not None,
+                collect_raw_trajectory=collect_raw, log_field_chars=sample_log_chars,
+            )
+
+    async def _run_and_log(row: dict[str, Any], rollout_idx: int) -> Any:
+        meta = row.get("meta") or {}
+        try:
+            res = await _run_episode(row)
+            snapshot, m, episode_log = res
+        except Exception as e:  # noqa: BLE001 - keep batch alive, still log finish
+            logger.warning(
+                "dpo agentic rollout crashed step=%d session=%s rollout=%d: %s: %s",
+                step, meta.get("session_uuid"), rollout_idx, type(e).__name__, e,
+            )
+            snapshot, m, episode_log = {}, {"agentic/rollout_error": 1.0}, None
+
+        turns = int(m.get("agentic/turns", 0.0))
+        steps = int(m.get("agentic/steps", 0.0))
+        tool_calls = int(m.get("agentic/tool_calls", 0.0))
+        prompt_tokens_max = int(m.get("agentic/prompt_tokens_max", 0.0))
+        prompt_tokens_final = int(m.get("agentic/prompt_tokens_final", 0.0))
+        gen_tokens = int(m.get("agentic/gen_tokens", 0.0))
+        drop_reason = _drop_reason_from_metrics(m)
+        logger.info(
+            "dpo agentic rollout done step=%d session=%s rollout=%d turns=%d "
+            "steps=%d tool_calls=%d prompt_tokens_max=%d prompt_tokens_final=%d "
+            "gen_tokens=%d%s",
+            step, meta.get("session_uuid"), rollout_idx, turns, steps, tool_calls,
+            prompt_tokens_max, prompt_tokens_final, gen_tokens,
+            f" drop={drop_reason}" if drop_reason else "",
+        )
+        if finish_log_f is not None:
+            rec = {
+                "step": step,
+                "mode": "dpo_agentic",
+                "session_uuid": meta.get("session_uuid"),
+                "rollout_idx": rollout_idx,
+                "trajectory_valid": drop_reason is None,
+                "drop_reason": drop_reason,
+                "turns": turns,
+                "steps": steps,
+                "tool_calls": tool_calls,
+                "prompt_tokens_max": prompt_tokens_max,
+                "prompt_tokens_final": prompt_tokens_final,
+                "gen_tokens": gen_tokens,
+            }
+            async with finish_lock:
+                finish_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                finish_log_f.flush()
+        if raw_traj_f is not None:
+            # Pop the raw messages so the (potentially huge) untruncated content is
+            # not retained in ``results_by_row`` for the whole batch after we've
+            # written it -- keeping it around was a major memory amplifier.
+            raw_messages = (episode_log or {}).pop("raw_messages", None) or []
+            raw_rec = {
+                "step": step,
+                "mode": "dpo_agentic",
+                "session_uuid": meta.get("session_uuid"),
+                "rollout_idx": rollout_idx,
+                "drop_reason": drop_reason,
+                "turns": turns,
+                "prompt_tokens_max": prompt_tokens_max,
+                "prompt_tokens_final": prompt_tokens_final,
+                "n_messages": len(raw_messages),
+                "raw_messages": raw_messages,
+            }
+            async with raw_traj_lock:
+                raw_traj_f.write(json.dumps(raw_rec, ensure_ascii=False) + "\n")
+                raw_traj_f.flush()
+            del raw_messages, raw_rec
+        return snapshot, m, episode_log
+
+    # Flatten (row, rollout) into one parallel dispatch, then regroup by row.
+    flat_tasks = []
+    flat_row_idx: list[int] = []
+    try:
+        for row_idx, row in enumerate(rows):
+            for r_idx in range(num_rollouts):
+                flat_tasks.append(_run_and_log(row, r_idx))
+                flat_row_idx.append(row_idx)
+        flat_results = await asyncio.gather(*flat_tasks)
+    finally:
+        if finish_log_f is not None:
+            finish_log_f.close()
+        if raw_traj_f is not None:
+            raw_traj_f.close()
+    results_by_row: list[list[Any]] = [[] for _ in rows]
+    for row_idx, res in zip(flat_row_idx, flat_results, strict=True):
+        results_by_row[row_idx].append(res)
+
+    data: list[tinker.Datum] = []
+    # Valid [chosen, rejected] pairs grouped by session (aligned with ``rows``),
+    # so the batch can be balanced/interleaved across sessions afterwards.
+    pairs_by_session: list[list[tuple[tinker.Datum, tinker.Datum]]] = []
+    reason_counts: dict[str, int] = {}
+    n_potential = 0
+    n_rollouts_total = 0
+    agg_turns = 0.0
+    agg_tool_calls = 0.0
+    agg_steps = 0.0
+    agg_parse_failed = 0.0
+    agg_overflow = 0.0
+    agg_empty = 0.0
+    agg_sample_error = 0.0
+    agg_rollout_error = 0.0
+    agg_prompt_tokens_max = 0.0   # peak across all rollouts
+    agg_prompt_tokens_final = 0.0  # summed (for mean)
+    agg_gen_tokens = 0.0           # summed (for mean)
+
+    sample_log_f = None
+    if sample_log_path is not None:
+        sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_log_f = sample_log_path.open("a", encoding="utf-8")
+
+    try:
+        for row, rollout_results in zip(rows, results_by_row, strict=True):
+            chosen_artifacts = row.get("chosen_artifacts") or []
+            meta = row.get("meta") or {}
+            # Each rollout can contribute one rejected per chosen artifact.
+            n_potential += len(chosen_artifacts) * len(rollout_results)
+            this_session_pairs: list[tuple[tinker.Datum, tinker.Datum]] = []
+
+            for rollout_idx, (snapshot, m, episode_log) in enumerate(rollout_results):
+                n_rollouts_total += 1
+                agg_turns += m.get("agentic/turns", 0.0)
+                agg_tool_calls += m.get("agentic/tool_calls", 0.0)
+                agg_steps += m.get("agentic/steps", 0.0)
+                agg_parse_failed += m.get("agentic/parse_failed", 0.0)
+                agg_overflow += m.get("agentic/context_overflow", 0.0)
+                agg_empty += m.get("agentic/empty_trajectory", 0.0)
+                agg_sample_error += m.get("agentic/sample_error", 0.0)
+                agg_rollout_error += m.get("agentic/rollout_error", 0.0)
+                agg_prompt_tokens_max = max(
+                    agg_prompt_tokens_max, m.get("agentic/prompt_tokens_max", 0.0)
+                )
+                agg_prompt_tokens_final += m.get("agentic/prompt_tokens_final", 0.0)
+                agg_gen_tokens += m.get("agentic/gen_tokens", 0.0)
+
+                # Correspond the student's produced files to each chosen artifact
+                # by CONTENT/type (not filename); see ``_match_student_artifacts``.
+                matches = _match_student_artifacts(
+                    chosen_artifacts, snapshot, min_similarity=match_min_similarity
+                )
+
+                matched_pairs: list[dict[str, Any]] = []
+                for ci, art in enumerate(chosen_artifacts):
+                    match = matches.get(ci)
+                    if match is None:
+                        reason_counts["no_match"] = reason_counts.get("no_match", 0) + 1
+                        continue
+                    student_content, matched_by, match_score = match
+                    if not student_content.strip():
+                        reason_counts["empty_content"] = reason_counts.get("empty_content", 0) + 1
+                        continue
+                    if art.get("chosen_content") is not None and student_content == art["chosen_content"]:
+                        reason_counts["identical"] = reason_counts.get("identical", 0) + 1
+                        continue
+                    rejected_message = {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_artifact_rejected",
+                            "type": "function",
+                            "function": {
+                                "name": "write",
+                                "arguments": json.dumps(
+                                    {"path": art["expected_path"], "content": student_content},
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }],
+                    }
+                    rejected_datum = conversation_to_datum(
+                        art["prompt_messages"] + _hydrate_tool_calls([rejected_message]),
+                        renderer,
+                        max_length,
+                        train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+                    )
+                    this_session_pairs.append((art["chosen_datum"], rejected_datum))
+                    reason_counts["valid"] = reason_counts.get("valid", 0) + 1
+                    mb_key = f"matched_by_{matched_by}"
+                    reason_counts[mb_key] = reason_counts.get(mb_key, 0) + 1
+                    matched_pairs.append({
+                        "basename": art["basename"],
+                        "expected_path": art["expected_path"],
+                        "matched_by": matched_by,
+                        "match_score": round(float(match_score), 4),
+                        "rejected_content_preview": student_content[:sample_log_chars],
+                    })
+
+                # Finished-rollout turns/tokens are logged per-rollout in
+                # ``_run_and_log`` (separate file, before the training step). Here
+                # we only persist the richer per-rollout transcript + matched pairs.
+                drop_reason = (episode_log or {}).get("drop_reason")
+                turns = int(m.get("agentic/turns", 0.0))
+                prompt_tokens_max = int(m.get("agentic/prompt_tokens_max", 0.0))
+                prompt_tokens_final = int(m.get("agentic/prompt_tokens_final", 0.0))
+                gen_tokens = int(m.get("agentic/gen_tokens", 0.0))
+                if sample_log_f is not None:
+                    rec = {
+                        "step": step,
+                        "mode": "dpo_agentic",
+                        "session_uuid": meta.get("session_uuid"),
+                        "rollout_idx": rollout_idx,
+                        "valid": bool(matched_pairs),
+                        "drop_reason": drop_reason,
+                        "n_pairs": len(matched_pairs),
+                        "turns": turns,
+                        "steps": m.get("agentic/steps"),
+                        "tool_calls": m.get("agentic/tool_calls"),
+                        "prompt_tokens_max": prompt_tokens_max,
+                        "prompt_tokens_final": prompt_tokens_final,
+                        "gen_tokens": gen_tokens,
+                        "matched_pairs": matched_pairs,
+                        "messages": (episode_log or {}).get("messages") or [],
+                    }
+                    sample_log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    sample_log_f.flush()
+
+            pairs_by_session.append(this_session_pairs)
+            logger.info(
+                "dpo agentic step=%d session=%s rollouts=%d pairs=%d/%d",
+                step,
+                meta.get("session_uuid"),
+                len(rollout_results),
+                len(this_session_pairs),
+                len(chosen_artifacts) * len(rollout_results),
+            )
+    finally:
+        if sample_log_f is not None:
+            sample_log_f.close()
+
+    # Assemble a fixed-size batch with an equal number of pairs per session.
+    # Shuffle within each session (so subsampling isn't biased toward the first
+    # rollout/artifact) and shuffle the session order (so which sessions get
+    # picked / dropped is unbiased). Select up to ``target_sessions`` sessions
+    # that produced >=1 valid pair; the pooled reserve covers zero-yield ones.
+    # Give each selected session EXACTLY ``pairs_per_session`` pairs, cycling
+    # (oversampling) when it produced fewer, then interleave round-robin.
+    rng = random.Random(step)
+    for pairs in pairs_by_session:
+        rng.shuffle(pairs)
+    n_valid_total = sum(len(pairs) for pairs in pairs_by_session)
+    n_zero_yield = sum(1 for pairs in pairs_by_session if not pairs)
+    qualifying = [pairs for pairs in pairs_by_session if pairs]
+    rng.shuffle(qualifying)
+    selected = qualifying[:target_sessions]
+
+    n_oversampled = 0
+    per_session_selected: list[list[tuple[tinker.Datum, tinker.Datum]]] = []
+    for pairs in selected:
+        if len(pairs) >= pairs_per_session:
+            chosen_pairs = pairs[:pairs_per_session]
+        else:
+            chosen_pairs = [pairs[j % len(pairs)] for j in range(pairs_per_session)]
+            n_oversampled += pairs_per_session - len(pairs)
+        per_session_selected.append(chosen_pairs)
+
+    for j in range(pairs_per_session):
+        for pairs in per_session_selected:
+            chosen_datum, rejected_datum = pairs[j]
+            data.extend([chosen_datum, rejected_datum])
+
+    n_selected = len(selected)
+    n_used_distinct = sum(min(len(pairs), pairs_per_session) for pairs in selected)
+    n_dropped = n_valid_total - n_used_distinct
+    under_target = max(0, target_sessions - n_selected)
+
+    n_rows = float(len(rows))
+    n_valid_pairs = float(len(data) // 2)
+    n_pot = float(n_potential)
+    metrics: dict[str, float] = {
+        "dpo_online/batch_examples": n_pot,
+        "dpo_online/valid_pairs": n_valid_pairs,
+        "dpo_online/filtered_examples": n_pot - float(n_valid_total),
+        "dpo_online/filter_rate": (n_pot - float(n_valid_total)) / max(n_pot, 1.0),
+        "dpo_online/sessions": n_rows,
+        "dpo_online/rollouts": float(n_rollouts_total),
+        "dpo_online/num_rollouts_per_session": float(num_rollouts),
+        "dpo_online/target_pairs": float(target_sessions * pairs_per_session),
+        "dpo_online/target_sessions": float(target_sessions),
+        "dpo_online/selected_sessions": float(n_selected),
+        "dpo_online/under_target_sessions": float(under_target),
+        "dpo_online/zero_yield_sessions": float(n_zero_yield),
+        "dpo_online/pairs_per_session": float(pairs_per_session),
+        "dpo_online/valid_pairs_prebalance": float(n_valid_total),
+        "dpo_online/oversampled_pairs": float(n_oversampled),
+        "dpo_online/dropped_pairs": float(n_dropped),
+        "agentic/turns": agg_turns / max(float(n_rollouts_total), 1.0),
+        "agentic/tool_calls": agg_tool_calls / max(float(n_rollouts_total), 1.0),
+        "agentic/steps": agg_steps / max(float(n_rollouts_total), 1.0),
+        "agentic/parse_failed": agg_parse_failed,
+        "agentic/context_overflow": agg_overflow,
+        "agentic/empty_trajectory": agg_empty,
+        "agentic/sample_error": agg_sample_error,
+        "agentic/rollout_error": agg_rollout_error,
+        "agentic/prompt_tokens_max": agg_prompt_tokens_max,
+        "agentic/prompt_tokens_final_mean": agg_prompt_tokens_final / max(float(n_rollouts_total), 1.0),
+        "agentic/gen_tokens_mean": agg_gen_tokens / max(float(n_rollouts_total), 1.0),
+    }
+    for reason, count in reason_counts.items():
+        safe_reason = reason.replace("/", "_").replace(":", "_")
+        metrics[f"dpo_online/filter_reason/{safe_reason}"] = float(count)
+    return data, metrics
+
+
 def do_update(
     epoch_idx: int,
     batch_idx: int,
@@ -783,6 +1496,90 @@ def main() -> None:
             "tool call. Default is off to keep rollout prompts matched to inference."
         ),
     )
+    parser.add_argument(
+        "--agentic-rollout", action="store_true",
+        help=(
+            "Enable agentic online DPO: the rejected side is produced by a full "
+            "multi-turn tool-using rollout in a sandbox (read/write/edit/grep/find/"
+            "ls/bash). The student's final artifact (matched to the chosen file by "
+            "basename) becomes the rejected write; the session's final accepted "
+            "artifact remains chosen. Only the artifact write is trained on. "
+            "Requires Tinker sampling (not compatible with --use-skyrl)."
+        ),
+    )
+    parser.add_argument(
+        "--agentic-policy-mode",
+        choices=["on_policy", "off_policy"],
+        default="on_policy",
+        help=(
+            "Rejected-rollout policy for agentic DPO. 'on_policy' (default) "
+            "refreshes the sampler after every step so negatives track the "
+            "current policy. 'off_policy' keeps the frozen initial snapshot "
+            "(== reference model) for the whole run, using rollouts as a "
+            "one-shot negative-augmentation source (cheaper, fully cacheable)."
+        ),
+    )
+    parser.add_argument(
+        "--agentic-num-rollouts", type=int, default=1,
+        help=(
+            "Number of independent rejected rollouts to sample per session, all "
+            "dispatched in parallel. Each chosen artifact pairs with every "
+            "matching rollout, yielding up to K*num_rollouts pairs per session."
+        ),
+    )
+    parser.add_argument(
+        "--agentic-pairs-per-session", type=int, default=1,
+        help=(
+            "Preference pairs each selected session contributes to a batch. "
+            "--batch-size is the target #pairs, so sessions-per-batch = "
+            "batch_size // pairs_per_session. A session producing more pairs is "
+            "subsampled; one producing fewer is oversampled (cycled)."
+        ),
+    )
+    parser.add_argument(
+        "--agentic-session-reserve", type=int, default=0,
+        help=(
+            "Extra sessions fetched per batch (beyond sessions-per-batch) so the "
+            "sampler can replace sessions whose rollouts yield zero valid pairs."
+        ),
+    )
+    parser.add_argument(
+        "--agentic-max-concurrent-rollouts", type=int, default=0,
+        help=(
+            "Max rollouts running at once (0 = unlimited). Each in-flight rollout "
+            "holds a sandbox + growing prompt in memory, so lower this to cap RSS."
+        ),
+    )
+    parser.add_argument(
+        "--agentic-match-min-similarity", type=float, default=0.05,
+        help=(
+            "Min content-similarity (0..1) to match a student file to a chosen "
+            "artifact by CONTENT/type instead of filename. Lower => more (looser) "
+            "pairs; higher => fewer but tighter. Single same-extension candidates "
+            "and single-artifact/single-file rollouts bypass this floor."
+        ),
+    )
+    parser.add_argument("--rollout-max-turns", type=int, default=48,
+                        help="Overall safety ceiling on assistant turns per agentic episode.")
+    parser.add_argument("--max-turns-per-step", type=int, default=8,
+                        help="Inner agent-loop cap within a single planned step.")
+    parser.add_argument("--max-steps-per-episode", type=int, default=6,
+                        help="Max planned (leaf) steps replayed as 'Proceed with' turns.")
+    parser.add_argument(
+        "--enable-bash", action=argparse.BooleanOptionalAction, default=True,
+        help="Allow the bash tool during agentic rollout (runs on the host).",
+    )
+    parser.add_argument("--tool-timeout-s", type=int, default=20,
+                        help="Per-bash-command timeout during agentic rollout.")
+    parser.add_argument("--max-trajectory-tokens", type=int, default=None,
+                        help="Stop an agentic rollout near this many prompt tokens (null = no cap).")
+    parser.add_argument(
+        "--min-artifact-versions", type=int, default=1,
+        help=(
+            "Only include files with at least this many versions as chosen artifacts. "
+            "Set to 2 to restrict to files actually revised after user follow-ups."
+        ),
+    )
     args = parser.parse_args()
 
     log_path = str(Path(args.log_path).expanduser())
@@ -809,7 +1606,25 @@ def main() -> None:
         batch_size=args.batch_size,
     )
     online_renderer = None
-    if args.online_rollout:
+    if args.agentic_rollout:
+        if args.use_skyrl:
+            raise ValueError("--agentic-rollout requires Tinker sampling; do not use --use-skyrl")
+        online_renderer = renderers.get_renderer(
+            args.renderer_name,
+            tokenizer=get_tokenizer(args.model_name),
+        )
+        dataset_builder = None
+        dataset = OnlineDPOAgenticDataset.from_weight_json(
+            path=args.train_path,
+            renderer=online_renderer,
+            max_length=args.max_length,
+            batch_size=args.batch_size,
+            pairs_per_session=args.agentic_pairs_per_session,
+            session_reserve=args.agentic_session_reserve,
+            min_versions=args.min_artifact_versions,
+            artifact_only_instruction=args.artifact_only_rollout_instruction,
+        )
+    elif args.online_rollout:
         if args.use_skyrl:
             raise ValueError("--online-rollout requires Tinker sampling; do not use --use-skyrl")
         online_renderer = renderers.get_renderer(
@@ -930,7 +1745,58 @@ def main() -> None:
                 break
             data_override = None
             extra_metrics = None
-            if args.online_rollout:
+            if args.agentic_rollout:
+                assert online_renderer is not None
+                rows = dataset.get_batch(batch_idx)
+                data_override, extra_metrics = asyncio.run(
+                    _sample_agentic_dpo_pairs_async(
+                        rows,
+                        online_renderer,
+                        sampling_client,
+                        num_rollouts=args.agentic_num_rollouts,
+                        pairs_per_session=max(1, args.agentic_pairs_per_session),
+                        target_sessions=max(
+                            1, args.batch_size // max(1, args.agentic_pairs_per_session)
+                        ),
+                        max_concurrent_rollouts=args.agentic_max_concurrent_rollouts,
+                        match_min_similarity=args.agentic_match_min_similarity,
+                        max_tokens=args.rollout_max_tokens,
+                        temperature=args.rollout_temperature,
+                        max_turns=args.rollout_max_turns,
+                        max_turns_per_step=args.max_turns_per_step,
+                        max_steps=args.max_steps_per_episode,
+                        enable_bash=args.enable_bash,
+                        tool_timeout_s=args.tool_timeout_s,
+                        max_trajectory_tokens=args.max_trajectory_tokens,
+                        max_length=args.max_length,
+                        step=step,
+                        sample_log_path=(
+                            Path(log_path) / "dpo_agentic_rollout_samples.jsonl"
+                            if not args.no_log_rollout_samples else None
+                        ),
+                        sample_log_chars=args.rollout_sample_log_chars,
+                        finish_log_path=Path(log_path) / "dpo_agentic_rollout_finished.jsonl",
+                        raw_trajectory_log_path=(
+                            Path(log_path) / "dpo_agentic_rollout_trajectories.jsonl"
+                            if not args.no_log_rollout_samples else None
+                        ),
+                    )
+                )
+                if not data_override:
+                    metrics = {
+                        "epoch": epoch_idx,
+                        "dpo_online/no_valid_batch": 1.0,
+                        "progress": step / max(total_steps, 1),
+                        **(extra_metrics or {}),
+                    }
+                    ml_logger.log_metrics(metrics=metrics, step=step)
+                    logger.warning(
+                        "Skipping DPO step %d: no valid agentic artifact pairs (filter_rate=%.3f)",
+                        step,
+                        (extra_metrics or {}).get("dpo_online/filter_rate", 0.0),
+                    )
+                    continue
+            elif args.online_rollout:
                 assert online_renderer is not None
                 rows = dataset.get_batch(batch_idx)
                 data_override, extra_metrics = asyncio.run(
@@ -996,7 +1862,13 @@ def main() -> None:
                 data_override=data_override,
                 extra_metrics=extra_metrics,
             )
-            if args.online_rollout:
+            # Refresh the on-policy sampler after each step. Off-policy agentic
+            # DPO intentionally keeps the frozen initial snapshot for the whole
+            # run (rollouts as a one-shot negative-augmentation source).
+            refresh_sampler = args.online_rollout or (
+                args.agentic_rollout and args.agentic_policy_mode != "off_policy"
+            )
+            if refresh_sampler:
                 sampling_client = training_client.save_weights_and_get_sampling_client()
         if reached_max_steps:
             break
