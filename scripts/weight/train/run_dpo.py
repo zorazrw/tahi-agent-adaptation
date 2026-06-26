@@ -50,9 +50,12 @@ from .run_opd import (
 )
 
 try:  # Supports both `python -m weight...` from scripts/ and `python -m scripts.weight...`.
-    from weight.data.extract import extract_dpo_accepted_artifacts  # type: ignore[import-not-found]
+    from weight.data.extract import (  # type: ignore[import-not-found]
+        extract_dpo_accepted_artifacts,
+        extract_dpo_pairs,
+    )
 except ModuleNotFoundError:  # pragma: no cover - depends on invocation cwd
-    from ..data.extract import extract_dpo_accepted_artifacts
+    from ..data.extract import extract_dpo_accepted_artifacts, extract_dpo_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -358,13 +361,142 @@ def _print_example(datum: tinker.Datum, tokenizer: Tokenizer, label: str = "") -
     logger.info(format_colorized(int_tokens, cast(list[float], weights), tokenizer))
 
 
-class OnlineDPOAcceptedDataset:
-    """Accepted artifact rows for online DPO rollout.
+def _artifact_write_path(messages: list[dict[str, Any]]) -> str | None:
+    """Return the artifact path from an artifact-only completion."""
+    for msg in messages:
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            if not isinstance(fn, dict) or fn.get("name") != "write":
+                continue
+            args_text = fn.get("arguments")
+            if not isinstance(args_text, str):
+                continue
+            try:
+                args = json.loads(args_text)
+            except json.JSONDecodeError:
+                continue
+            path = args.get("path")
+            if isinstance(path, str) and path.strip():
+                return path
+    return None
 
-    Each row supplies the chosen side from weight JSON. At train time the
-    current policy samples a fresh artifact write from the same prompt; that
-    sampled write becomes the rejected side.
+
+class OnlineDPOPairDataset:
+    """Offline DPO pairs plus aligned online-rollout seeds.
+
+    Each row keeps:
+    - the regular offline chosen/rejected pair built from ``pair_mode``
+    - an aligned chosen side plus prompt for sampling an additional on-policy
+      rejected artifact write from the current policy
     """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+    ):
+        self._rows = rows
+        self._renderer = renderer
+        self._max_length = max_length
+        self._batch_size = batch_size
+        self._indices = list(range(len(rows)))
+
+    @classmethod
+    def from_weight_json(
+        cls,
+        path: str,
+        renderer: renderers.Renderer,
+        max_length: int | None,
+        batch_size: int,
+        pair_mode: str = "first_last",
+        pair_min_gap: int = 1,
+        artifact_only_instruction: bool = False,
+    ) -> "OnlineDPOPairDataset":
+        pair_rows = extract_dpo_pairs(
+            _load_sessions(path),
+            renderer=renderer,
+            pair_mode=pair_mode,
+            pair_min_gap=pair_min_gap,
+        )
+        rows: list[dict[str, Any]] = []
+        for row in pair_rows:
+            expected_path = _artifact_write_path(row["chosen"])
+            if expected_path is None:
+                continue
+
+            offline_prompt_messages = _hydrate_tool_calls(row["prompt"])
+            chosen_messages = _hydrate_tool_calls(row["chosen"])
+            rejected_messages = _hydrate_tool_calls(row["rejected"])
+
+            offline_chosen_datum = conversation_to_datum(
+                offline_prompt_messages + chosen_messages,
+                renderer,
+                max_length,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+            )
+            offline_rejected_datum = conversation_to_datum(
+                offline_prompt_messages + rejected_messages,
+                renderer,
+                max_length,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+            )
+
+            online_prompt = row["prompt"]
+            if artifact_only_instruction:
+                online_prompt = _with_artifact_only_instruction(online_prompt, expected_path)
+            online_prompt_messages = _hydrate_tool_calls(online_prompt)
+            online_chosen_datum = conversation_to_datum(
+                online_prompt_messages + chosen_messages,
+                renderer,
+                max_length,
+                train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE,
+            )
+
+            rows.append({
+                "offline_chosen_datum": offline_chosen_datum,
+                "offline_rejected_datum": offline_rejected_datum,
+                "prompt_messages": online_prompt_messages,
+                "prompt_input": renderer.build_generation_prompt(online_prompt_messages),
+                "chosen_datum": online_chosen_datum,
+                "expected_path": expected_path,
+            })
+        dataset = cls(rows, renderer, max_length, batch_size)
+        logger.info(
+            "Loaded %d DPO pair rows with online-rollout seeds from %s "
+            "(pair_mode=%s, pair_min_gap=%d, raw_pairs=%d)",
+            len(dataset._rows), path, pair_mode, pair_min_gap, len(pair_rows),
+        )
+        return dataset
+
+    def __len__(self) -> int:
+        if not self._rows:
+            return 0
+        return (len(self._rows) + self._batch_size - 1) // self._batch_size
+
+    def set_epoch(self, seed: int) -> None:
+        rng = random.Random(seed)
+        self._indices = list(range(len(self._rows)))
+        rng.shuffle(self._indices)
+
+    def get_batch(self, index: int) -> list[dict[str, Any]]:
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        data: list[tinker.Datum] = []
+        for i in range(start, end):
+            row = self._rows[self._indices[i]]
+            data.extend([row["offline_chosen_datum"], row["offline_rejected_datum"]])
+        return data
+
+    def get_online_batch(self, index: int) -> list[dict[str, Any]]:
+        start = index * self._batch_size
+        end = min(start + self._batch_size, len(self._indices))
+        return [self._rows[self._indices[i]] for i in range(start, end)]
+
+
+class OnlineDPOAcceptedDataset:
+    """Accepted artifact rows for online-only DPO rollout."""
 
     def __init__(
         self,
@@ -414,25 +546,10 @@ class OnlineDPOAcceptedDataset:
             })
         dataset = cls(rows, renderer, max_length, batch_size)
         logger.info(
-            "Loaded %d online DPO accepted artifact rows from %s (raw=%d)",
+            "Loaded %d online-only DPO accepted artifact rows from %s (raw=%d)",
             len(dataset._rows), path, len(accepted_rows),
         )
         return dataset
-
-    def __len__(self) -> int:
-        if not self._rows:
-            return 0
-        return (len(self._rows) + self._batch_size - 1) // self._batch_size
-
-    def set_epoch(self, seed: int) -> None:
-        rng = random.Random(seed)
-        self._indices = list(range(len(self._rows)))
-        rng.shuffle(self._indices)
-
-    def get_batch(self, index: int) -> list[dict[str, Any]]:
-        start = index * self._batch_size
-        end = min(start + self._batch_size, len(self._indices))
-        return [self._rows[self._indices[i]] for i in range(start, end)]
 
 
 async def _sample_online_dpo_pairs_async(
@@ -828,11 +945,13 @@ def main() -> None:
             tokenizer=get_tokenizer(args.model_name),
         )
         dataset_builder = None
-        dataset = OnlineDPOAcceptedDataset.from_weight_json(
+        dataset = OnlineDPOPairDataset.from_weight_json(
             path=args.train_path,
             renderer=online_renderer,
             max_length=args.max_length,
             batch_size=args.batch_size,
+            pair_mode=args.pair_mode,
+            pair_min_gap=args.pair_min_gap,
             artifact_only_instruction=args.artifact_only_rollout_instruction,
         )
     else:
@@ -944,8 +1063,9 @@ def main() -> None:
             extra_metrics = None
             if args.online_rollout:
                 assert online_renderer is not None
-                rows = dataset.get_batch(batch_idx)
-                data_override, extra_metrics = asyncio.run(
+                offline_data = dataset.get_batch(batch_idx)
+                rows = dataset.get_online_batch(batch_idx)
+                online_data, extra_metrics = asyncio.run(
                     _sample_online_dpo_pairs_async(
                         rows,
                         online_renderer,
@@ -962,20 +1082,12 @@ def main() -> None:
                         sample_log_chars=args.rollout_sample_log_chars,
                     )
                 )
-                if not data_override:
-                    metrics = {
-                        "epoch": epoch_idx,
-                        "dpo_online/no_valid_batch": 1.0,
-                        "progress": step / max(total_steps, 1),
+                data_override = offline_data + online_data
+                if not online_data:
+                    extra_metrics = {
                         **(extra_metrics or {}),
+                        "dpo_online/no_valid_batch": 1.0,
                     }
-                    ml_logger.log_metrics(metrics=metrics, step=step)
-                    logger.warning(
-                        "Skipping DPO step %d: no valid online artifact pairs (filter_rate=%.3f)",
-                        step,
-                        (extra_metrics or {}).get("dpo_online/filter_rate", 0.0),
-                    )
-                    continue
             do_update(
                 epoch_idx=epoch_idx,
                 batch_idx=batch_idx,

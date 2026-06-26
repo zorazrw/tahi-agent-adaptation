@@ -38,7 +38,7 @@ from tinker_cookbook import renderers
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from weight.train.formatter import WeightDPODataBuilder, WeightReinforceDataBuilder
-from weight.train.run_dpo import Config as DPOConfig, OnlineDPOAcceptedDataset
+from weight.train.run_dpo import Config as DPOConfig, OnlineDPOPairDataset
 from weight.train.run_reinforce import Config as ReinforceConfig, OnlineReinforceRolloutDataset
 from weight.train.run_opd import Config as ArtifactOPDConfig, OnlineOPDRolloutDataset
 
@@ -682,21 +682,26 @@ class Server:
             tokenizer = get_tokenizer(model_name)
             renderer = renderers.get_renderer(renderer_name, tokenizer=tokenizer)
             dataset_builder = None
-            dataset = OnlineDPOAcceptedDataset.from_weight_json(
+            dataset = OnlineDPOPairDataset.from_weight_json(
                 path=train_path,
                 renderer=renderer,
                 max_length=self.config.max_length,
                 batch_size=self.config.batch_size,
+                pair_mode=self.config.dpo_pair_mode,
+                pair_min_gap=self.config.dpo_pair_min_gap,
                 artifact_only_instruction=self.config.dpo_artifact_only_rollout_instruction,
             )
             if not dataset._rows:
                 raise ValueError(
-                    f"No DPO accepted artifact rows in {train_path} "
-                    "(need accepted output_files in the weight JSON)."
+                    f"No DPO pair rows in {train_path} "
+                    "(need revisited files with >=2 usable versions for the configured pair mode)."
                 )
             log.info(
-                "DPO online: %d accepted artifact rows, batch_size=%d",
-                len(dataset._rows), self.config.batch_size,
+                "DPO offline+online: %d pair rows, batch_size=%d, pair_mode=%s, pair_min_gap=%d",
+                len(dataset._rows),
+                self.config.batch_size,
+                self.config.dpo_pair_mode,
+                self.config.dpo_pair_min_gap,
             )
         else:
             dataset_builder = WeightDPODataBuilder(
