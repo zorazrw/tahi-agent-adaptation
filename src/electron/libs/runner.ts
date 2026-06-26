@@ -527,6 +527,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       expertiseTask: session.expertiseTask,
     });
     let planRegistered = false;
+    let stopAfterWorkflowPlan = false;
     let lastUsage: Record<string, unknown> | undefined;
 
     onEvent({
@@ -553,18 +554,26 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       settingsManager,
       resourceLoader,
       sessionManager,
-      tools: [
-        createReadTool(cwd),
-        bashTool,
-        createEditTool(cwd),
-        createWriteTool(cwd),
-        createGrepTool(cwd),
-        createFindTool(cwd),
-        createLsTool(cwd),
-      ],
+      tools: shouldForceWorkflowPlan
+        ? []
+        : [
+            createReadTool(cwd),
+            bashTool,
+            createEditTool(cwd),
+            createWriteTool(cwd),
+            createGrepTool(cwd),
+            createFindTool(cwd),
+            createLsTool(cwd),
+          ],
       customTools: [
         createWorkflowPlanTool(session, onEvent, () => {
           planRegistered = true;
+          if (shouldForceWorkflowPlan) {
+            stopAfterWorkflowPlan = true;
+            queueMicrotask(() => {
+              void piSession.abort();
+            });
+          }
         }, preserveExistingWorkflow),
         createAskUserQuestionTool(session, onEvent),
       ],
@@ -743,34 +752,45 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       }
     });
 
+    const swallowPlanningAbort = async (run: () => Promise<void>) => {
+      try {
+        await run();
+      } catch (error) {
+        if ((error as Error).name === "AbortError" && stopAfterWorkflowPlan) return;
+        throw error;
+      }
+    };
+
     try {
       const llmDebugMessages: PiLlmDebugMessage[] = [];
-      await runWithLlmDebugContext(
-        {
-          provider: piSession.model?.provider,
-          model: piSession.model?.id,
-          emit: (message) => {
-            llmDebugMessages.push(message);
-            onEvent({
-              type: "stream.message",
-              payload: {
-                sessionId: session.id,
-                message,
-              },
-            });
+      await swallowPlanningAbort(() =>
+        runWithLlmDebugContext(
+          {
+            provider: piSession.model?.provider,
+            model: piSession.model?.id,
+            emit: (message) => {
+              llmDebugMessages.push(message);
+              onEvent({
+                type: "stream.message",
+                payload: {
+                  sessionId: session.id,
+                  message,
+                },
+              });
+            },
           },
-        },
-        async () => {
-          if (trimExecutionContextToLastActions != null && trimExecutionContextToLastActions > 0) {
-            await promptWithExecutionContextRetry(
-              piSession,
-              promptToSend,
-              trimExecutionContextToLastActions
-            );
-          } else {
-            await piSession.prompt(promptToSend);
-          }
-        },
+          async () => {
+            if (trimExecutionContextToLastActions != null && trimExecutionContextToLastActions > 0) {
+              await promptWithExecutionContextRetry(
+                piSession,
+                promptToSend,
+                trimExecutionContextToLastActions
+              );
+            } else {
+              await piSession.prompt(promptToSend);
+            }
+          },
+        ),
       );
 
       const sessionMessages = () => sessionManager.buildSessionContext().messages;
@@ -780,7 +800,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           tryRecoverWorkflowPlanFromMessages(sessionMessages(), session, onEvent);
         }
         if (!hasExistingWorkflowPlan(session)) {
-          await piSession.prompt(WORKFLOW_PLAN_RETRY_USER_PROMPT);
+          await swallowPlanningAbort(() => piSession.prompt(WORKFLOW_PLAN_RETRY_USER_PROMPT));
           if (!planRegistered) {
             tryRecoverWorkflowPlanFromMessages(sessionMessages(), session, onEvent);
           }
