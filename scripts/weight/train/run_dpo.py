@@ -115,6 +115,10 @@ class Config:
     # Cap on rollouts running concurrently (0 = unlimited). Bounds peak memory
     # since each in-flight rollout holds a sandbox + growing prompt.
     agentic_max_concurrent_rollouts: int = 0
+    # Additive offline rollout source: also inject each session's first-written
+    # artifact version as a synthetic rejected snapshot (the "first_last" pair),
+    # alongside the on-policy model rollouts. Default off.
+    agentic_include_first_last: bool = False
     # Min content-similarity (0..1) for matching a student file to a chosen
     # artifact by CONTENT/type rather than filename. Lower => more pairs (looser
     # matches); higher => fewer but tighter. Single same-extension candidates and
@@ -691,6 +695,7 @@ class OnlineDPOAgenticDataset:
                     "prompt_messages": prompt_messages,
                     "chosen_datum": chosen_datum,
                     "chosen_content": _artifact_write_content(art["chosen"]),
+                    "first_content": art.get("first_content"),
                 })
             if not chosen_artifacts:
                 continue
@@ -841,6 +846,7 @@ async def _sample_agentic_dpo_pairs_async(
     target_sessions: int = 1,
     max_concurrent_rollouts: int = 0,
     match_min_similarity: float = 0.05,
+    include_first_last: bool = False,
     max_tokens: int,
     temperature: float,
     max_turns: int,
@@ -1029,6 +1035,36 @@ async def _sample_agentic_dpo_pairs_async(
     for row_idx, res in zip(flat_row_idx, flat_results, strict=True):
         results_by_row[row_idx].append(res)
 
+    # Optional offline "first_last" rollout: frame each session's first-written
+    # artifact version as a synthetic rollout snapshot (the rejected side),
+    # additive to the on-policy model rollouts above. It flows through the exact
+    # same _match_student_artifacts + identical/empty filters and per-session
+    # balancing as a real rollout. The metrics are zeroed (turns/tokens=0) and
+    # tagged so it does not pollute rollout-cost aggregates or logs.
+    n_first_last_injected = 0
+    if include_first_last:
+        for row_idx, row in enumerate(rows):
+            snapshot: dict[str, str] = {}
+            for art in row.get("chosen_artifacts") or []:
+                first_content = art.get("first_content")
+                if not isinstance(first_content, str) or not first_content.strip():
+                    continue
+                # Skip when the first draft already equals the chosen artifact;
+                # the downstream "identical" filter would drop it anyway.
+                if first_content == art.get("chosen_content"):
+                    continue
+                snapshot[art["expected_path"]] = first_content
+            if not snapshot:
+                continue
+            synthetic_metrics = {"agentic/offline_first_last": 1.0}
+            synthetic_log = (
+                {"valid": True, "drop_reason": None, "source": "first_last"}
+                if sample_log_path is not None
+                else None
+            )
+            results_by_row[row_idx].append((snapshot, synthetic_metrics, synthetic_log))
+            n_first_last_injected += 1
+
     data: list[tinker.Datum] = []
     # Valid [chosen, rejected] pairs grouped by session (aligned with ``rows``),
     # so the batch can be balanced/interleaved across sessions afterwards.
@@ -1036,6 +1072,7 @@ async def _sample_agentic_dpo_pairs_async(
     reason_counts: dict[str, int] = {}
     n_potential = 0
     n_rollouts_total = 0
+    n_first_last_pairs = 0  # valid pairs sourced from the offline first_last rollout
     agg_turns = 0.0
     agg_tool_calls = 0.0
     agg_steps = 0.0
@@ -1062,20 +1099,26 @@ async def _sample_agentic_dpo_pairs_async(
             this_session_pairs: list[tuple[tinker.Datum, tinker.Datum]] = []
 
             for rollout_idx, (snapshot, m, episode_log) in enumerate(rollout_results):
-                n_rollouts_total += 1
-                agg_turns += m.get("agentic/turns", 0.0)
-                agg_tool_calls += m.get("agentic/tool_calls", 0.0)
-                agg_steps += m.get("agentic/steps", 0.0)
-                agg_parse_failed += m.get("agentic/parse_failed", 0.0)
-                agg_overflow += m.get("agentic/context_overflow", 0.0)
-                agg_empty += m.get("agentic/empty_trajectory", 0.0)
-                agg_sample_error += m.get("agentic/sample_error", 0.0)
-                agg_rollout_error += m.get("agentic/rollout_error", 0.0)
-                agg_prompt_tokens_max = max(
-                    agg_prompt_tokens_max, m.get("agentic/prompt_tokens_max", 0.0)
-                )
-                agg_prompt_tokens_final += m.get("agentic/prompt_tokens_final", 0.0)
-                agg_gen_tokens += m.get("agentic/gen_tokens", 0.0)
+                # The synthetic offline first_last "rollout" carries no real
+                # trajectory, so it is excluded from the on-policy rollout-cost
+                # aggregates (turns/tokens/error counts) to keep their means and
+                # the rollout count reflective of actual model sampling.
+                is_first_last = bool(m.get("agentic/offline_first_last"))
+                if not is_first_last:
+                    n_rollouts_total += 1
+                    agg_turns += m.get("agentic/turns", 0.0)
+                    agg_tool_calls += m.get("agentic/tool_calls", 0.0)
+                    agg_steps += m.get("agentic/steps", 0.0)
+                    agg_parse_failed += m.get("agentic/parse_failed", 0.0)
+                    agg_overflow += m.get("agentic/context_overflow", 0.0)
+                    agg_empty += m.get("agentic/empty_trajectory", 0.0)
+                    agg_sample_error += m.get("agentic/sample_error", 0.0)
+                    agg_rollout_error += m.get("agentic/rollout_error", 0.0)
+                    agg_prompt_tokens_max = max(
+                        agg_prompt_tokens_max, m.get("agentic/prompt_tokens_max", 0.0)
+                    )
+                    agg_prompt_tokens_final += m.get("agentic/prompt_tokens_final", 0.0)
+                    agg_gen_tokens += m.get("agentic/gen_tokens", 0.0)
 
                 # Correspond the student's produced files to each chosen artifact
                 # by CONTENT/type (not filename); see ``_match_student_artifacts``.
@@ -1132,6 +1175,9 @@ async def _sample_agentic_dpo_pairs_async(
                 # Finished-rollout turns/tokens are logged per-rollout in
                 # ``_run_and_log`` (separate file, before the training step). Here
                 # we only persist the richer per-rollout transcript + matched pairs.
+                if is_first_last:
+                    n_first_last_pairs += len(matched_pairs)
+
                 drop_reason = (episode_log or {}).get("drop_reason")
                 turns = int(m.get("agentic/turns", 0.0))
                 prompt_tokens_max = int(m.get("agentic/prompt_tokens_max", 0.0))
@@ -1141,8 +1187,9 @@ async def _sample_agentic_dpo_pairs_async(
                     rec = {
                         "step": step,
                         "mode": "dpo_agentic",
+                        "source": "first_last" if is_first_last else "rollout",
                         "session_uuid": meta.get("session_uuid"),
-                        "rollout_idx": rollout_idx,
+                        "rollout_idx": -1 if is_first_last else rollout_idx,
                         "valid": bool(matched_pairs),
                         "drop_reason": drop_reason,
                         "n_pairs": len(matched_pairs),
@@ -1227,6 +1274,8 @@ async def _sample_agentic_dpo_pairs_async(
         "dpo_online/valid_pairs_prebalance": float(n_valid_total),
         "dpo_online/oversampled_pairs": float(n_oversampled),
         "dpo_online/dropped_pairs": float(n_dropped),
+        "dpo_online/first_last_injected": float(n_first_last_injected),
+        "dpo_online/first_last_pairs": float(n_first_last_pairs),
         "agentic/turns": agg_turns / max(float(n_rollouts_total), 1.0),
         "agentic/tool_calls": agg_tool_calls / max(float(n_rollouts_total), 1.0),
         "agentic/steps": agg_steps / max(float(n_rollouts_total), 1.0),
@@ -1559,6 +1608,14 @@ def main() -> None:
             "and single-artifact/single-file rollouts bypass this floor."
         ),
     )
+    parser.add_argument(
+        "--agentic-include-first-last", action="store_true",
+        help=(
+            "Additionally inject each session's first-written artifact version "
+            "as a synthetic rejected snapshot (the offline first_last pair), "
+            "alongside the on-policy model rollouts."
+        ),
+    )
     parser.add_argument("--rollout-max-turns", type=int, default=48,
                         help="Overall safety ceiling on assistant turns per agentic episode.")
     parser.add_argument("--max-turns-per-step", type=int, default=8,
@@ -1760,6 +1817,7 @@ def main() -> None:
                         ),
                         max_concurrent_rollouts=args.agentic_max_concurrent_rollouts,
                         match_min_similarity=args.agentic_match_min_similarity,
+                        include_first_last=args.agentic_include_first_last,
                         max_tokens=args.rollout_max_tokens,
                         temperature=args.rollout_temperature,
                         max_turns=args.rollout_max_turns,

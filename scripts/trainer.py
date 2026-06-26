@@ -561,6 +561,7 @@ class DPOTrainer(Trainer):
                         target_sessions=dataset.sessions_per_batch,  # type: ignore[union-attr]
                         max_concurrent_rollouts=self.config.agentic_max_concurrent_rollouts,
                         match_min_similarity=self.config.agentic_match_min_similarity,
+                        include_first_last=self.config.agentic_include_first_last,
                         max_tokens=self.config.rollout_max_tokens,
                         temperature=self.config.rollout_temperature,
                         max_turns=self.config.agentic_max_turns,

@@ -56,6 +56,13 @@ dpo_agentic_session_reserve: 2
 # Each in-flight rollout holds a sandbox + a growing prompt in memory, so lower
 # this if Python RSS gets too high (trades peak memory for wall-clock time).
 dpo_agentic_max_concurrent_rollouts: 4
+# Additive offline rollout source. When true, each session's FIRST-written
+# artifact version is also injected as a synthetic rejected snapshot (the
+# "first_last" pair) alongside the on-policy model rollouts, paired against the
+# same final/chosen artifact. Skipped when a file has <2 versions or the first
+# version already equals the final. Helps early on when on-policy rollouts often
+# yield no valid pair. Default false.
+dpo_agentic_include_first_last: false
 # How a student's rollout file is matched to a chosen artifact. Matching is by
 # CONTENT/type (not filename), since the rollout starts from an empty sandbox and
 # the model picks its own path. This is the min content-similarity (0..1) required

@@ -98,6 +98,10 @@ class Config:
     dpo_agentic_session_reserve: int = 0
     # cap on rollouts running concurrently (0 = unlimited); bounds peak memory
     dpo_agentic_max_concurrent_rollouts: int = 0
+    # additionally inject each session's first-written artifact version as a
+    # synthetic rejected snapshot (the offline first_last pair), alongside the
+    # on-policy model rollouts.
+    dpo_agentic_include_first_last: bool = False
     # min content-similarity (0..1) for matching a student file to a chosen
     # artifact by content/type rather than filename (lower => more, looser pairs)
     dpo_agentic_match_min_similarity: float = 0.05
@@ -766,6 +770,7 @@ class Server:
             agentic_session_reserve=self.config.dpo_agentic_session_reserve,
             agentic_max_concurrent_rollouts=self.config.dpo_agentic_max_concurrent_rollouts,
             agentic_match_min_similarity=self.config.dpo_agentic_match_min_similarity,
+            agentic_include_first_last=self.config.dpo_agentic_include_first_last,
             agentic_max_turns=self.config.dpo_agentic_max_turns,
             agentic_max_turns_per_step=self.config.dpo_agentic_max_turns_per_step,
             agentic_max_steps=self.config.dpo_agentic_max_steps,

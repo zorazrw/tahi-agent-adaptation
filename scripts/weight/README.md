@@ -219,6 +219,24 @@ python -m weight.train.run_dpo \
   --rpo-alpha 0.1 \
   --use-skyrl
 
+# Agentic online DPO: the rejected side comes from a live multi-turn tool-using
+# rollout (matched to the human final artifact). Add --agentic-include-first-last
+# to ALSO inject each session's first-written artifact version as a synthetic
+# rejected snapshot (the offline "first_last" pair), additive to the on-policy
+# rollouts. Useful early on when on-policy rollouts often yield no valid pair.
+python -m weight.train.run_dpo \
+  --train-path $TRAIN_DATA \
+  --model-name Qwen/Qwen3.5-35B-A3B \
+  --renderer-name qwen3_5 \
+  --log-path ./logs/dpo_agentic_run \
+  --agentic-rollout \
+  --agentic-num-rollouts 4 \
+  --agentic-include-first-last \
+  --batch-size 2 \
+  --num-epochs 4 \
+  --learning-rate 5e-5 \
+  --lora-rank 32
+
 # OPD on Tinker (recommended: top-K=20 distillation, first_last pairs)
 # --topk 20     → forward KL over top-20 teacher vocab candidates (default)
 # --pair-mode   → "first_last" (one example per file, cleanest signal)

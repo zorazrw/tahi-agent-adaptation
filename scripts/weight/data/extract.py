@@ -664,11 +664,19 @@ def extract_dpo_final_artifacts(
             )
             if not chosen:
                 continue
+            # First-written version content (the human's initial draft). Used as
+            # an optional offline "first_last" rollout: the first version becomes a
+            # synthetic rejected snapshot paired against this final/chosen artifact.
+            # Only meaningful when the file was actually revised (>=2 versions).
+            first_content = (
+                versions[0].get("content") if len(versions) >= 2 else None
+            )
             chosen_artifacts.append({
                 "expected_path": final["path"],
                 "basename": basename,
                 "chosen": chosen,
                 "prompt": list(final["prompt"]),
+                "first_content": first_content,
             })
 
         if not chosen_artifacts:
