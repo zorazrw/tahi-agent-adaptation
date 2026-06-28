@@ -1007,6 +1007,19 @@ def is_backend_node_user_prompt(prompt: Any) -> bool:
     return "\n\nTask: " in p
 
 
+def is_human_edits_user_prompt(prompt: Any) -> bool:
+    """True for compose-box prompts that only carry localized human file/verifier edits."""
+    if not isinstance(prompt, str):
+        return False
+    p = prompt.strip()
+    return (
+        p.startswith("Human file edits (localized line changes):")
+        or p.startswith("Human file edits (line diff")
+        or p.startswith("Human verifier edits:")
+        or p.startswith("Human comments on text files:")
+    )
+
+
 def build_full_session_trajectory(
     msgs: List[dict],
     initial_query: str,
@@ -1351,6 +1364,8 @@ def extract_initial_task_instruction(
             prompt = m.get("prompt", "")
             if is_backend_node_user_prompt(prompt):
                 continue
+            if is_human_edits_user_prompt(prompt):
+                continue
             stripped = strip_interface_user_prompt(prompt)
             if stripped:
                 return stripped
@@ -1358,7 +1373,7 @@ def extract_initial_task_instruction(
     if from_pi:
         return from_pi
     fb = strip_interface_user_prompt(fallback)
-    if fb and not is_backend_node_user_prompt(fb):
+    if fb and not is_backend_node_user_prompt(fb) and not is_human_edits_user_prompt(fb):
         return fb
     return ""
 
@@ -3097,7 +3112,7 @@ def build_weight_based_session(
             continue
         first_line = p.splitlines()[0]
         path = first_line.removeprefix("Proceed with: ").strip()
-        if path in path_to_node:
+        if path:
             node_starts.append((i, path))
 
     # ── Build planning task_unit ──
@@ -3268,7 +3283,19 @@ def build_weight_based_session(
     for seg_idx, (start_i, path) in enumerate(node_starts):
         end_i = node_starts[seg_idx + 1][0] if seg_idx + 1 < len(node_starts) else len(all_msgs)
         node_msgs = all_msgs[start_i:end_i]
-        node = path_to_node[path]
+        node = path_to_node.get(path)
+        if node is None:
+            task_desc = path
+            for line in (node_msgs[0].get("prompt", "") if node_msgs else "").splitlines():
+                if line.startswith("Task: "):
+                    task_desc = line.removeprefix("Task: ").strip() or path
+                    break
+            node = {
+                "id": "",
+                "description": task_desc,
+                "outputFiles": [],
+                "verifiers": [],
+            }
         node_id = node.get("id", "")
         node_desc = node.get("description", "")
 
