@@ -205,6 +205,27 @@ def session_meta(session: dict[str, Any]) -> dict[str, Any]:
     return {"uuid": session.get("uuid"), "name": session.get("name")}
 
 
+def _user_action_runs_from_trajectory(traj: list[dict[str, Any]]) -> list[int]:
+    """Lengths of contiguous user-actor step blocks in trajectory order."""
+    runs: list[int] = []
+    i, n = 0, len(traj)
+    while i < n:
+        if traj[i].get("actor") == "user":
+            j = i
+            while j < n and traj[j].get("actor") == "user":
+                j += 1
+            runs.append(j - i)
+            i = j
+        else:
+            i += 1
+    return runs
+
+
+def session_user_action_stats(session: dict[str, Any]) -> list[int]:
+    """User action counts per iteration (each contiguous user actor block)."""
+    return _user_action_runs_from_trajectory(session_trajectory(session))
+
+
 def workflow_from_session(session: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
     traj = session_trajectory(session)
     if not traj:
@@ -1165,7 +1186,12 @@ def main() -> int:
         load_dotenv_defaults(args.env_file, args.dotenv_override)
         report = run_report(args)
 
+    session = resolve_session(load_sessions(args.json), args.session)
     (print_exported_summary if args.exported_status else print_version_summary)(report)
+    per_iter = session_user_action_stats(session)
+    print(f"user actions: {len(per_iter)} iteration(s), {sum(per_iter)} total", file=sys.stderr)
+    for i, count in enumerate(per_iter, start=1):
+        print(f"  iteration {i}: {count} user {'action' if count == 1 else 'actions'}", file=sys.stderr)
 
     text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
     if args.out:
