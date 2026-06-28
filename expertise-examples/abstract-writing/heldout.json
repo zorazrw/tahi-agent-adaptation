@@ -1,0 +1,302 @@
+[
+    {
+        "id": 1,
+        "type": "Abstract Writing",
+        "instruction": "Write an abstract of the paper given the title and introduction section below:\n\nTitle: 'Transformers are Inherently Succinct'\nIntroduction:\nTransformers (Vaswani et al., 2017) are the dominant architecture underlying most modern large language models. A substantial body of recent theoretical work has investigated their expressive power (Strobl et al., 2024; Barcelo et al., 2024; Yang et al., 2024; Hahn, 2020; Perez et al., 2021; Chiang and Cholak, 2022; Jerad et al., 2025), their trainability and ability to generalize to unseen strings of longer lengths (Zhou et al., 2024; Huang et al., 2025; Chiang and Cholak, 2022), and the extent to which their behavior can be formally verified (Salzer et al., 2025). A key finding of this line of work is that transformers with finite precision—the setting most faithful to real-world hardware—recognize various classes of subregular languages depending on the exact assumptions made (Yang et al., 2024; Barcelo et al., 2024; Jerad et al., 2025; Li and Cotte2025).\nSubregular languages constitute strict subclasses of the regular languages. For instance, the subregular class of star-free languages are precisely those definable by regular expressions that replace the\nKleene star with intersection and complementation. The language a∗b∗ is star-free because it can be written as ∅·b·a·∅, whereas (aa)∗ is not star-free (Straubing, 1994). By contrast, recurrent neural networks (RNNs) can recognize all regular languages under a fixed precision assumption (Minsky, 1967; Siegelmann and Sontag, 1995; Merrill et al., 2020; Svete and Cotterell, 2023), making them strictly more expressive than transformers as language recognizers. However, the strong empirical performance of transformers invites the question as to whether expressive capacity is the most revealing lens through which to compare architectures.\nIn this paper, we propose succinctness as an alternative lens for understanding the expressivity of transformers. The succinctness of a language L with respe C of language recognizers (e.g., transformers, finite automata, and formulas in FO[<]) measures the size of the smallest C∈C that recognizes L. In other words, succinctness tells us how many symbols are needed to describe L with respect to the class C. Succinctness is a classical notion in logic and computer science (Stockmeyer, 1974; Grohe and Schweikardt, 2004), where it sharpens expressive power into a complexity-theoretic refinement: rather than asking only which languages a formalism can recognize, succinctness asks how compactly each such language can be described within it. Greater succinctness comes at a price—more succinct formalisms typically have correspondingly harder decision problems, since their compact descriptions force any decision procedure to unfold a larger amount of underlying structure. A well-known example concerns linear temporal logic (LTL; Pnueli, 1977), which is expressively equivalent to the star-free languages (Libkin, 2004), and, hence, also to the counter-free automata oNaughton and Papert (1971). Despite this equivalence in expressive power, LTL can be exponentially more succinct than finite automata (Sistla and Clarke, 1985), i.e., certain languages admit polynomial-size LTL formulas but require exponentially larger automata. A direct consequence is that decision problems for LTL, such as checking whether a formula recognizes a trivial language, are provably harder than the corresponding problems for automata (Sistla and Clarke, 1985).\nThis paper offers a formal result, which can be summarized as follows: transformers can describe certain languages extremely succinctly. Specifically, we show that transformers can be exponentially more succinct than LTL and RNNs, and hence also state-space models (SSMs; Gu and Dao, 2023; Merrill et al., 2024). Moreover, they are doubly exponentially more succinct than finite automata. In concrete terms, there exist families of languages describable by polynomial-size transformers that require exponentially larger LTL formulas or RNNs, and doubly exponentially larger automata. We also establish matching upper bounds: we give a translation from finite-precision transformers to LTL formulas of exponential size, significantly improving the doubly exponential translation of Yang et al. (2024). It follows that for any fixed-precision transformer, there is an equivalent LTL formula of exponential size and an equivalent finite automaton of doubly exponential size.1 The key technical ingredient behind these results is showing that transformers can count from 0 to 22N —that is, implement doubly exponentially large counters—via a subtle encoding using attention. We then prove that the resulting languages require exponentially larger descriptions as LTL formulas or RNNs, and doubly exponentially larger descriptions as finite automata. A natural consequence of this succinctness is that analyzing transformers should be computationally challenging. And, indeed, we show that checking whether a given transformer recognizes a trivial language, is EXPSPACmplete. Under standard complexity-theoretic assumptions, this means that no algorithm can solve the problem in less than double exponential time.\nThe specific transformer model we study is the unique-hard attention transformer (UHAT), a simple and widely used abstraction of self-attention (Yang et al., 2024; Jerad et al., 2025; Strobl et al., 2024; Hao et al., 2022; Li and Cotterell, 2025; Hahn, 2020; Barcelo et al., 2024; Bergstraßer et al., 2024). In particular, Jerad et al. (2025) show that expressivity bounds on UHATs entail corresponding bounds on softmax transformers with fixed precision. Different results in this paper hold under different precision assumptions: the UHAT upper bounds are stated for arbitrary rational weights, whereas the corresponding RNN results assume fixed (finite) precision. Importantly, this means our conclusions are valid in the setting that most faithfully mirrors real-world implementations—fixed precision arithmetic.",
+        "human_output": "We study succinctness as a measure of the expressive power of transformers. Succinctness—how compactly a formalism can describe a language relative to other formalisms—is a classical notion in logic and automata theory. We prove that fixed-precision transformers are remarkably succinct: they can be exponentially more succinct than both linear temporal logic (LTL) and recurrent neural networks, and, by extension, state-space models, and doubly exponentially more succinct than finite automata. In other words, there exist families of languages describable by polynomial-size transformers whose smallest equivalent LTL formula or recurrent neural network is exponentially large, and whose smallest equivalent automaton is doubly exponentially large. We also establish matching upper bounds, showing that any fixed-precision transformer can be converted to an LTL formula with at most an exponential blow-up—improving a prior doubly exponential translation. As a consequence of this succinctness, we show that basic verification problems for transformers, such as emptiness and equivalence, are provably intractable: specifically, EXPSPACE-complete."
+    },
+    {
+        "id": 2,
+        "type": "Abstract Writing",
+        "instruction": "Write an abstract of the paper given the title and introduction section below:\n\nTitle: 'LLMs Get Lost In Multi-Turn Conversation'\nIntroduction:\nToday’s large language models (LLMs) function as conversational interfaces (e.g., ChatGPT, Gemini, Claude), enabling users to interact with the LLM through multiple conversation turns. Such interaction promises to help users not only when they know what they need (i.e., they can fully specify their requirements in an instruction), but also when they don’t. In such cases, users might start with an underspecified instruction and further clarify their needs through turn interactions. Though studies of LLM conversation logs have confirmed that underspecification in user instructions is prevalent [27], LLM systems are typically evaluated in single-turn, fully-specified settings.\nEven though a growing body of work proposes to evaluate LLMs in a multi-turn fashion, we identify in our review (Section 2) that most prior work treats the conversation as episodic: conation turns might relate to each other, but the conversation can effectively be decomposed as an array of subtasks that can be evaluated in isolation. We argue that episodic tasks move away from what is prevalent in human conversation: underspecification [91, 27].\nIn this work, we close this gap by creating a simulation environment for multi-turn underspecified conversations – sharded simulation – that leverages existing instructions from high-quality single-turn benchmarks. At a high level, the sharding process we propose transforms existing single-turn instructions into sharded instructions, a set of smaller instructions that jointly deliver the same information as the original instruction. Sharded simulation then ensures that each turn of conversation reveals at most one shard of information per conversation turn, enforcing that the instruction is gradually revealed through the conversation.\nOn the set of tasks that we experimented on, we observed that models engaged in multi-turn underspecified convtions achieved an average performance of 65%–a 25-point drop from single-turn performances of 90% when they receive the entire instruction at the beginning of the conversation. Notably, we observe this drop in performance even in two-turn conversations, and across all LLMs we test, from small open-weights (LLama3.1-8B-Instruct) to state-of-the-art (Gemini 2.5 Pro).\nFurthermore, we decompose the performance degradation into two components: (1) loss in aptitude, and (2) increase in unreliability. We find that in single-turn settings, models with higher aptitude tend to be more reliable (e.g., GPT-4.1, Gemini 2.5 Pro). On the other hand, all LLMs exhibit very high unreliability in multi-turn settings, regardless of aptitude. We refer to this as the lost in conversation phenomenon: when LLMs take a wrong turn in multi-turn conversation, they get lost and do not recover.\nWe investigate several explanations for this effect and show that the LLMs tend to (1) generate overly verbose responses, leading them to (2)ropose final solutions prematurely in conversation, (3) make incorrect assumptions about underspecified details, and (4) rely too heavily on previous (incorrect) answer attempts.\nOur findings highlight a gap between how LLMs are used in practice and how the models are being evaluated. Ubiquitous performance degradation over multi-turn interactions is likely a reason for low uptake of AI systems [73, 4, 28], particularly with novice users who are less skilled at providing complete, detailed instructions from the onset of conversation [87, 35].\nThe rest of the paper is structured as follows: Section 2 situates our work with respect to prior work on multi-turn evaluation. In Section 3, we describe the simulation environment we built for both single- and multi-turn conversations on a diverse set of generation tasks. We introduce the six tasks and the metrics we use to evaluate the aptitude and reliability of models in Section 4.1. Sections 5-6 define our main experiment involving 15 LLMs, and analyze the main findings. Finally, the Implications section (Section 7) discusses the ramifications of the work, from the perspective of organizations that are building LLM-based conversation products, to that of end-users of the LLM-based systems. We provide actionable recommendations based on small-scale experiments and make a concrete call-to-action to LLM builders, urging them to prioritize multi-turn reliability in conjunction with aptitude in future model iterations.",
+        "human_output": "Large Language Models (LLMs) are conversational interfaces. As such, LLMs have the potential to assist their users not only when they can fully specify the task at hand, but also to help them define, explore, and refine what they need through multi-turn conversational exchange. Although analysis of LLM conversation logs has confirmed that underspecification occurs frequently in user instructions, LLM evaluation has predominantly focused on the single-turn, fully-specified instruction setting. In this work, we perform large-scale simulation experiments to compare LLM performance in single- and multi-turn settings. Our experiments confirm that all the top open- and closed-weight LLMs we test exhibit significantly lower performance in multi-turn conversations than single-turn, with an average drop of 39% across six generation tasks. Analysis of 200,000+ simulated conversations decomposes the performance degradation into two components: a minor loss in aptitude and a significant increase in unreliability. We find that LLMs often make assumptions in early turns and prematurely attempt to generate final solutions, on which they overly rely. In simpler terms, we discover that *when LLMs take a wrong turn in a conversation, they get lost and do not recover*."
+    },
+    {
+        "id": 3,
+        "type": "Abstract Writing",
+        "instruction": "Write an abstract of the paper given the title and introduction section below:\n\nTitle: 'Towards Fluent Interaction with Cyber-Physical Architecture'\nIntroduction:\nSince constructing the first shelters, we have largely demanded rigidity from the built environment — we expect it to be static. But if we instead entertained the idea that the walls around us could adapt and transform (without compromising stability), then what would we desire from these shape-changing surroundings? What new capabilities could they afford? And how would we, as “users”, communicate our intentions to architectural elements that have become, in some sense, autonomous agents?\nAs robotic technologies transcend the industrial sector — entering homes [20, 53, 71], offices [55, 78, 107], and public spaces [9, 42, 70, 97] — these questions become more salient. While one strain of futurists envisions a world that is brimming with roving automatons, a smaller community champions a more “unobtrusive” vision of ubiquitous 94]; one in which users benefit from automation embedded within the built environment itself. Shape-changing surfaces [21, 33], actuated furniture [44, 91], and kinetic facades [72] promise spaces that can physically adapt to the demands of an increasingly urbanized world. A room that hosts focused work in the morning, for instance, may need to accommodate exercise, dining, or childcare by evening [36]. A staircase that posed no issue at age forty, may later become an obstacle at age eighty. In such cases, adaptive architecture could assist — transforming when needed, and disappearing into the periphery when not in use.\nUnlike smartphones or laptops that we explicitly engage with and then put away, architectural-scale robotic systems are in effect omnipresent — we exist within them rather than using them in isolation [46]. They must navigate a delicate balance: remaining inconspicuous when at rest, yet being immediately responsive when called upon. They must interpret ambiguous human signals (the placement of an object, a muttered complaint about clutter) and determine whether and how to act. Most importantly, they must do this while preserving human autonomy, building trust through repeated interactions in both public and private spaces.\nSuch considerations lead us to two questions:\n• RQ1: What makes a shape-changing environment valuable?\n• RQ2: How do users naturally interact with a shape-changing environment?\nThis paper addresses these challenges through two complementary studies, examining both the aspirational values and practical realities of interacting with cyber-physical architecture (Figure 2). First, we conduct a series of speculative design workshops to uncover what merit users might find in a shape-changing environment (Figure 1e). Then, we ground these visions in a task-based elicitation study, revealing how users naturally interact with — and recover from errors made by — these systems (Figure 1f).\nOur platform for this exploration is a shape-changing robotic wall (Figure 1a). This structure, which we have adapted from [21], consists of three independent columns, which can move vertically on a set of two-meter rails. By remotely configuring the mechanical constraints that exist within each column, the structure can transition from a flat, rigid state into a curved, protruding shape (i.e. a shelf or an awning). These resulting shapes are stable, and when used as shelves, can hold common household objects such as laptops, backpacks, cookware, and books.\nPrior work [21] introduced methods for fabricating and actuating such surfaces. However, user interaction techniques — and design considerations for cyber-physical architecture more broadly — were beyond that initial scope. Our work augments that research, providing a framework for understanding how users conceptualize and communicate with robotic environments.\nSpecifically, we contribute:\n(1) Eleven design values for shape-changing environments, derived from speculative workshops with designers and architects. These reveal fundamental tensions between proactive assistance and user autonomy, and between personalization and public ownership.\n(2) An empirical characterization of multimodal interaction with robotic surfaces, drawn from a Wizard-of-Oz elicitation study. This includes the development of a modal entropy metric, which quantifies the diversity and evolution of a user’s interaction strategies as they discover system capabilities.\n(3) A set of research directions for cyber-physical architecture, synthesizing results from both studies.\nTogether, the two studies point to a somewhat paradoxical finding: users want to feel in control of their environment, yet — consciously or not — they expect the environment to infer context that they never explicitly articulate. Effective control techniques, therefore, may require granting robotic environments the very type of agency that users sometimes claim to distrust. Navigating this trade-off emerges as a central design challenge for the field.\nOur work concludes with a proposal for reframing interaction with cyber-physical architecture: rather than mapping discrete user actions to system responses, our findings make the case for a dynamic model of user intent, that continuously integrates multimodal evidence. This reframing, we argue, could help address the tensions unveiled by our studies, and thus may be an essential step in achieving fluent interaction [28] with robotic environments.",
+        "human_output": "What happens when your walls begin to move? This paper explores the design of human-robot interaction for architectural-scale, shapechanging environments. We present findings from two studies: (1) a series of speculative design workshops (N=20) that uncovered aspirational visions for these spaces, and (2) a task-based Wizardof-Oz elicitation study (N=12) that grounded these visions in the challenges of practical interaction. Our workshop findings reveal a complex landscape of user desires, exposing critical tensions between proactive automation and the preservation of user autonomy, and between personalization and public ownership. Our elicitation study reveals a set of core interaction challenges related to multimodal collaboration; and, most critically: suggests the need for a modality-agnostic model of evolving user intent. We conclude with a set of grounded proposals for creating robotic environments that are collaborative and trusted partners in everyday life."
+    },
+    {
+        "id": 4,
+        "type": "Abstract Writing",
+        "instruction": "Write an abstract of the paper given the title and introduction section below:\n\nTitle: 'I Don't Think RAI Applies to My Model -- Engaging Non-champions with Sticky Stories for Responsible AI Work\nIntroduction:\n'David was the only employee who used the building’s accessibility elevator. When the company deployed predictive maintenance AI, the algorithm learned his elevator had extremely low usage and began delaying its repairs to prioritize busy main elevators.\nDavid’s elevator grew unreliable, but his complaints were ignored—the system marked it 'low priority.' During the annual shareholder meeting, it broke down completely, trapping him for hours while VIPs toured the building.\nDavid shared his experience on social media, and the story quickly went viral. Local news stations picked up the story, framing it as 'AI bias leaves disabled worker trapped.' The coverage triggered an ADA investigation revealing the AI had systematically neglected accessibility infrastructure based on usage metrics.the same system was deployed across dozens of buildings, all with severely under-maintained accessibility elevators now requiring emergency repairs. The company faced millions in fines, settlements, and unexpected maintenance costs.”\nWe open with this LLM-generated vignette to make a point central to this paper: Surprising stories relevant to our own work cut through attention fatigue. As we will show, practitioners in “non-critical” domains are often desensitized by a steady stream of algorithmic bias headlines (e.g., biased hiring algorithms [15], bias in predictive policing and recidivism assessment [62, 104], autonomous vehicle crashes [13]) that seem bad but not relevant to them; as a result, fairness discussions remain abstract and easy to deprioritize. Despite a surge of checklists [45], templates [27, 56], games [3, 39, 49, 87, 89], and governance processes [70] for Responsible AI (RAI), prior research [32, 45, 65, 70, 71] has primarily examined their effects on RAI champions—individuals intrinsically motivated to advocate for ethical practices within their organizations (sometimes in formalized roles [88])). Much less is known about the majority of practitioners—non-champions, those without prior motivation or formal RAI roles—and whether they would meaningfully engage with these resources or integrate them into their work. In this paper, we focus on engaging non-champions to deliberate about RAI.\nIn a formative study with a partner technology organization—where we shadowed meetings and interviewed governance members and data scientists—we observed a sharp contrast: Governance champions actively advanced RAI and designed governance structures, whereas many data scientists remained dismissive and disengaged regarding RAI concerns. Even when required to participate in activities, non-champions checked the boxes with minimal engagement. The key bottleneck was not the availability of guidance, processes, or tools, but the challenge of motivating these practitioners to meaningfully engage. This gap is critical, as RAI initiatives and tools cannot achieve impact if practitioners do not engage with them in a meaningful way. This observation motivated our research question: How can we design interventions that foster deep engagement among non-champion practitioners in RAI processes? By deep engagement, we mean more than just ticking boxes or going through the motions—it involves practitioners critically reflecting on potential harms, considering trade-offs thoughtfully, and retrospecting on their past experiences.\nIn this paper, we introduce an intervention designed to specifically engage non-champion practitioners by presenting them narrative-based scenarios, like the elevator-maintenance one above, that illustrate possible unexpected and severe real-world harms arising from their own ML systems. Drawing on theories from psychology and business communication [31, 51], we developed an LLM-based system that generates scenarios to embody five qualities that are known to drive engagement and memos should be concrete, severe, surprising, diverse, and relevant. Inspired by the framework in Made to Stick [31], we refer to these narrative scenarios as sticky stories. Unlike conventional documentation [55, 56] or checklists [45] or generic vignettes [11], which often feel abstract or disconnected from the realities of product development, our sticky stories are designed to evoke curiosity and spark critical reflection.\nTo evaluate the effectiveness of our sticky stories, we conducted two complementary evaluations. First, we assessed the “stickiness” of the generated stories themselves, that is, whether they embodied the five key qualities. The results showed that sticky stories significantly outperformed stories generated by zero-shot prompts used in past work across most qualities (e.g., severity: 99% vs 68%, and surprisingness 78% vs 35%) (cf. table 2). Second, we conducted a user study with 29 practitioners, mostly non champions, to measure the practical impact of these stories on engagement. Practitioners exposed to sticky stories spent significantly more time on harm identification (10 times more), identified a larger number of harm categories and subcategories (five times as many new categories and 3.5 times as many subcategories), and engaged in deeper critical reflection compared to those seeing baseline stories. Practitioners also exhibit distinct trajectories in shifting their attitudes from initial indifference or resistance toward a more engaged stance on RAI.\nContributions. This work makes the following contributions (see the study overview in Fig. 2).\n• Our formative study characterizes the engagement gap among non-champion practitioners with Responsible AI efforts, and shows that existing governance tools and templates are insufficient to motivate meaningful participation.\n• The design of sticky stories based on key qualities that capture practitioners’ attention, provoke reflection, and foster engagement.\n• A scalable compound AI system to generate stories that meet these qualtegrate them into an interactive tool for practitioner use.\n• An empirical evaluation demonstrating that sticky stories increase engagement time, the number and diversity of harms identified, and promote critical reflection.\n• Practitioner-specific engagement trajectories, highlighting how different champions and non-champions in\ndifferent profiles respond differently.",
+        "human_output": "Responsible AI (RAI) tools -- checklists, templates, and governance processes -- often engage RAI champions, individuals intrinsically motivated to advocate ethical practices, but fail to reach non-champions, who frequently dismiss them as bureaucratic tasks. To explore this gap, we shadowed meetings and interviewed data scientists at an organization, finding that practitioners perceived RAI as irrelevant to their work. Building on these insights and theoretical foundations, we derived design principles for engaging non-champions, and introduced sticky stories -- narratives of unexpected ML harms designed to be concrete, severe, surprising, diverse, and relevant, unlike widely circulated media to which practitioners are desensitized. Using a compound AI system, we generated and evaluated sticky stories through human and LLM assessments at scale, confirming they embodied the intended qualities. In a study with 29 practitioners, we found that, compared to regular stories, sticky stories significantly increased time spent on harm identification, broadened the range of harms recognized, and fostered deeper reflection."
+    },
+    {
+        "id": 5,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 6,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 7,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 8,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 9,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 10,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 11,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 12,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 13,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 14,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 15,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 16,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 17,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 18,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 19,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 20,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 21,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 22,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 23,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 24,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 25,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 26,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 27,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 28,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 29,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 30,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 31,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 32,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 33,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 34,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 35,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 36,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 37,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 38,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 39,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 40,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 41,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 42,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 43,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 44,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 45,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 46,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 47,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 48,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 49,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    },
+    {
+        "id": 50,
+        "type": "Abstract Writing",
+        "instruction": "TBA",
+        "human_output": "TBA"
+    }
+]

@@ -1,0 +1,352 @@
+[
+    {
+        "id": 1,
+        "type": "Data Visualization",
+        "instruction": "Plot two vertical box plots stacked vertically, titled GPT-4o (top) and GPT-4o-mini (bottom). The x-axis is Number of shards (1–8) and the y-axis is Performance. Annotate each box with its max (top whisker), median (% label on the left), and min (bottom whisker) values. The data are:\nGPT-4o (max, median%, min): \n- Shard 1: 100, 19%, 81.\n- Shard 2: 87, 49%, 38.\n- Shard 3: 91, 46%, 45.\n- Shard 4: 91, 65%, 26.\n- Shard 5: 94, 65%, 29.\n- Shard 6: 87, 62%, 26.\n- Shard 7: 90, 68%, 23.\n- Shard 8: 90, 71%, 19.\nGPT-4o-mini (max, median%, min):\n- Shard 1: 90, 32%, 58.\n- Shard 2: 68, 45%, 23.\n- Shard 3: 77, 65%, 13.\n- Shard 4: 74, 58%, 16.\n- Shard 5: 65, 53%, 13.\n- Shard 6: 68, 59%, 10.\n- Shard 7: 65, 56%, 10.\n- Shard 8: 69, 56%, 13.",
+        "title": "LLMs Get Lost In Multi-Turn Conversation",
+        "figure": "Figure 6 (c)"
+    },
+    {
+        "id": 2,
+        "type": "Data Visualization",
+        "instruction": "Plot three diagrams stacked vertically, each showing a pair of box plots connected by dotted lines from the top and bottom whiskers. The y-axis is Performance (0%–100%). Each box plot is annotated with A (Aptitude) at the top whisker and U (Unreliability) as the spread (max minus min). The three scenarios are:\nLoss in aptitude: Left box: A=95, min=70, U=25. Right box: A=65, min=40, U=25. (Same spread, lower aptitude.)\nLoss in reliability: Left box: A=95, min=70, U=25. Right box: A=95, min=30, U=65. (Same aptitude, larger spread.)\nLoss in aptitude & reliability: Left box: A=95, min=70, U=25. Right box: A=80, min=40, U=40. (Both aptitude and spread change.)",
+        "title": "LLMs Get Lost In Multi-Turn Conversation",
+        "figure": "Figure 6 (a)"
+    },
+    {
+        "id": 3,
+        "type": "Data Visualization",
+        "instruction": "Plot four confusion matrices side by side titled Concrete, Relevant, Severe, and Surprising. Each is a 2×2 matrix with Human (no/yes) on the x-axis and LLM judge (no/yes) on the y-axis. Use a colormap where higher values are darker. The cell values (top-left, top-right, bottom-left, bottom-right) = (Human=no/LLM=no, Human=yes/LLM=no, Human=no/LLM=yes, Human=yes/LLM=yes) are:\nConcrete: 13, 0, 0, 17. Relevant: 3, 1, 0, 26. Severe: 4, 0, 6, 22. Surprising: 15, 0, 1, 15.",
+        "title": "'I Don't Think RAI Applies to My Model' – Engaging Non-champions with Sticky Stories for Responsible AI Work",
+        "figure": "Figure 6"
+    },
+    {
+        "id": 4,
+        "type": "Data Visualization",
+        "instruction": "Plot a diverging horizontal bar chart with a central zero axis. The x-axis is Number of participants, ranging from -10 (left) to +15 (right). Bars extending left are Baseline stories and bars extending right are Sticky stories. The 12 row labels and their (baseline, sticky) values are:\n1a Challenges Assumptions/Disagrees/Contests: 0, 7.\n1b Explores Multiple Perspectives: 0, 10.\n1c Connects to Wider Systems/Past Incidents: 6, 9.\n1d Expresses Surprise/Shows Enthusiasm: 3, 15.\n1e Iterative Thinking: 0, 10.\n1f Plans Change: 1, 6.\n2a Skimming: 5, 0.\n2b Ignoring: 1, 0.\n2c Copy-Paste: 3, 0.\n2d Negative Comment/Behavior: 5, 6.\n2e Neutral Stance: 3, 1.\nOther: 1, 0.",
+        "title": "'I Don't Think RAI Applies to My Model' – Engaging Non-champions with Sticky Stories for Responsible AI Work",
+        "figure": "Figure 11"
+    },
+    {
+        "id": 5,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 6,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 7,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 8,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 9,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 10,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 11,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 12,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 13,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 14,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 15,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 16,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 17,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 18,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 19,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 20,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 21,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 22,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 23,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 24,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 25,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 26,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 27,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 28,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 29,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 30,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 31,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 32,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 33,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 34,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 35,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 36,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 37,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 38,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 39,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 40,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 41,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 42,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 43,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 44,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 45,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 46,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 47,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 48,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 49,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    },
+    {
+        "id": 50,
+        "type": "Data Visualization",
+        "instruction": "",
+        "title": "",
+        "figure": ""
+    }
+]

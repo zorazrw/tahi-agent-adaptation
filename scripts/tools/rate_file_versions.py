@@ -9,7 +9,7 @@ then a human-edited ``abstract.md``). Supports ``trajectory``, ``task_units`` (p
 ``trajectory``), and weight exports (``agent_trajectories`` + ``workflow_tree_final``).
 Identical (rubrics + file contents) share one LLM call. Use ``--endpoints-only`` for first/last
 snapshot only; ``--exported-status`` for human/exported marks (no LM). Per-version success %% is
-summarized on stderr; ``--plot`` writes a scatter PNG.
+summarized on stderr; ``--verbose`` prints per-criterion pass/fail lines to stdout. ``--plot`` writes a scatter PNG.
 
 Examples:
   python scripts/tools/rate_file_versions.py -j out.json -s <uuid> -o ratings.json --plot
@@ -203,6 +203,27 @@ def session_trajectory(session: dict[str, Any]) -> list[dict[str, Any]]:
 
 def session_meta(session: dict[str, Any]) -> dict[str, Any]:
     return {"uuid": session.get("uuid"), "name": session.get("name")}
+
+
+def _user_action_runs_from_trajectory(traj: list[dict[str, Any]]) -> list[int]:
+    """Lengths of contiguous user-actor step blocks in trajectory order."""
+    runs: list[int] = []
+    i, n = 0, len(traj)
+    while i < n:
+        if traj[i].get("actor") == "user":
+            j = i
+            while j < n and traj[j].get("actor") == "user":
+                j += 1
+            runs.append(j - i)
+            i = j
+        else:
+            i += 1
+    return runs
+
+
+def session_user_action_stats(session: dict[str, Any]) -> list[int]:
+    """User action counts per iteration (each contiguous user actor block)."""
+    return _user_action_runs_from_trajectory(session_trajectory(session))
 
 
 def workflow_from_session(session: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
@@ -864,6 +885,75 @@ def print_version_summary(report: dict[str, Any]) -> None:
     print("--- end summary ---", file=sys.stderr)
 
 
+def _pass_label(passed: bool | None) -> str:
+    if passed is True:
+        return "success"
+    if passed is False:
+        return "fail"
+    return "unknown"
+
+
+def _print_criterion_lines(criteria: list[str], passes: list[bool | None], *, indent: str = "", out: Any = sys.stdout) -> None:
+    for i, c in enumerate(criteria):
+        lab = passes[i] if i < len(passes) else None
+        print(f"{indent}[{_pass_label(lab)}] {c}", file=out)
+
+
+def print_verbose_report(report: dict[str, Any], *, out: Any = sys.stdout) -> None:
+    if report.get("error"):
+        print(f"error: {report['error']}", file=out)
+        return
+
+    print("--- detailed ratings ---", file=out)
+    print(_session_label(report), file=out)
+
+    tasks = report.get("tasks") or []
+    if tasks:
+        criteria_default = report.get("grading_rubrics") or []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            nid = str(task.get("node_id") or "")
+            desc = str(task.get("description") or "")
+            criteria = task.get("final_rubrics") or criteria_default
+            print(f"\n[{nid}] {desc}", file=out)
+            for ver in task.get("versions") or []:
+                if not isinstance(ver, dict):
+                    continue
+                vi, si = ver.get("version_index"), ver.get("trajectory_step_index")
+                actor = str(ver.get("actor") or "").strip()
+                actor_tag = f" ({actor})" if actor else ""
+                pct = ver.get("average_success_pct")
+                if ver.get("error"):
+                    header = f"  v{vi} @ traj {si}{actor_tag}: error — {ver['error']}"
+                elif isinstance(pct, (int, float)):
+                    header = f"  v{vi} @ traj {si}{actor_tag}: {float(pct):.1f}%"
+                elif report.get("dry_run"):
+                    header = f"  v{vi} @ traj {si}{actor_tag}: (dry-run)"
+                else:
+                    header = f"  v{vi} @ traj {si}{actor_tag}: (not scored)"
+                print(header, file=out)
+
+                lm = ver.get("lm")
+                if isinstance(lm, dict):
+                    crit = lm.get("criteria") or criteria
+                    passes = lm.get("pass_per_criterion") or []
+                else:
+                    crit, passes = criteria, []
+                _print_criterion_lines(crit, passes, indent="  ", out=out)
+                print(file=out)
+    else:
+        criteria = report.get("final_rubrics") or []
+        passes = report.get("pass_per_criterion") or []
+        _print_criterion_lines(criteria, passes, out=out)
+        pct = report.get("average_success_pct")
+        if isinstance(pct, (int, float)):
+            n_pass = sum(1 for p in passes if p is True)
+            print(f"\naverage_success_rate: {n_pass}/{len(criteria)} = {float(pct):.1f}%", file=out)
+
+    print("--- end detailed ratings ---", file=out)
+
+
 def print_exported_summary(report: dict[str, Any]) -> None:
     print(_session_label(report))
     print("scoring: exported_status (no LM)")
@@ -1059,6 +1149,11 @@ def main() -> int:
     p.add_argument("--model", default=None, help=f"Anthropic model (default: {DEFAULT_MODEL})")
     p.add_argument("--base-url", default=None)
     p.add_argument("--plot", nargs="?", const="__default__", default=None, metavar="PNG")
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print per-criterion pass/fail lines to stdout (default: summary on stderr only)",
+    )
     args = p.parse_args()
 
     if args.exported_status and (args.dry_run or args.endpoints_only):
@@ -1091,14 +1186,19 @@ def main() -> int:
         load_dotenv_defaults(args.env_file, args.dotenv_override)
         report = run_report(args)
 
+    session = resolve_session(load_sessions(args.json), args.session)
     (print_exported_summary if args.exported_status else print_version_summary)(report)
+    per_iter = session_user_action_stats(session)
+    print(f"user actions: {len(per_iter)} iteration(s), {sum(per_iter)} total", file=sys.stderr)
+    for i, count in enumerate(per_iter, start=1):
+        print(f"  iteration {i}: {count} user {'action' if count == 1 else 'actions'}", file=sys.stderr)
 
     text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
     if args.out:
         if not loaded_existing:
             args.out.write_text(text, encoding="utf-8")
-    else:
-        sys.stdout.write(text)
+    elif args.verbose:
+        print_verbose_report(report)
 
     if args.plot is not None:
         save_scatter_plot(report, plot_output_path(args))

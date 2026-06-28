@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Postinstall Python setup: scripts/.venv (induce.py, training server) and optional Tinker bridge.
+ * Postinstall Python setup: scripts/.venv (induce.py) and optional Tinker bridge.
  * Invoked from package.json postinstall after electron-rebuild.
  */
 import { spawnSync } from "node:child_process";
@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const scriptsVenv = path.join(root, "scripts", ".venv");
 const bridgeDir = path.join(root, "tinker-bridge");
-const requirements = path.join(root, "scripts", "requirements.txt");
+const INDUCE_PACKAGES = ["anthropic", "python-dotenv"];
 
 function hasCommand(cmd, args = ["--version"]) {
   return spawnSync(cmd, args, { encoding: "utf8" }).status === 0;
@@ -34,21 +34,16 @@ function syncScriptsDeps() {
   const py = pythonCmd();
   if (!hasCommand(py)) {
     console.warn(
-      "[postinstall] Python not on PATH — skipped scripts deps (required for induce.py and training server).\n" +
+      "[postinstall] Python not on PATH — skipped scripts deps (required for induce.py).\n" +
         "  Install Python 3, then run: bun run sync:tinker-bridge"
     );
     return 0;
   }
 
-  if (!existsSync(requirements)) {
-    console.error("[postinstall] scripts/requirements.txt not found; cannot sync Python deps.");
-    return 1;
-  }
-
   if (hasCommand("uv")) {
     const venvStatus = spawnSync("uv", ["venv", scriptsVenv], { cwd: root, stdio: "inherit" }).status ?? 1;
     if (venvStatus !== 0) return venvStatus;
-    return spawnSync("uv", ["pip", "install", "-r", requirements, "--python", venvPython()], {
+    return spawnSync("uv", ["pip", "install", ...INDUCE_PACKAGES, "--python", venvPython()], {
       cwd: root,
       stdio: "inherit",
     }).status ?? 1;
@@ -58,7 +53,7 @@ function syncScriptsDeps() {
     const venvStatus = spawnSync(py, ["-m", "venv", scriptsVenv], { cwd: root, stdio: "inherit" }).status ?? 1;
     if (venvStatus !== 0) return venvStatus;
   }
-  return spawnSync(venvPython(), ["-m", "pip", "install", "-r", requirements], {
+  return spawnSync(venvPython(), ["-m", "pip", "install", ...INDUCE_PACKAGES], {
     cwd: root,
     stdio: "inherit",
   }).status ?? 1;

@@ -23,9 +23,9 @@
     {
         "id": 4,
         "type": "Data Visualization",
-        "instruction": "N/A",
+        "instruction": "Plot a curve illustration of mode shift on an x-axis ranging from -40 to 40. \nDraw one bimodal curve centered at 0 with two peaks at approximately x=-8 and x=8, each reaching a height of about 1.0, with a local minimum (valley) at x=0 of about 0.3. \nDraw two red unimodal Gaussian curves, one centered at x=-25 (peak height ~0.85) and one centered at x=25 (peak height ~0.85), each with a standard deviation of about 7. \nAdd two arrows pointing outward: one pointing left at approximately x=-13 and one pointing right at approximately x=13, to indicate the shift of the bimodal curve toward the two unimodal curves.",
         "title": "On the Generalization Properties of Diffusion Models",
-        "figure": "N/A"
+        "figure": "Figure 2"
     },
     {
         "id": 5,
