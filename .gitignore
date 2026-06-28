@@ -43,4 +43,5 @@ runs/*
 scripts/eval.sh
 
 # Local Tinker bridge environment
+scripts/.venv/
 tinker-bridge/.venv/

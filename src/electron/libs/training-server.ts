@@ -6,6 +6,7 @@ import {
   getTrainingProxyBaseUrl,
   isFetchConnectionError,
   isTrainingProxyDisabled,
+  TRAINING_PROXY_START_HINT,
 } from "./training-proxy.js";
 
 const SERVER_SCRIPT = "server_online.py";
@@ -34,6 +35,16 @@ function scriptsRootDir(): string | null {
 }
 
 function pythonExecutable(): string {
+  const root = scriptsRootDir();
+  if (root) {
+    const venvPy =
+      process.platform === "win32"
+        ? join(root, ".venv", "Scripts", "python.exe")
+        : join(root, ".venv", "bin", "python3");
+    const venvPyAlt = join(root, ".venv", "bin", "python");
+    if (existsSync(venvPy)) return venvPy;
+    if (existsSync(venvPyAlt)) return venvPyAlt;
+  }
   return process.platform === "win32" ? "python" : "python3";
 }
 
@@ -138,6 +149,28 @@ async function ensureTrainingServerRunning(): Promise<void> {
     );
   } else {
     console.log(`[training-server] ready at ${baseUrl}`);
+  }
+}
+
+/** Wait until the training proxy responds to /healthz (starts the server if needed). */
+export async function waitForTrainingServerReady(): Promise<void> {
+  if (isTrainingProxyDisabled()) return;
+
+  const baseUrl = getTrainingProxyBaseUrl();
+  if (!baseUrl) throw new Error(TRAINING_PROXY_START_HINT);
+
+  if (startPromise) await startPromise;
+
+  if (await isTrainingServerHealthy(baseUrl)) return;
+
+  if (!weightUpdateModeActive) {
+    throw new Error(TRAINING_PROXY_START_HINT);
+  }
+
+  await ensureTrainingServerRunning();
+
+  if (!(await isTrainingServerHealthy(baseUrl))) {
+    throw new Error(TRAINING_PROXY_START_HINT);
   }
 }
 

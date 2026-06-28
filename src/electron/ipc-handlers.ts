@@ -743,6 +743,7 @@ function triggerNodeSolve(sessionId: string, nodeId: string) {
   runClaude({
     prompt: nodePrompt,
     session,
+    preserveExistingWorkflow: true,
     branchEntryId,
     trimExecutionContextToLastActions: EXECUTION_CONTEXT_MAX_ACTIONS,
     onEvent: emit,

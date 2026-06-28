@@ -180,7 +180,11 @@ function extractUserPrompt(message: Record<string, unknown>): string {
   return "";
 }
 
-function normalizeAssistantBlocks(message: Record<string, unknown>, includeToolUses: boolean): PiAssistantBlock[] {
+function normalizeAssistantBlocks(
+  message: Record<string, unknown>,
+  includeToolUses: boolean,
+  skippedWorkflowPlanToolCallIds?: Set<string>
+): PiAssistantBlock[] {
   const content = Array.isArray(message.content) ? message.content : [];
   const blocks: PiAssistantBlock[] = [];
   for (const block of content) {
@@ -192,7 +196,15 @@ function normalizeAssistantBlocks(message: Record<string, unknown>, includeToolU
     } else if (block.type === "thinking" && "thinking" in block) {
       blocks.push({ type: "thinking", thinking: String(block.thinking ?? "") });
     } else if (includeToolUses && block.type === "toolCall") {
+      const toolCallId = String((block as { id?: unknown }).id ?? "");
       const toolName = String((block as { name?: unknown }).name ?? "tool");
+      if (
+        isWorkflowPlanToolName(toolName) &&
+        toolCallId &&
+        skippedWorkflowPlanToolCallIds?.has(toolCallId)
+      ) {
+        continue;
+      }
       const rawArgs = (block as { arguments?: unknown }).arguments;
       const input = isWorkflowPlanToolName(toolName)
         ? normalizeWorkflowPlanToolInput(rawArgs)
@@ -212,6 +224,31 @@ function normalizeAssistantBlocks(message: Record<string, unknown>, includeToolU
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function collectSkippedWorkflowPlanToolCallIds(messages: AgentMessage[]): Set<string> {
+  const skipped = new Set<string>();
+  for (const rawMessage of messages) {
+    const message = asRecord(rawMessage);
+    if (!message || message.role !== "toolResult") continue;
+    if (!isWorkflowPlanToolName(String(message.toolName ?? ""))) continue;
+    const details = asRecord(message.details);
+    const content = stringifyToolContent(message.content);
+    const wasSkipped =
+      details?.skipped === true ||
+      content.includes("Workflow plan is already registered");
+    if (!wasSkipped) continue;
+    const toolCallId = String(message.toolCallId ?? "");
+    if (toolCallId) skipped.add(toolCallId);
+  }
+  return skipped;
+}
+
+function shouldBlockWorkflowPlanReregistration(
+  preserveExistingWorkflow: boolean,
+  session: Session
+): boolean {
+  return preserveExistingWorkflow && hasExistingWorkflowPlan(session);
 }
 
 function buildCanonicalHistory(
@@ -252,6 +289,8 @@ function buildCanonicalHistory(
     },
   ];
 
+  const skippedWorkflowPlanToolCallIds = collectSkippedWorkflowPlanToolCallIds(messages);
+
   for (const rawMessage of messages) {
     const message = asRecord(rawMessage);
     if (!message) continue;
@@ -264,7 +303,7 @@ function buildCanonicalHistory(
     }
 
     if (message.role === "assistant") {
-      const blocks = normalizeAssistantBlocks(message, true);
+      const blocks = normalizeAssistantBlocks(message, true, skippedWorkflowPlanToolCallIds);
       if (blocks.length > 0) {
         history.push({
           type: "assistant",
@@ -338,7 +377,7 @@ function createWorkflowPlanTool(
       tasks: Type.Array(workflowNodeSchema),
     }),
     execute: async (_toolCallId, params) => {
-      if (preserveExistingWorkflow && hasExistingWorkflowPlan(session)) {
+      if (shouldBlockWorkflowPlanReregistration(preserveExistingWorkflow, session)) {
         return {
           content: [
             {
@@ -488,6 +527,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       expertiseTask: session.expertiseTask,
     });
     let planRegistered = false;
+    let stopAfterWorkflowPlan = false;
     let lastUsage: Record<string, unknown> | undefined;
 
     onEvent({
@@ -514,18 +554,26 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       settingsManager,
       resourceLoader,
       sessionManager,
-      tools: [
-        createReadTool(cwd),
-        bashTool,
-        createEditTool(cwd),
-        createWriteTool(cwd),
-        createGrepTool(cwd),
-        createFindTool(cwd),
-        createLsTool(cwd),
-      ],
+      tools: shouldForceWorkflowPlan
+        ? []
+        : [
+            createReadTool(cwd),
+            bashTool,
+            createEditTool(cwd),
+            createWriteTool(cwd),
+            createGrepTool(cwd),
+            createFindTool(cwd),
+            createLsTool(cwd),
+          ],
       customTools: [
         createWorkflowPlanTool(session, onEvent, () => {
           planRegistered = true;
+          if (shouldForceWorkflowPlan) {
+            stopAfterWorkflowPlan = true;
+            queueMicrotask(() => {
+              void piSession.abort();
+            });
+          }
         }, preserveExistingWorkflow),
         createAskUserQuestionTool(session, onEvent),
       ],
@@ -600,6 +648,12 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       }
 
       if (event.type === "tool_execution_start") {
+        if (
+          isWorkflowPlanToolName(event.toolName) &&
+          shouldBlockWorkflowPlanReregistration(preserveExistingWorkflow, session)
+        ) {
+          return;
+        }
         onEvent({
           type: "stream.message",
           payload: {
@@ -623,13 +677,22 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
             },
           },
         });
-        if (isWorkflowPlanToolName(event.toolName)) {
+        if (
+          isWorkflowPlanToolName(event.toolName) &&
+          !shouldBlockWorkflowPlanReregistration(preserveExistingWorkflow, session)
+        ) {
           planRegistered = true;
         }
         return;
       }
 
       if (event.type === "tool_execution_end") {
+        if (
+          isWorkflowPlanToolName(event.toolName) &&
+          shouldBlockWorkflowPlanReregistration(preserveExistingWorkflow, session)
+        ) {
+          return;
+        }
         onEvent({
           type: "stream.message",
           payload: {
@@ -689,34 +752,45 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       }
     });
 
+    const swallowPlanningAbort = async (run: () => Promise<void>) => {
+      try {
+        await run();
+      } catch (error) {
+        if ((error as Error).name === "AbortError" && stopAfterWorkflowPlan) return;
+        throw error;
+      }
+    };
+
     try {
       const llmDebugMessages: PiLlmDebugMessage[] = [];
-      await runWithLlmDebugContext(
-        {
-          provider: piSession.model?.provider,
-          model: piSession.model?.id,
-          emit: (message) => {
-            llmDebugMessages.push(message);
-            onEvent({
-              type: "stream.message",
-              payload: {
-                sessionId: session.id,
-                message,
-              },
-            });
+      await swallowPlanningAbort(() =>
+        runWithLlmDebugContext(
+          {
+            provider: piSession.model?.provider,
+            model: piSession.model?.id,
+            emit: (message) => {
+              llmDebugMessages.push(message);
+              onEvent({
+                type: "stream.message",
+                payload: {
+                  sessionId: session.id,
+                  message,
+                },
+              });
+            },
           },
-        },
-        async () => {
-          if (trimExecutionContextToLastActions != null && trimExecutionContextToLastActions > 0) {
-            await promptWithExecutionContextRetry(
-              piSession,
-              promptToSend,
-              trimExecutionContextToLastActions
-            );
-          } else {
-            await piSession.prompt(promptToSend);
-          }
-        },
+          async () => {
+            if (trimExecutionContextToLastActions != null && trimExecutionContextToLastActions > 0) {
+              await promptWithExecutionContextRetry(
+                piSession,
+                promptToSend,
+                trimExecutionContextToLastActions
+              );
+            } else {
+              await piSession.prompt(promptToSend);
+            }
+          },
+        ),
       );
 
       const sessionMessages = () => sessionManager.buildSessionContext().messages;
@@ -726,7 +800,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           tryRecoverWorkflowPlanFromMessages(sessionMessages(), session, onEvent);
         }
         if (!hasExistingWorkflowPlan(session)) {
-          await piSession.prompt(WORKFLOW_PLAN_RETRY_USER_PROMPT);
+          await swallowPlanningAbort(() => piSession.prompt(WORKFLOW_PLAN_RETRY_USER_PROMPT));
           if (!planRegistered) {
             tryRecoverWorkflowPlanFromMessages(sessionMessages(), session, onEvent);
           }

@@ -7,6 +7,7 @@ import {
   isTrainingProxyDisabled,
   TRAINING_PROXY_START_HINT,
 } from "./training-proxy.js";
+import { waitForTrainingServerReady } from "./training-server.js";
 
 const LOG_BASENAME = "context-export.log";
 
@@ -225,6 +226,16 @@ function scriptsRootDir(): string | null {
 }
 
 function pythonExecutable(): string {
+  const root = scriptsRootDir();
+  if (root) {
+    const venvPy =
+      process.platform === "win32"
+        ? join(root, ".venv", "Scripts", "python.exe")
+        : join(root, ".venv", "bin", "python3");
+    const venvPyAlt = join(root, ".venv", "bin", "python");
+    if (existsSync(venvPy)) return venvPy;
+    if (existsSync(venvPyAlt)) return venvPyAlt;
+  }
   return process.platform === "win32" ? "python" : "python3";
 }
 
@@ -385,6 +396,7 @@ export function uploadSessionForTinkerTraining(sessionId: string): void {
 
         const parsed = JSON.parse(readFileSync(fullJsonPath, "utf8")) as unknown;
         const body = Array.isArray(parsed) ? parsed : [parsed];
+        await waitForTrainingServerReady();
         const res = await fetch(`${baseUrl}/session`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
