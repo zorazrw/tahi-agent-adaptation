@@ -39,7 +39,7 @@ scripts/**/*.json
 scripts/runs
 scripts/brain
 scripts/config*
-!scripts/config_lastk.yaml
+!scripts/config_online.yaml
 runs/*
 scripts/eval.sh
 
