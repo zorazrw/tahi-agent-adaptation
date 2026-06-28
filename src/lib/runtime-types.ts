@@ -340,7 +340,8 @@ export type ServerEvent =
   | { type: "session.title"; payload: { sessionId: string; title: string } }
   | { type: "session.deleted"; payload: { sessionId: string } }
   | { type: "session.nodeCompleted"; payload: { sessionId: string; nodeId: string } }
-  | { type: "session.contextInduction"; payload: { sessionId: string; phase: string; ok?: boolean } }
+  | { type: "session.contextInduction"; payload: { sessionId: string; phase: string; ok?: boolean; trainingTriggered?: boolean; historyLen?: number; minSessions?: number } }
+  | { type: "session.weightTraining"; payload: { phase: "started" | "finished" } }
   | { type: "session.verifierCheck"; payload: { sessionId: string; nodeId: string; phase: string } }
   | { type: "permission.request"; payload: { sessionId: string; toolUseId: string; toolName: string; input: unknown } }
   | { type: "runner.error"; payload: { sessionId?: string; message: string } }

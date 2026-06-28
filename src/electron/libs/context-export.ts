@@ -12,7 +12,15 @@ const LOG_BASENAME = "context-export.log";
 
 export type ContextInductionNotifierEvent =
   | { kind: "start"; sessionId: string }
-  | { kind: "end"; sessionId: string; ok: boolean; trainingUpload?: boolean };
+  | {
+      kind: "end";
+      sessionId: string;
+      ok: boolean;
+      trainingUpload?: boolean;
+      trainingTriggered?: boolean;
+      historyLen?: number;
+      minSessions?: number;
+    };
 
 let inductionNotifier: ((ev: ContextInductionNotifierEvent) => void) | null = null;
 
@@ -248,22 +256,40 @@ export function enqueueSessionJob(sessionId: string, run: () => Promise<void>): 
   sessionExportChains.set(sessionId, next);
 }
 
+type TrainingUploadResult = {
+  trainingTriggered?: boolean;
+  historyLen?: number;
+  minSessions?: number;
+};
+
 export function runWithInductionNotifier(
   sessionId: string,
-  inner: () => Promise<void>,
+  inner: () => Promise<void | TrainingUploadResult>,
   options?: { trainingUpload?: boolean },
 ): Promise<void> {
   inductionNotifier?.({ kind: "start", sessionId });
   let ok = false;
+  let uploadMeta: TrainingUploadResult | undefined;
   return inner()
-    .then(() => {
+    .then((result) => {
       ok = true;
+      if (result && typeof result === "object") {
+        uploadMeta = result;
+      }
     })
     .catch((e) => {
       logLine(`Session job failed (${sessionId}): ${e instanceof Error ? e.message : String(e)}`);
     })
     .finally(() => {
-      inductionNotifier?.({ kind: "end", sessionId, ok, trainingUpload: options?.trainingUpload });
+      inductionNotifier?.({
+        kind: "end",
+        sessionId,
+        ok,
+        trainingUpload: options?.trainingUpload,
+        trainingTriggered: uploadMeta?.trainingTriggered,
+        historyLen: uploadMeta?.historyLen,
+        minSessions: uploadMeta?.minSessions,
+      });
     });
 }
 
@@ -368,6 +394,24 @@ export function uploadSessionForTinkerTraining(sessionId: string): void {
           const text = await res.text().catch(() => "");
           throw new Error(`Training proxy HTTP ${res.status}: ${text.slice(0, 500)}`);
         }
+        const data = (await res.json()) as {
+          training_triggered?: boolean;
+          warmup?: boolean;
+          history_len?: number;
+          min_sessions?: number;
+        };
+        const trainingTriggered = data.training_triggered === true;
+        logLine(
+          `Training upload OK session=${sessionId} training_triggered=${trainingTriggered}` +
+            (data.history_len != null && data.min_sessions != null
+              ? ` history=${data.history_len}/${data.min_sessions}`
+              : ""),
+        );
+        return {
+          trainingTriggered,
+          historyLen: data.history_len,
+          minSessions: data.min_sessions,
+        };
       },
       { trainingUpload: true },
     ),

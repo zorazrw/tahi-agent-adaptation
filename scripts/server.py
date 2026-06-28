@@ -292,6 +292,31 @@ class Server:
         path = self.experiment_dir / mode / stamp
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
+
+    def _session_enqueue_metadata(self, body: dict) -> dict:
+        """Extra fields for the ``POST /session`` response (override in subclasses)."""
+        pending = self.sessions_queue.qsize()
+        return {
+            "training_triggered": pending >= self.config.update_every_n_sessions,
+        }
+
+    def _broadcast_training_status(
+        self,
+        phase: Literal["started", "finished"],
+        *,
+        ok: bool | None = None,
+        sessions: int = 0,
+    ) -> None:
+        payload: dict[str, object] = {
+            "phase": phase,
+            "mode": self.config.mode,
+            "sessions": sessions,
+            "updated_at": time.time(),
+        }
+        if ok is not None:
+            payload["ok"] = ok
+        log.info("Broadcast training-status: phase=%s sessions=%d", phase, sessions)
+        self.model_manager.broadcast_sse("training-status", payload)
         
     def _build_app(self) -> FastAPI:
         app = FastAPI(title=self._TITLE, lifespan=lifespan)
@@ -312,7 +337,8 @@ class Server:
             
             log.info("Session enqueued: id=%s name=%r queue_depth=%d",
                      session_id, name, self.sessions_queue.qsize())
-            return {"ok": True, "session_id": session_id}
+            meta = self._session_enqueue_metadata(body)
+            return {"ok": True, "session_id": session_id, **meta}
 
         @app.get("/v1/models")
         async def _get_models(request: Request):
@@ -354,6 +380,12 @@ class Server:
                     latest = self.model_manager.latest_update
                     if latest is not None:
                         yield f"event: model-update\ndata: {json.dumps(latest)}\n\n"
+                    # Late subscribers that connect mid-round still see the shine.
+                    if self.training_lock.locked():
+                        yield (
+                            "event: training-status\n"
+                            f"data: {json.dumps({'phase': 'started', 'mode': self.config.mode, 'updated_at': time.time()})}\n\n"
+                        )
                     while True:
                         if await request.is_disconnected():
                             break
@@ -362,7 +394,11 @@ class Server:
                         except asyncio.TimeoutError:
                             yield ": heartbeat\n\n"
                             continue
-                        yield f"event: model-update\ndata: {json.dumps(event)}\n\n"
+                        if isinstance(event, tuple):
+                            event_name, data = event
+                        else:
+                            continue
+                        yield f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
                 finally:
                     self.model_manager.unsubscribe(queue)
 
@@ -547,6 +583,8 @@ class Server:
                 log.info("Training started: mode=%s sessions=%d current_model=%s",
                          self.config.mode, len(items), self.model_manager.model_path)
 
+                self._broadcast_training_status("started", sessions=len(items))
+                training_ok = False
                 try:
                     checkpoint = await self._train_round(items)
 
@@ -603,9 +641,14 @@ class Server:
 
                     log.info("Training complete: mode=%s sessions=%d model=%s (was %s)",
                              self.config.mode, len(items), checkpoint.sampler_path, prev_model)
+                    training_ok = True
                 except Exception:
                     log.exception("Training failed: mode=%s sessions=%d",
                                   self.config.mode, len(items))
+                finally:
+                    self._broadcast_training_status(
+                        "finished", ok=training_ok, sessions=len(items),
+                    )
 
             if self.training_queue.qsize() >= self.config.update_every_n_sessions:
                 self.training_event.set()

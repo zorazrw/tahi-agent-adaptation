@@ -630,12 +630,16 @@ class ModelManager:
     def broadcast(self, update: ModelUpdate | dict) -> None:
         event = update.to_event() if isinstance(update, ModelUpdate) else update
         self.latest_update = event
+        self.broadcast_sse("model-update", event)
+
+    def broadcast_sse(self, event_name: str, data: dict) -> None:
+        """Push a named SSE event to all subscribers (non-blocking)."""
         for q in list(self._subscribers):
             try:
-                q.put_nowait(event)
+                q.put_nowait((event_name, data))
             except Exception:
                 # A broken subscriber must never stall training.
-                log.exception("Failed to enqueue model update for subscriber")
+                log.exception("Failed to enqueue SSE event %r for subscriber", event_name)
 
     # ------------------------------------------------------------------
     # State persistence

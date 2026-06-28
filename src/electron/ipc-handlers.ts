@@ -158,8 +158,21 @@ setContextInductionNotifier((ev) => {
   } else {
     broadcast({
       type: "session.contextInduction",
-      payload: { phase: "finished", sessionId: ev.sessionId, ok: ev.ok },
+      payload: {
+        phase: "finished",
+        sessionId: ev.sessionId,
+        ok: ev.ok,
+        trainingTriggered: ev.trainingTriggered,
+        historyLen: ev.historyLen,
+        minSessions: ev.minSessions,
+      },
     });
+    if (ev.ok && ev.trainingUpload && ev.trainingTriggered === false) {
+      broadcast({
+        type: "session.weightTraining",
+        payload: { phase: "finished" },
+      });
+    }
     if (!ev.ok && ev.trainingUpload) {
       broadcast({
         type: "runner.error",
