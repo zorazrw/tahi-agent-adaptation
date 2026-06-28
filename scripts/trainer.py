@@ -39,17 +39,21 @@ try:
     from weight.train.run_dpo import (
         Config as DPOConfig,
         OnlineDPOAcceptedDataset,
+        OnlineDPOAgenticDataset,
         compute_dpo_loss,
         _print_example as _DPO_print_example,
         _sample_online_dpo_pairs_async,
+        _sample_agentic_dpo_pairs_async,
     )
     DPO_IMPORT_ERROR: Exception | None = None
 except Exception as e:  # noqa: BLE001
     DPOConfig = Any
     OnlineDPOAcceptedDataset = Any
+    OnlineDPOAgenticDataset = Any
     compute_dpo_loss = None
     _DPO_print_example = None
     _sample_online_dpo_pairs_async = None
+    _sample_agentic_dpo_pairs_async = None
     DPO_IMPORT_ERROR = e
 from weight.train.run_opd import (
     Config as ArtifactOPDConfig,
@@ -364,7 +368,8 @@ class DPOTrainer(Trainer):
         self.training_client = training_client
         self.service_client = service_client
         self.reference_client = reference_client
-        self.sampling_client = reference_client if config.online_rollout else None
+        self._rollout_enabled = config.online_rollout or config.agentic_rollout
+        self.sampling_client = reference_client if self._rollout_enabled else None
         self.evaluators = [evaluator() for evaluator in config.evaluator_builders]
         self.infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
         self.ml_logger = ml_log.setup_logging(
@@ -378,7 +383,7 @@ class DPOTrainer(Trainer):
         self.tokenizer = get_tokenizer(config.model_name)
         self.renderer = (
             renderers.get_renderer(config.renderer_name, tokenizer=self.tokenizer)
-            if config.online_rollout and config.renderer_name is not None
+            if self._rollout_enabled and config.renderer_name is not None
             else None
         )
 
@@ -410,7 +415,7 @@ class DPOTrainer(Trainer):
         
     async def do_update(
         self, 
-        dataset: SupervisedDataset | OnlineDPOAcceptedDataset,
+        dataset: SupervisedDataset | OnlineDPOAcceptedDataset | OnlineDPOAgenticDataset,
     ) -> TrainingCheckpoint:
         """Run ``num_epochs`` passes over the incoming ``dataset`` and save a checkpoint.
 
@@ -480,7 +485,7 @@ class DPOTrainer(Trainer):
         self,
         epoch_idx: int,
         batch_idx: int,
-        dataset: SupervisedDataset | OnlineDPOAcceptedDataset,
+        dataset: SupervisedDataset | OnlineDPOAcceptedDataset | OnlineDPOAgenticDataset,
     ):
         """Perform a single DPO training update step.
 
@@ -542,7 +547,65 @@ class DPOTrainer(Trainer):
                 metrics.update(eval_metrics)
 
             rollout_metrics: dict[str, float] = {}
-            if self.config.online_rollout:
+            if self.config.agentic_rollout:
+                if self.sampling_client is None or self.renderer is None:
+                    raise RuntimeError("DPO agentic rollout is missing sampling client or renderer")
+                async with trace.scope_span("sample_agentic_dpo"):
+                    rows = dataset.get_batch(batch_idx)  # type: ignore[union-attr]
+                    data, rollout_metrics = await _sample_agentic_dpo_pairs_async(
+                        rows,
+                        self.renderer,
+                        self.sampling_client,
+                        num_rollouts=self.config.agentic_num_rollouts,
+                        pairs_per_session=dataset.pairs_per_session,  # type: ignore[union-attr]
+                        target_sessions=dataset.sessions_per_batch,  # type: ignore[union-attr]
+                        max_concurrent_rollouts=self.config.agentic_max_concurrent_rollouts,
+                        match_min_similarity=self.config.agentic_match_min_similarity,
+                        include_first_last=self.config.agentic_include_first_last,
+                        max_tokens=self.config.rollout_max_tokens,
+                        temperature=self.config.rollout_temperature,
+                        max_turns=self.config.agentic_max_turns,
+                        max_turns_per_step=self.config.agentic_max_turns_per_step,
+                        max_steps=self.config.agentic_max_steps,
+                        enable_bash=self.config.agentic_enable_bash,
+                        tool_timeout_s=self.config.agentic_tool_timeout_s,
+                        max_trajectory_tokens=self.config.agentic_max_trajectory_tokens,
+                        max_length=dataset._max_length,  # type: ignore[union-attr]
+                        step=step,
+                        sample_log_path=(
+                            Path(self.config.log_path) / "dpo_agentic_rollout_samples.jsonl"
+                            if self.config.log_rollout_samples else None
+                        ),
+                        sample_log_chars=self.config.rollout_sample_log_chars,
+                        finish_log_path=Path(self.config.log_path) / "dpo_agentic_rollout_finished.jsonl",
+                        raw_trajectory_log_path=(
+                            Path(self.config.log_path) / "dpo_agentic_rollout_trajectories.jsonl"
+                            if self.config.log_rollout_samples else None
+                        ),
+                    )
+                metrics.update(rollout_metrics)
+                if not data:
+                    learning_rate = self.config.learning_rate * compute_schedule_lr_multiplier(
+                        lr_schedule=self.config.lr_schedule,
+                        step=step,
+                        total_steps=self.total_steps,
+                    )
+                    metrics.update(
+                        {
+                            "dpo_online/no_valid_batch": 1.0,
+                            "learning_rate": learning_rate,
+                            "progress": step / max(self.total_steps, 1),
+                        }
+                    )
+                    self.ml_logger.log_metrics(metrics=metrics, step=step)
+                    self.logger.warning(
+                        "Skipping DPO step %d: no valid agentic artifact pairs (filter_rate=%.3f)",
+                        step,
+                        rollout_metrics.get("dpo_online/filter_rate", 0.0),
+                    )
+                    self.step_idx += 1
+                    return
+            elif self.config.online_rollout:
                 if self.sampling_client is None or self.renderer is None:
                     raise RuntimeError("DPO online rollout is missing sampling client or renderer")
                 async with trace.scope_span("sample_online_dpo"):
@@ -687,7 +750,13 @@ class DPOTrainer(Trainer):
                 optim_future = await self.training_client.optim_step_async(adam_params)
                 await optim_future.result_async()
 
-                if self.config.online_rollout:
+                # Off-policy agentic DPO keeps the frozen initial snapshot (==
+                # reference model) for the whole run; only refresh on-policy.
+                off_policy_agentic = (
+                    self.config.agentic_rollout
+                    and self.config.agentic_policy_mode == "off_policy"
+                )
+                if self._rollout_enabled and not off_policy_agentic:
                     self.sampling_client = (
                         await self.training_client.save_weights_and_get_sampling_client_async()
                     )

@@ -1,5 +1,5 @@
 # -- Mode --
-mode: reinforce  # "dpo", "opd", or "reinforce"
+mode: dpo  # "dpo", "opd", or "reinforce"
 
 # -- Inference --
 temperature: 0.3
@@ -7,13 +7,16 @@ logprobs: false
 
 # -- Update --
 update_every_n_sessions: 1
+training_window_sessions: 4
+training_window_min_sessions: 4
+training_session_max_uses: 4
 
 # -- Training (shared) --
-lora_rank: 64
+lora_rank: 32
 dry_run: false
-learning_rate: 5.0e-5
+learning_rate: 3.0e-5
 num_epochs: 1
-batch_size: 1
+batch_size: 16   # for dpo_agentic_rollout: target # of preference pairs (training samples) per batch
 lr_schedule: cosine
 max_steps: null
 max_length: null
@@ -24,6 +27,55 @@ dpo_beta: 0.1
 dpo_pair_mode: first_last
 dpo_rpo_alpha: 0.0
 dpo_use_ipo: false
+
+# -- DPO agentic mode (only used when dpo_agentic_rollout: true) --
+# The rejected side is produced by a full multi-turn tool-using rollout per
+# session in a live sandbox (a planning turn plus one "Proceed with: <step>"
+# user turn per step the model itself planned). The student's final artifact
+# (matched to the chosen file by basename) becomes the rejected write, while
+# the session's final accepted artifact remains the chosen write. Only the
+# artifact write is trained on, not the intermediate tool calls. Requires
+# Tinker sampling (incompatible with the SkyRL path).
+dpo_agentic_rollout: true
+# on_policy: refresh the sampler after every optim step so rejected rollouts
+#   track the current policy (true online DPO; most expensive).
+# off_policy: keep the frozen initial snapshot (== reference model) for the whole
+#   run, using rollouts as a one-shot negative-augmentation source (cheaper).
+dpo_agentic_policy_mode: on_policy   # "on_policy" or "off_policy"
+dpo_agentic_num_rollouts: 4           # independent rejected rollouts sampled per session, run in parallel
+# Batch composition: batch_size is the target # of preference pairs. Each batch
+# draws batch_size // dpo_agentic_pairs_per_session sessions, and EVERY selected
+# session contributes exactly dpo_agentic_pairs_per_session pairs (subsampled if
+# the rollouts yield more, oversampled by cycling if fewer). With batch_size=16
+# and pairs_per_session=4 => 4 sessions x 4 pairs each = 16 samples per batch.
+dpo_agentic_pairs_per_session: 4
+# Extra sessions fetched per batch beyond what's needed, so sessions whose
+# rollouts yield zero valid pairs can be replaced (0 = no replacement).
+dpo_agentic_session_reserve: 2
+# Cap on rollouts running concurrently across the whole batch (0 = unlimited).
+# Each in-flight rollout holds a sandbox + a growing prompt in memory, so lower
+# this if Python RSS gets too high (trades peak memory for wall-clock time).
+dpo_agentic_max_concurrent_rollouts: 4
+# Additive offline rollout source. When true, each session's FIRST-written
+# artifact version is also injected as a synthetic rejected snapshot (the
+# "first_last" pair) alongside the on-policy model rollouts, paired against the
+# same final/chosen artifact. Skipped when a file has <2 versions or the first
+# version already equals the final. Helps early on when on-policy rollouts often
+# yield no valid pair. Default false.
+dpo_agentic_include_first_last: false
+# How a student's rollout file is matched to a chosen artifact. Matching is by
+# CONTENT/type (not filename), since the rollout starts from an empty sandbox and
+# the model picks its own path. This is the min content-similarity (0..1) required
+# for a similarity-based match; single same-extension candidates and single-file
+# rollouts bypass it. Lower => more (looser) pairs; raise if negatives look unrelated.
+dpo_agentic_match_min_similarity: 0.05
+dpo_agentic_max_turns: 48            # overall safety ceiling on assistant turns per episode
+dpo_agentic_max_turns_per_step: 8    # inner agent-loop cap within a single planned step
+dpo_agentic_max_steps: 6             # max planned (leaf) steps replayed as "Proceed with" turns
+dpo_agentic_enable_bash: true        # allow the bash tool (runs on the server host)
+dpo_agentic_tool_timeout_s: 20       # per-bash-command timeout
+dpo_agentic_max_trajectory_tokens:   # null = no cap; else stop the rollout near this many tokens
+dpo_min_artifact_versions: 1         # set 2 to only use files revised after follow-ups
 
 # -- OPD-specific --
 opd_max_tokens: 16384
@@ -85,7 +137,7 @@ wandb_name: null
 # -- Model lifecycle --
 # Base model (or registry slug) to use when training starts before any
 # /v1/chat/completions call has selected a model. Matches scripts/sessions/*.json.
-preload_model: Qwen/Qwen3.5-4B
+preload_model: Qwen/Qwen3.6-35B-A3B
 
 # -- Proxy Server --
 proxy_host: localhost

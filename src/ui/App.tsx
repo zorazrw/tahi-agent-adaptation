@@ -96,6 +96,8 @@ function App() {
   const brainShineFallbackTimeoutRef = useRef<number | null>(null);
   const prevContextInductionDepthRef = useRef(0);
   const [brainInductionPending, setBrainInductionPending] = useState(false);
+  const [weightTrainingActive, setWeightTrainingActive] = useState(false);
+  const [sessionUploadStatus, setSessionUploadStatus] = useState<string | null>(null);
   const [previewRestoreStash, setPreviewRestoreStash] = useState<PreviewFileSnapshotEntry | null>(null);
 
   const sessions = useAppStore((s) => s.sessions);
@@ -154,6 +156,52 @@ function App() {
   const onEvent = useCallback((event: ServerEvent) => {
     handleServerEvent(event);
     handlePartialMessages(event);
+    if (event.type === "session.weightTraining") {
+      if (event.payload.phase === "started") {
+        setWeightTrainingActive(true);
+        setBrainInductionPending(false);
+        if (brainShineFallbackTimeoutRef.current !== null) {
+          window.clearTimeout(brainShineFallbackTimeoutRef.current);
+          brainShineFallbackTimeoutRef.current = null;
+        }
+      } else if (event.payload.phase === "finished") {
+        setWeightTrainingActive(false);
+        setBrainInductionPending(false);
+      }
+    } else if (
+      event.type === "session.contextInduction"
+      && event.payload.phase === "finished"
+      && event.payload.ok === false
+      && !readStoredAutoInduction()
+    ) {
+      setBrainInductionPending(false);
+      setWeightTrainingActive(false);
+    } else if (
+      event.type === "session.contextInduction"
+      && event.payload.phase === "finished"
+      && event.payload.ok
+      && !readStoredAutoInduction()
+      && event.payload.trainingTriggered === false
+    ) {
+      setBrainInductionPending(false);
+      setWeightTrainingActive(false);
+      const h = event.payload.historyLen;
+      const m = event.payload.minSessions;
+      const status =
+        h != null && m != null
+          ? `Session uploaded (${h}/${m} collected for training)`
+          : "Session uploaded (training not started yet)";
+      setSessionUploadStatus(status);
+      window.setTimeout(() => setSessionUploadStatus(null), 8000);
+    } else if (
+      event.type === "session.contextInduction"
+      && event.payload.phase === "finished"
+      && event.payload.ok
+      && !readStoredAutoInduction()
+      && event.payload.trainingTriggered === true
+    ) {
+      setSessionUploadStatus(null);
+    }
     // When session stops (idle/error/completed), clear "Thinking..." so it doesn't stick after Stop
     if (
       event.type === "session.status" &&
@@ -224,6 +272,18 @@ function App() {
     window.electron?.sendClientEvent?.({
       type: "session.setAutoContextInduction",
       payload: { sessionId: "", autoContextInduction: readStoredAutoInduction() },
+    });
+  }, []);
+
+  useEffect(() => {
+    const onModelUpdate = window.electron?.onTinkerModelUpdated;
+    if (!onModelUpdate) return;
+    return onModelUpdate(() => {
+      // Only clear when a training round was active; ignore stale reconnect updates.
+      setWeightTrainingActive((active) => {
+        if (active) setBrainInductionPending(false);
+        return false;
+      });
     });
   }, []);
 
@@ -412,11 +472,13 @@ function App() {
     if (brainShineFallbackTimeoutRef.current !== null) {
       window.clearTimeout(brainShineFallbackTimeoutRef.current);
     }
-    // Fallback: if backend never emits start/finish events, avoid a stuck shine.
-    brainShineFallbackTimeoutRef.current = window.setTimeout(() => {
-      brainShineFallbackTimeoutRef.current = null;
-      setBrainInductionPending(false);
-    }, 15000);
+    // Fallback for context update only; weight training can run for many minutes.
+    if (readStoredAutoInduction()) {
+      brainShineFallbackTimeoutRef.current = window.setTimeout(() => {
+        brainShineFallbackTimeoutRef.current = null;
+        setBrainInductionPending(false);
+      }, 15000);
+    }
     if (readStoredAutoInduction()) {
       sendEvent({ type: "session.runContextInduction", payload: { sessionId: activeSessionId } });
     } else {
@@ -444,8 +506,8 @@ function App() {
 
   useEffect(() => {
     const prev = prevContextInductionDepthRef.current;
-    // Once an induction cycle finishes, clear any optimistic local shine.
-    if (prev > 0 && contextInductionDepth === 0) {
+    // Once upload finishes in context-update mode, clear the optimistic shine.
+    if (prev > 0 && contextInductionDepth === 0 && readStoredAutoInduction()) {
       setBrainInductionPending(false);
       if (brainShineFallbackTimeoutRef.current !== null) {
         window.clearTimeout(brainShineFallbackTimeoutRef.current);
@@ -469,14 +531,19 @@ function App() {
   }, []);
 
   const autoInductionOn = readStoredAutoInduction();
-  const brainBusy = contextInductionDepth > 0 || brainInductionPending;
-  const brainTitle = brainBusy
-    ? autoInductionOn
-      ? "Updating memories and skills…"
-      : "Uploading session for model training…"
-    : autoInductionOn
-      ? "Brain — click to run context update, double-click to edit memory and skill .md files"
-      : "Brain — click to upload session for training, double-click to edit memory and skill files";
+  const brainBusy = autoInductionOn
+    ? contextInductionDepth > 0 || brainInductionPending
+    : contextInductionDepth > 0 || weightTrainingActive || brainInductionPending;
+  const brainTitle = sessionUploadStatus
+    ?? (brainBusy
+      ? autoInductionOn
+        ? "Updating memories and skills…"
+        : weightTrainingActive || (brainInductionPending && contextInductionDepth === 0)
+          ? "Training model weights…"
+          : "Uploading session for model training…"
+      : autoInductionOn
+        ? "Brain — click to run context update, double-click to edit memory and skill .md files"
+        : "Brain — click to upload session for training, double-click to edit memory and skill files");
 
   // Horizontal drag handler for resizing chat / preview columns
   const handleSplitMouseDown = useCallback((e: React.MouseEvent) => {

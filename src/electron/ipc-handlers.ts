@@ -55,6 +55,7 @@ import {
 } from "./libs/human-edits-prompt.js";
 import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
 import { syncTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
+import { syncTrainingServer } from "./libs/training-server.js";
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
@@ -158,8 +159,21 @@ setContextInductionNotifier((ev) => {
   } else {
     broadcast({
       type: "session.contextInduction",
-      payload: { phase: "finished", sessionId: ev.sessionId, ok: ev.ok },
+      payload: {
+        phase: "finished",
+        sessionId: ev.sessionId,
+        ok: ev.ok,
+        trainingTriggered: ev.trainingTriggered,
+        historyLen: ev.historyLen,
+        minSessions: ev.minSessions,
+      },
     });
+    if (ev.ok && ev.trainingUpload && ev.trainingTriggered === false) {
+      broadcast({
+        type: "session.weightTraining",
+        payload: { phase: "finished" },
+      });
+    }
     if (!ev.ok && ev.trainingUpload) {
       broadcast({
         type: "runner.error",
@@ -838,6 +852,7 @@ export function handleClientEvent(event: ClientEvent) {
 
   if (event.type === "session.setAutoContextInduction") {
     const autoContextInduction = Boolean(event.payload.autoContextInduction);
+    syncTrainingServer(!autoContextInduction);
     syncTinkerAutoUpdateWatcher(autoContextInduction);
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {

@@ -25,6 +25,14 @@ export type TinkerModelUpdateEvent = {
   state_path?: string | null;
 };
 
+export type TinkerTrainingStatusEvent = {
+  phase: "started" | "finished";
+  mode?: string;
+  sessions?: number;
+  ok?: boolean;
+  updated_at?: number;
+};
+
 function persistTinkerCheckpoint(event: TinkerModelUpdateEvent): boolean {
   const existing = getTinkerProviderConfig();
   if (!existing) return false;
@@ -55,6 +63,21 @@ const OFFLINE_LOG_INTERVAL_MS = 60_000;
 const IPC_CHANNEL = "tinker-model-updated" as const;
 const OPENAI_COMPATIBLE_PROVIDER = "openai-compatible" as const;
 const TINKER_PROVIDER = "tinker" as const;
+
+function broadcastWeightTrainingStatus(phase: "started" | "finished", getWindows: () => BrowserWindow[]): void {
+  const payload = JSON.stringify({
+    type: "session.weightTraining",
+    payload: { phase },
+  } satisfies { type: "session.weightTraining"; payload: { phase: "started" | "finished" } });
+  for (const win of getWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send("server-event", payload);
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 class TinkerAutoUpdateWatcher {
   private stopped = false;
@@ -156,7 +179,19 @@ class TinkerAutoUpdateWatcher {
       if (line.startsWith("event:")) eventName = line.slice(6).trim();
       else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
     }
-    if (eventName !== "model-update" || dataLines.length === 0) return;
+    if (!eventName || dataLines.length === 0) return;
+
+    if (eventName === "training-status") {
+      try {
+        const parsed = JSON.parse(dataLines.join("\n")) as TinkerTrainingStatusEvent;
+        this.notifyTrainingStatus(parsed);
+      } catch (error) {
+        console.warn("[tinker-auto-update] could not parse training-status payload:", error);
+      }
+      return;
+    }
+
+    if (eventName !== "model-update") return;
 
     let parsed: TinkerModelUpdateEvent;
     try {
@@ -237,6 +272,14 @@ class TinkerAutoUpdateWatcher {
       }
     }
   }
+
+  private notifyTrainingStatus(event: TinkerTrainingStatusEvent): void {
+    if (event.phase !== "started" && event.phase !== "finished") return;
+    console.log(
+      `[tinker-auto-update] training ${event.phase} mode=${event.mode ?? "?"} sessions=${event.sessions ?? "?"}`,
+    );
+    broadcastWeightTrainingStatus(event.phase, this.getWindows);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -262,6 +305,9 @@ export function syncTinkerAutoUpdateWatcher(contextUpdate?: boolean): void {
 }
 
 export function stopTinkerAutoUpdateWatcher(): void {
+  const hadWatcher = activeWatcher !== null;
   activeWatcher?.stop();
   activeWatcher = null;
+  if (!hadWatcher) return;
+  broadcastWeightTrainingStatus("finished", () => BrowserWindow.getAllWindows());
 }

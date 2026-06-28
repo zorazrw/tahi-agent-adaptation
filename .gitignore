@@ -41,6 +41,7 @@ scripts/brain
 scripts/config*
 !scripts/config_lastk.yaml
 runs/*
+scripts/eval.sh
 
 # Local Python environments
 scripts/.venv/

@@ -605,6 +605,97 @@ def extract_dpo_accepted_artifacts(
     return rows
 
 
+def extract_dpo_final_artifacts(
+    sessions: list[dict],
+    renderer: Any | None = None,
+    min_versions: int = 1,
+) -> list[dict[str, Any]]:
+    """Extract per-session rollout seeds + final accepted artifacts for agentic DPO.
+
+    Unlike :func:`extract_dpo_accepted_artifacts` (one flat row per file
+    version), this groups by session so the online trainer can run a single
+    agentic rollout per session and form one DPO pair per artifact:
+
+    * The **chosen** side is the *final* version of each file
+      (``versions[-1]`` from :func:`_build_file_version_index`), i.e. the
+      accepted artifact after all user follow-ups, scored under that version's
+      accumulated-context prompt -- identical formatting to
+      :func:`extract_dpo_accepted_artifacts`.
+    * The **rollout seed** is the session's initial task (no privileged
+      follow-ups), mirroring :func:`extract_reinforce_rollout_seeds`. The
+      current policy generates the rejected artifact live at train time.
+
+    Files with fewer than ``min_versions`` versions are skipped (set
+    ``min_versions=2`` to restrict to files actually revised after follow-ups).
+
+    Returns one row per session::
+
+        {system_prompt, tool_schemas, prompt_messages, chosen_artifacts, meta}
+
+    where ``chosen_artifacts`` is a list of
+    ``{expected_path, basename, chosen, prompt}``.
+    """
+    rows: list[dict[str, Any]] = []
+
+    for session in sessions:
+        system_prompt = session.get("system_prompt", "") or ""
+        tool_schemas = session.get("tool_schemas")
+
+        initial_task = session.get("initial_task_instruction")
+        if not (isinstance(initial_task, str) and initial_task.strip()):
+            initial_task = _first_user_message_text(session)
+        if not (isinstance(initial_task, str) and initial_task.strip()):
+            # No user anchor to seed the rollout; skip this session.
+            continue
+
+        file_index = _build_file_version_index(
+            session,
+            system_prompt,
+            tool_schemas,
+            renderer,
+        )
+        chosen_artifacts: list[dict[str, Any]] = []
+        for basename, versions in file_index.items():
+            if len(versions) < max(1, min_versions):
+                continue
+            final = versions[-1]
+            chosen, _chosen_is_agent = _build_artifact_completion(
+                [{"path": final["path"], "content": final["content"]}],
+            )
+            if not chosen:
+                continue
+            # First-written version content (the human's initial draft). Used as
+            # an optional offline "first_last" rollout: the first version becomes a
+            # synthetic rejected snapshot paired against this final/chosen artifact.
+            # Only meaningful when the file was actually revised (>=2 versions).
+            first_content = (
+                versions[0].get("content") if len(versions) >= 2 else None
+            )
+            chosen_artifacts.append({
+                "expected_path": final["path"],
+                "basename": basename,
+                "chosen": chosen,
+                "prompt": list(final["prompt"]),
+                "first_content": first_content,
+            })
+
+        if not chosen_artifacts:
+            continue
+
+        rows.append({
+            "system_prompt": system_prompt,
+            "tool_schemas": tool_schemas,
+            "prompt_messages": [{"role": "user", "content": initial_task.strip()}],
+            "chosen_artifacts": chosen_artifacts,
+            "meta": {
+                "session_uuid": session.get("uuid"),
+                "n_artifacts": len(chosen_artifacts),
+            },
+        })
+
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # OPD extraction (offline)
 # ---------------------------------------------------------------------------
