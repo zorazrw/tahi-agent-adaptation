@@ -55,6 +55,7 @@ import {
 } from "./libs/human-edits-prompt.js";
 import { ensureTinkerBridgeWarm, shutdownTinkerBridge } from "./libs/tinker-provider.js";
 import { syncTinkerAutoUpdateWatcher } from "./libs/tinker-auto-update.js";
+import { syncTrainingServer } from "./libs/training-server.js";
 
 let sessions: SessionStore;
 const runnerHandles = new Map<string, RunnerHandle>();
@@ -850,6 +851,7 @@ export function handleClientEvent(event: ClientEvent) {
 
   if (event.type === "session.setAutoContextInduction") {
     const autoContextInduction = Boolean(event.payload.autoContextInduction);
+    syncTrainingServer(!autoContextInduction);
     syncTinkerAutoUpdateWatcher(autoContextInduction);
     const sid = String(event.payload.sessionId ?? "").trim();
     if (sid && sessions.getSession(sid)) {

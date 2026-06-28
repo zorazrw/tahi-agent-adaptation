@@ -17,4 +17,4 @@ export function isFetchConnectionError(error: unknown): boolean {
 }
 
 export const TRAINING_PROXY_START_HINT =
-  "Start the training proxy in a separate terminal: python scripts/server.py (default http://localhost:8000)";
+  "Training server unavailable. Select Weight Update in Settings to auto-start it, or run: python3 scripts/server_online.py --config scripts/config_online.yaml";
