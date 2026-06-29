@@ -3823,8 +3823,8 @@ def main() -> int:
         else:
             payload = extract_all_sessions_weight_based(cursor, db_root=db_root)
 
-        payload = filter_sessions_with_unchanged_workflow_verifiers(payload)
-        payload = filter_sessions_without_follow_up_user_actions(payload)
+        # payload = filter_sessions_with_unchanged_workflow_verifiers(payload)
+        # payload = filter_sessions_without_follow_up_user_actions(payload)
         if args.task_category:
             payload = filter_sessions_by_task_category(payload, args.task_category)
 
