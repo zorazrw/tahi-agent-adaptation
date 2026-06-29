@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Postinstall Python setup: scripts/.venv (induce.py) and optional Tinker bridge.
+ * Postinstall Python setup: scripts/.venv (induce.py, training server) and optional Tinker bridge.
  * Invoked from package.json postinstall after electron-rebuild.
  */
 import { spawnSync } from "node:child_process";
@@ -10,8 +10,9 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const scriptsVenv = path.join(root, "scripts", ".venv");
+const scriptsDir = path.join(root, "scripts");
 const bridgeDir = path.join(root, "tinker-bridge");
-const INDUCE_PACKAGES = ["anthropic", "python-dotenv"];
+const REQUIREMENTS = path.join(scriptsDir, "requirements.txt");
 
 function hasCommand(cmd, args = ["--version"]) {
   return spawnSync(cmd, args, { encoding: "utf8" }).status === 0;
@@ -40,10 +41,16 @@ function syncScriptsDeps() {
     return 0;
   }
 
+  if (!existsSync(REQUIREMENTS)) {
+    console.error(`[postinstall] ${REQUIREMENTS} not found; cannot sync scripts deps.`);
+    return 1;
+  }
+
   if (hasCommand("uv")) {
-    const venvStatus = spawnSync("uv", ["venv", scriptsVenv], { cwd: root, stdio: "inherit" }).status ?? 1;
+    const venvStatus =
+      spawnSync("uv", ["venv", "--python", "3.11", scriptsVenv], { cwd: root, stdio: "inherit" }).status ?? 1;
     if (venvStatus !== 0) return venvStatus;
-    return spawnSync("uv", ["pip", "install", ...INDUCE_PACKAGES, "--python", venvPython()], {
+    return spawnSync("uv", ["pip", "install", "-r", REQUIREMENTS, "--python", venvPython()], {
       cwd: root,
       stdio: "inherit",
     }).status ?? 1;
@@ -53,7 +60,7 @@ function syncScriptsDeps() {
     const venvStatus = spawnSync(py, ["-m", "venv", scriptsVenv], { cwd: root, stdio: "inherit" }).status ?? 1;
     if (venvStatus !== 0) return venvStatus;
   }
-  return spawnSync(venvPython(), ["-m", "pip", "install", ...INDUCE_PACKAGES], {
+  return spawnSync(venvPython(), ["-m", "pip", "install", "-r", REQUIREMENTS], {
     cwd: root,
     stdio: "inherit",
   }).status ?? 1;
