@@ -3,8 +3,8 @@
 Grade redo session final artifacts against rubrics from ``verifiers.json``.
 
 Matches rubrics by instruction overlap. Sends only the file(s) required by the **last**
-workflow step (walking back one step if that step has no ``outputFiles``). Calls the
-verifier LM once (Haiku by default) and prints per-criterion PASS/FAIL plus average success rate.
+workflow step (walking back one step if that step has no ``outputFiles``). By default uses
+the **last** snapshot of each file; pass ``--eval-first`` to use the first snapshot instead.
 
 Grades every session in the JSON by default. Pass ``--session-id`` to grade one session.
 
@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - optional for dry-run/OpenAI-only envir
     load_dotenv = None  # type: ignore[assignment]
 
 _PLAN_SUFFIX = "Before doing anything else, you MUST call the workflow_plan"
-DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 _TRUNCATE_LEN = 14_000
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\n\r]+$")
@@ -225,8 +225,8 @@ def _basename(path: str) -> str:
     return Path(path.replace("\\", "/")).name
 
 
-def all_artifact_blocks(session: dict[str, Any]) -> dict[str, str]:
-    """Latest content per path across all environment snapshots."""
+def all_artifact_blocks(session: dict[str, Any], *, eval_first: bool = False) -> dict[str, str]:
+    """Content per path across environment snapshots (first or last version per path)."""
     merged: dict[str, str] = {}
     units = session.get("task_units")
     if isinstance(units, list):
@@ -236,11 +236,16 @@ def all_artifact_blocks(session: dict[str, Any]) -> dict[str, str]:
     for env in sources:
         if isinstance(env, dict):
             for path, content in file_blocks_from_env(env):
-                merged[path] = content
+                if eval_first:
+                    merged.setdefault(path, content)
+                else:
+                    merged[path] = content
     return merged
 
 
-def grading_artifact_blocks(session: dict[str, Any]) -> tuple[list[tuple[str, str]], list[str]]:
+def grading_artifact_blocks(
+    session: dict[str, Any], *, eval_first: bool = False
+) -> tuple[list[tuple[str, str]], list[str], str | None]:
     """
     File blocks for the LM grader: only artifacts required by the last workflow step
     (walking back if the last step lists no output files).
@@ -248,18 +253,16 @@ def grading_artifact_blocks(session: dict[str, Any]) -> tuple[list[tuple[str, st
     nodes = final_workflow_nodes(session)
     required = required_paths_last_workflow_step(nodes)
     if not required:
-        raise SystemExit("Could not determine output files for the last workflow step.")
+        return [], [], "Could not determine output files for the last workflow step."
 
     required_names = {_basename(p) for p in required}
-    merged = all_artifact_blocks(session)
+    merged = all_artifact_blocks(session, eval_first=eval_first)
     blocks = sorted((p, c) for p, c in merged.items() if _basename(p) in required_names)
     if not blocks:
         available = ", ".join(sorted(_basename(p) for p in merged)) or "(none)"
         need = ", ".join(required)
-        raise SystemExit(
-            f"No content for last-step file(s) [{need}] in session snapshots (available: {available})."
-        )
-    return blocks, required
+        return [], required, f"No content for last-step file(s) [{need}] in session snapshots (available: {available})."
+    return blocks, required, None
 
 
 def criteria_list(entry: dict[str, Any]) -> list[str]:
@@ -482,7 +485,7 @@ def print_summary(
     if model:
         print(f"model: {model}")
     print(f"criteria: {criteria_count}")
-    print(f"artifacts: {', '.join(p for p, _ in files)}")
+    print(f"artifacts: {', '.join(p for p, _ in files) or '(none)'}")
 
 
 def build_openai_input(criteria: list[str], file_blocks: list[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -587,6 +590,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--env-file", type=Path)
     p.add_argument("--dotenv-override", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--eval-first",
+        action="store_true",
+        help="Grade the first file version per path instead of the last (default: last)",
+    )
     p.add_argument("--json-out", type=Path)
     p.add_argument("--log-file", type=Path, help="Also write stdout to this .txt file")
     p.add_argument("--debug-prompts", action="store_true")
@@ -623,7 +631,7 @@ def main(argv: list[str] | None = None) -> int:
 
             entry, overlap = match_rubrics(catalog, instruction, args.min_overlap)
             criteria = criteria_list(entry)
-            files, required_paths = grading_artifact_blocks(session)
+            files, required_paths, artifact_issue = grading_artifact_blocks(session, eval_first=args.eval_first)
             if not criteria:
                 raise SystemExit("Matched rubric entry has no criteria.")
 
@@ -642,13 +650,21 @@ def main(argv: list[str] | None = None) -> int:
                 "grading_files": [path for path, _ in files],
                 "verifiers": criteria,
             }
+            if artifact_issue:
+                report["artifact_issue"] = artifact_issue
 
             if args.dry_run:
                 print_summary(
                     session=session, entry=entry, overlap=overlap, files=files, criteria_count=len(criteria)
                 )
+                if artifact_issue:
+                    print(f"artifact_issue: {artifact_issue}")
             else:
-                if args.backend == "openai":
+                if artifact_issue:
+                    labels = [False] * len(criteria)
+                    raw_response = f"Skipped verifier model call: {artifact_issue}"
+                    model = args.model or (DEFAULT_OPENAI_MODEL if args.backend == "openai" else DEFAULT_MODEL)
+                elif args.backend == "openai":
                     model = args.model or DEFAULT_OPENAI_MODEL
                     labels, raw_response = grade_openai(
                         criteria,
@@ -691,6 +707,8 @@ def main(argv: list[str] | None = None) -> int:
                     criteria_count=total,
                     model=model,
                 )
+                if artifact_issue:
+                    print(f"artifact_issue: {artifact_issue}")
                 print(f"pass/fail/unknown: {n_pass}/{n_fail}/{n_unknown} of {total}")
                 print(f"average_success_rate: {n_pass}/{total} = {rate:.4f}")
                 if n_unknown and (n_pass + n_fail):
@@ -698,16 +716,18 @@ def main(argv: list[str] | None = None) -> int:
                         f"average_success_rate (scored only): {n_pass}/{n_pass + n_fail} = {n_pass / (n_pass + n_fail):.4f}"
                     )
 
-                report |= {
-                    "backend": args.backend,
-                    "model": model,
-                    "raw_response": raw_response,
-                    "results": results,
-                    "n_pass": n_pass,
-                    "n_fail": n_fail,
-                    "n_unknown": n_unknown,
-                    "average_success_rate": round(rate, 4),
-                }
+                report.update(
+                    {
+                        "backend": args.backend,
+                        "model": model,
+                        "raw_response": raw_response,
+                        "results": results,
+                        "n_pass": n_pass,
+                        "n_fail": n_fail,
+                        "n_unknown": n_unknown,
+                        "average_success_rate": round(rate, 4),
+                    }
+                )
 
             reports.append(report)
 
