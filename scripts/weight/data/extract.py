@@ -633,7 +633,7 @@ def extract_dpo_final_artifacts(
         {system_prompt, tool_schemas, prompt_messages, chosen_artifacts, meta}
 
     where ``chosen_artifacts`` is a list of
-    ``{expected_path, basename, chosen, prompt}``.
+    ``{expected_path, basename, chosen, prompt, first_content, earlier_contents}``.
     """
     rows: list[dict[str, Any]] = []
 
@@ -664,10 +664,18 @@ def extract_dpo_final_artifacts(
             )
             if not chosen:
                 continue
-            # First-written version content (the human's initial draft). Used as
-            # an optional offline "first_last" rollout: the first version becomes a
-            # synthetic rejected snapshot paired against this final/chosen artifact.
-            # Only meaningful when the file was actually revised (>=2 versions).
+            # Earlier version contents (all writes before the final accepted one).
+            # Used as optional offline synthetic rejections in agentic DPO:
+            # each earlier snapshot is paired against this final/chosen artifact.
+            earlier_contents: list[str] = []
+            final_content = final.get("content")
+            for v in versions[:-1]:
+                c = v.get("content")
+                if not isinstance(c, str) or not c.strip():
+                    continue
+                if isinstance(final_content, str) and c == final_content:
+                    continue
+                earlier_contents.append(c)
             first_content = (
                 versions[0].get("content") if len(versions) >= 2 else None
             )
@@ -677,6 +685,7 @@ def extract_dpo_final_artifacts(
                 "chosen": chosen,
                 "prompt": list(final["prompt"]),
                 "first_content": first_content,
+                "earlier_contents": earlier_contents,
             })
 
         if not chosen_artifacts:

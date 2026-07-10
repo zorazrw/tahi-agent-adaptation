@@ -119,6 +119,10 @@ class Config:
     # artifact version as a synthetic rejected snapshot (the "first_last" pair),
     # alongside the on-policy model rollouts. Default off.
     agentic_include_first_last: bool = False
+    # Inject every earlier artifact version (all writes before the final one)
+    # as synthetic rejected snapshots, each paired against the final chosen write.
+    # Supersedes --agentic-include-first-last when both are set.
+    agentic_include_earlier_versions: bool = False
     # Min content-similarity (0..1) for matching a student file to a chosen
     # artifact by CONTENT/type rather than filename. Lower => more pairs (looser
     # matches); higher => fewer but tighter. Single same-extension candidates and
@@ -696,6 +700,7 @@ class OnlineDPOAgenticDataset:
                     "chosen_datum": chosen_datum,
                     "chosen_content": _artifact_write_content(art["chosen"]),
                     "first_content": art.get("first_content"),
+                    "earlier_contents": list(art.get("earlier_contents") or []),
                 })
             if not chosen_artifacts:
                 continue
@@ -836,6 +841,117 @@ def _match_student_artifacts(
     return out
 
 
+def _offline_synthetic_rejections_for_artifact(
+    art: dict[str, Any],
+    *,
+    include_first_last: bool,
+    include_earlier_versions: bool,
+) -> list[tuple[str, str, int | None]]:
+    """Return ``(expected_path, rejected_content, version_idx)`` synthetic rejections.
+
+    ``version_idx`` is the 0-based index in the file's version history when
+    injecting all earlier versions; ``None`` for the first_last-only shortcut.
+    """
+    expected_path = art.get("expected_path")
+    chosen_content = art.get("chosen_content")
+    if not isinstance(expected_path, str) or not expected_path.strip():
+        return []
+
+    if include_earlier_versions:
+        contents = art.get("earlier_contents") or []
+        if not contents and isinstance(art.get("first_content"), str):
+            contents = [art["first_content"]]
+        out: list[tuple[str, str, int | None]] = []
+        seen: set[str] = set()
+        for version_idx, content in enumerate(contents):
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if isinstance(chosen_content, str) and content == chosen_content:
+                continue
+            if content in seen:
+                continue
+            seen.add(content)
+            out.append((expected_path, content, version_idx))
+        return out
+
+    if include_first_last:
+        first_content = art.get("first_content")
+        if not isinstance(first_content, str) or not first_content.strip():
+            return []
+        if isinstance(chosen_content, str) and first_content == chosen_content:
+            return []
+        return [(expected_path, first_content, None)]
+
+    return []
+
+
+def _inject_offline_synthetic_rollouts(
+    results_by_row: list[list[Any]],
+    rows: list[dict[str, Any]],
+    *,
+    include_first_last: bool,
+    include_earlier_versions: bool,
+    sample_log_path: Path | None,
+) -> tuple[int, int]:
+    """Append offline synthetic rejected snapshots to ``results_by_row``.
+
+    Returns ``(n_first_last_injected, n_earlier_version_injected)``.
+    """
+    n_first_last_injected = 0
+    n_earlier_version_injected = 0
+    if not include_first_last and not include_earlier_versions:
+        return n_first_last_injected, n_earlier_version_injected
+
+    for row_idx, row in enumerate(rows):
+        if include_earlier_versions:
+            for art in row.get("chosen_artifacts") or []:
+                for expected_path, content, version_idx in _offline_synthetic_rejections_for_artifact(
+                    art,
+                    include_first_last=False,
+                    include_earlier_versions=True,
+                ):
+                    results_by_row[row_idx].append((
+                        {expected_path: content},
+                        {"agentic/offline_early_version": 1.0},
+                        (
+                            {
+                                "valid": True,
+                                "drop_reason": None,
+                                "source": "earlier_version",
+                                "version_idx": version_idx,
+                            }
+                            if sample_log_path is not None
+                            else None
+                        ),
+                    ))
+                    n_earlier_version_injected += 1
+            continue
+
+        # Preserve original first_last behavior: one batched snapshot per session.
+        snapshot: dict[str, str] = {}
+        for art in row.get("chosen_artifacts") or []:
+            for expected_path, content, _version_idx in _offline_synthetic_rejections_for_artifact(
+                art,
+                include_first_last=True,
+                include_earlier_versions=False,
+            ):
+                snapshot[expected_path] = content
+        if not snapshot:
+            continue
+        results_by_row[row_idx].append((
+            snapshot,
+            {"agentic/offline_first_last": 1.0},
+            (
+                {"valid": True, "drop_reason": None, "source": "first_last"}
+                if sample_log_path is not None
+                else None
+            ),
+        ))
+        n_first_last_injected += 1
+
+    return n_first_last_injected, n_earlier_version_injected
+
+
 async def _sample_agentic_dpo_pairs_async(
     rows: list[dict[str, Any]],
     renderer: renderers.Renderer,
@@ -847,6 +963,7 @@ async def _sample_agentic_dpo_pairs_async(
     max_concurrent_rollouts: int = 0,
     match_min_similarity: float = 0.05,
     include_first_last: bool = False,
+    include_earlier_versions: bool = False,
     max_tokens: int,
     temperature: float,
     max_turns: int,
@@ -1035,35 +1152,15 @@ async def _sample_agentic_dpo_pairs_async(
     for row_idx, res in zip(flat_row_idx, flat_results, strict=True):
         results_by_row[row_idx].append(res)
 
-    # Optional offline "first_last" rollout: frame each session's first-written
-    # artifact version as a synthetic rollout snapshot (the rejected side),
-    # additive to the on-policy model rollouts above. It flows through the exact
-    # same _match_student_artifacts + identical/empty filters and per-session
-    # balancing as a real rollout. The metrics are zeroed (turns/tokens=0) and
-    # tagged so it does not pollute rollout-cost aggregates or logs.
-    n_first_last_injected = 0
-    if include_first_last:
-        for row_idx, row in enumerate(rows):
-            snapshot: dict[str, str] = {}
-            for art in row.get("chosen_artifacts") or []:
-                first_content = art.get("first_content")
-                if not isinstance(first_content, str) or not first_content.strip():
-                    continue
-                # Skip when the first draft already equals the chosen artifact;
-                # the downstream "identical" filter would drop it anyway.
-                if first_content == art.get("chosen_content"):
-                    continue
-                snapshot[art["expected_path"]] = first_content
-            if not snapshot:
-                continue
-            synthetic_metrics = {"agentic/offline_first_last": 1.0}
-            synthetic_log = (
-                {"valid": True, "drop_reason": None, "source": "first_last"}
-                if sample_log_path is not None
-                else None
-            )
-            results_by_row[row_idx].append((snapshot, synthetic_metrics, synthetic_log))
-            n_first_last_injected += 1
+    # Optional offline synthetic rejections: inject earlier artifact versions as
+    # snapshots (rejected side), additive to on-policy rollouts above.
+    n_first_last_injected, n_earlier_version_injected = _inject_offline_synthetic_rollouts(
+        results_by_row,
+        rows,
+        include_first_last=include_first_last,
+        include_earlier_versions=include_earlier_versions,
+        sample_log_path=sample_log_path,
+    )
 
     data: list[tinker.Datum] = []
     # Valid [chosen, rejected] pairs grouped by session (aligned with ``rows``),
@@ -1072,7 +1169,8 @@ async def _sample_agentic_dpo_pairs_async(
     reason_counts: dict[str, int] = {}
     n_potential = 0
     n_rollouts_total = 0
-    n_first_last_pairs = 0  # valid pairs sourced from the offline first_last rollout
+    n_first_last_pairs = 0  # valid pairs sourced from offline first_last snapshots
+    n_earlier_version_pairs = 0  # valid pairs from all-earlier-version snapshots
     agg_turns = 0.0
     agg_tool_calls = 0.0
     agg_steps = 0.0
@@ -1099,12 +1197,11 @@ async def _sample_agentic_dpo_pairs_async(
             this_session_pairs: list[tuple[tinker.Datum, tinker.Datum]] = []
 
             for rollout_idx, (snapshot, m, episode_log) in enumerate(rollout_results):
-                # The synthetic offline first_last "rollout" carries no real
-                # trajectory, so it is excluded from the on-policy rollout-cost
-                # aggregates (turns/tokens/error counts) to keep their means and
-                # the rollout count reflective of actual model sampling.
+                # Offline synthetic snapshots carry no real trajectory, so they
+                # are excluded from on-policy rollout-cost aggregates.
                 is_first_last = bool(m.get("agentic/offline_first_last"))
-                if not is_first_last:
+                is_earlier_version = bool(m.get("agentic/offline_early_version"))
+                if not is_first_last and not is_earlier_version:
                     n_rollouts_total += 1
                     agg_turns += m.get("agentic/turns", 0.0)
                     agg_tool_calls += m.get("agentic/tool_calls", 0.0)
@@ -1177,6 +1274,8 @@ async def _sample_agentic_dpo_pairs_async(
                 # we only persist the richer per-rollout transcript + matched pairs.
                 if is_first_last:
                     n_first_last_pairs += len(matched_pairs)
+                if is_earlier_version:
+                    n_earlier_version_pairs += len(matched_pairs)
 
                 drop_reason = (episode_log or {}).get("drop_reason")
                 turns = int(m.get("agentic/turns", 0.0))
@@ -1184,12 +1283,21 @@ async def _sample_agentic_dpo_pairs_async(
                 prompt_tokens_final = int(m.get("agentic/prompt_tokens_final", 0.0))
                 gen_tokens = int(m.get("agentic/gen_tokens", 0.0))
                 if sample_log_f is not None:
+                    synthetic_source = (episode_log or {}).get("source")
                     rec = {
                         "step": step,
                         "mode": "dpo_agentic",
-                        "source": "first_last" if is_first_last else "rollout",
+                        "source": (
+                            synthetic_source
+                            if (is_first_last or is_earlier_version)
+                            and isinstance(synthetic_source, str)
+                            else "rollout"
+                        ),
                         "session_uuid": meta.get("session_uuid"),
-                        "rollout_idx": -1 if is_first_last else rollout_idx,
+                        "rollout_idx": (
+                            -1 if is_first_last or is_earlier_version else rollout_idx
+                        ),
+                        "version_idx": (episode_log or {}).get("version_idx"),
                         "valid": bool(matched_pairs),
                         "drop_reason": drop_reason,
                         "n_pairs": len(matched_pairs),
@@ -1276,6 +1384,8 @@ async def _sample_agentic_dpo_pairs_async(
         "dpo_online/dropped_pairs": float(n_dropped),
         "dpo_online/first_last_injected": float(n_first_last_injected),
         "dpo_online/first_last_pairs": float(n_first_last_pairs),
+        "dpo_online/earlier_version_injected": float(n_earlier_version_injected),
+        "dpo_online/earlier_version_pairs": float(n_earlier_version_pairs),
         "agentic/turns": agg_turns / max(float(n_rollouts_total), 1.0),
         "agentic/tool_calls": agg_tool_calls / max(float(n_rollouts_total), 1.0),
         "agentic/steps": agg_steps / max(float(n_rollouts_total), 1.0),
@@ -1616,6 +1726,15 @@ def main() -> None:
             "alongside the on-policy model rollouts."
         ),
     )
+    parser.add_argument(
+        "--agentic-include-earlier-versions", action="store_true",
+        help=(
+            "Inject every earlier artifact version (all writes before the final "
+            "accepted one) as synthetic rejected snapshots, each paired against "
+            "the final chosen write under that artifact's prompt. Supersedes "
+            "--agentic-include-first-last when both are set."
+        ),
+    )
     parser.add_argument("--rollout-max-turns", type=int, default=48,
                         help="Overall safety ceiling on assistant turns per agentic episode.")
     parser.add_argument("--max-turns-per-step", type=int, default=8,
@@ -1818,6 +1937,7 @@ def main() -> None:
                         max_concurrent_rollouts=args.agentic_max_concurrent_rollouts,
                         match_min_similarity=args.agentic_match_min_similarity,
                         include_first_last=args.agentic_include_first_last,
+                        include_earlier_versions=args.agentic_include_earlier_versions,
                         max_tokens=args.rollout_max_tokens,
                         temperature=args.rollout_temperature,
                         max_turns=args.rollout_max_turns,
