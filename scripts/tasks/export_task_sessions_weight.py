@@ -2969,6 +2969,13 @@ def _output_files_for_segment(
             continue
         # Skip if content is identical to what it was at segment start
         prev = start_content.get(fp)
+        if prev is None:
+            # Also match by basename for cwd-relative vs absolute paths
+            base = os.path.basename(fp.replace("\\", "/"))
+            for sp, sc in start_content.items():
+                if os.path.basename(sp.replace("\\", "/")) == base:
+                    prev = sc
+                    break
         if prev is not None and prev == content:
             continue
         entry: Dict[str, Any] = {"path": fp, "content": content}
@@ -3039,6 +3046,223 @@ def _insert_synthetic_file_edits(
     for idx, row in reversed(inserts):
         out.insert(idx, row)
     return out
+
+
+def _block_is_workflow_plan(block: dict) -> bool:
+    name = str(block.get("name") or "")
+    if name in ("workflow", "workflow_plan") or "WorkflowPlan" in name:
+        return True
+    nl = name.lower()
+    return "workflow" in nl and "plan" in nl
+
+
+def _message_has_workflow_plan(msg: dict) -> bool:
+    if msg.get("type") != "assistant":
+        return False
+    for b in msg.get("blocks") or []:
+        if isinstance(b, dict) and b.get("type") == "tool_use" and _block_is_workflow_plan(b):
+            return True
+    return False
+
+
+def _workflow_plan_tool_use_ids(msg: dict) -> set[str]:
+    ids: set[str] = set()
+    if msg.get("type") != "assistant":
+        return ids
+    for b in msg.get("blocks") or []:
+        if not isinstance(b, dict) or b.get("type") != "tool_use" or not _block_is_workflow_plan(b):
+            continue
+        tid = b.get("id")
+        if isinstance(tid, str) and tid:
+            ids.add(tid)
+    return ids
+
+
+def _tool_use_name_is_artifact(name: str) -> bool:
+    return str(name or "").lower() in ("write", "edit")
+
+
+def _raw_msg_has_artifact_tool(msg: dict) -> bool:
+    """True when a persisted DB row invokes ``write`` / ``edit`` (Pi or legacy SDK)."""
+    blocks: list[Any] = []
+    if msg.get("type") == "assistant":
+        blocks = list(msg.get("blocks") or [])
+        message = msg.get("message")
+        if isinstance(message, dict):
+            blocks.extend(message.get("content") or [])
+    raw = msg.get("raw")
+    if isinstance(raw, dict):
+        if raw.get("type") == "assistant":
+            blocks.extend((raw.get("message") or {}).get("content") or [])
+            blocks.extend(raw.get("blocks") or [])
+    for b in blocks:
+        if not isinstance(b, dict) or b.get("type") != "tool_use":
+            continue
+        if _tool_use_name_is_artifact(str(b.get("name") or "")):
+            return True
+    return False
+
+
+def _find_first_artifact_tool_index(all_msgs: List[dict]) -> Optional[int]:
+    """First assistant turn that mutates files — execution start when plan wasn't persisted."""
+    for i, m in enumerate(all_msgs):
+        if _raw_msg_has_artifact_tool(m):
+            return i
+    return None
+
+
+def _find_planning_end_index(all_msgs: List[dict]) -> int:
+    """Index in ``all_msgs`` where execution begins (after WorkflowPlan + its tool results)."""
+    for i, m in enumerate(all_msgs):
+        if not _message_has_workflow_plan(m):
+            continue
+        pending = _workflow_plan_tool_use_ids(m)
+        j = i + 1
+        while j < len(all_msgs) and pending:
+            nm = all_msgs[j]
+            if nm.get("type") == "tool_result":
+                tid = nm.get("toolUseId") or nm.get("tool_use_id") or ""
+                if tid in pending:
+                    pending.discard(tid)
+            j += 1
+        return j
+    first_art = _find_first_artifact_tool_index(all_msgs)
+    if first_art is not None:
+        return first_art
+    return len(all_msgs)
+
+
+def _first_backend_node_prompt_from_all_msgs(all_msgs: List[dict]) -> str:
+    for m in all_msgs:
+        if m.get("type") != "user_prompt":
+            continue
+        p = m.get("prompt", "")
+        if isinstance(p, str) and is_backend_node_user_prompt(p):
+            return p
+    return ""
+
+
+def _build_synthetic_node_prompt(path: str, node: dict, initial_task: str) -> str:
+    desc = str(node.get("description") or path or "Execute planned step").strip()
+    task_line = initial_task.strip()
+    return f"Proceed with: {path}\n\nTask: {desc}\n\nTask instruction: {task_line}"
+
+
+def _assistant_uuid_to_all_msg_index(all_msgs: List[dict]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for i, m in enumerate(all_msgs):
+        if m.get("type") != "assistant":
+            continue
+        u = m.get("uuid")
+        if isinstance(u, str) and u:
+            out[u] = i
+    return out
+
+
+def _infer_node_starts_from_resume_points(
+    all_msgs: List[dict], workflow_tree: Any
+) -> List[Tuple[int, str]]:
+    """Fallback segmentation using workflow node ``resumePoint.uuid`` boundaries."""
+    uuid_to_idx = _assistant_uuid_to_all_msg_index(all_msgs)
+    starts: List[Tuple[int, str]] = []
+    for path, node in iter_workflow_nodes_with_path(workflow_tree):
+        rp = node.get("resumePoint")
+        if not isinstance(rp, dict):
+            continue
+        u = rp.get("uuid")
+        if not isinstance(u, str):
+            continue
+        idx = uuid_to_idx.get(u)
+        if idx is None:
+            continue
+        starts.append((idx + 1, path))
+    starts.sort(key=lambda x: x[0])
+    deduped: List[Tuple[int, str]] = []
+    seen: Set[int] = set()
+    for start_i, path in starts:
+        if start_i in seen:
+            continue
+        seen.add(start_i)
+        deduped.append((start_i, path))
+    return deduped
+
+
+def _infer_node_starts_fallback(
+    all_msgs: List[dict],
+    workflow_tree: Any,
+    planning_end: int,
+    initial_task: str,
+) -> List[Tuple[int, str]]:
+    """When ``Proceed with:`` prompts were not persisted, infer execution segments."""
+    if planning_end >= len(all_msgs):
+        return []
+
+    path_nodes = iter_workflow_nodes_with_path(workflow_tree)
+    if not path_nodes:
+        return [(planning_end, "Execution")]
+
+    node_id_to_path: Dict[str, str] = {}
+    for path, node in path_nodes:
+        node_id = node.get("id")
+        if isinstance(node_id, str):
+            node_id_to_path[node_id] = path
+
+    # Prefer explicit node_completed boundaries when present (Pi UI injects these).
+    completion_boundaries: List[Tuple[int, str]] = []
+    for i in range(planning_end, len(all_msgs)):
+        m = all_msgs[i]
+        if m.get("type") != "node_completed":
+            continue
+        nid = m.get("nodeId")
+        next_path = node_id_to_path.get(nid) if isinstance(nid, str) else None
+        nxt = i + 1
+        if nxt < len(all_msgs):
+            completion_boundaries.append((nxt, next_path or path_nodes[0][0]))
+
+    if completion_boundaries:
+        first_path = path_nodes[0][0]
+        starts: List[Tuple[int, str]] = [(planning_end, first_path)]
+        starts.extend(completion_boundaries)
+        deduped: List[Tuple[int, str]] = []
+        seen: Set[int] = set()
+        for start_i, path in sorted(starts, key=lambda x: x[0]):
+            if start_i in seen or start_i >= len(all_msgs):
+                continue
+            seen.add(start_i)
+            deduped.append((start_i, path))
+        return deduped
+
+    # Default: one execution segment covering all post-planning work on the first planned node.
+    return [(planning_end, path_nodes[0][0])]
+
+
+def _resolve_node_starts(
+    all_msgs: List[dict],
+    workflow_tree: Any,
+    initial_task: str,
+) -> List[Tuple[int, str]]:
+    """Return ``[(msg_index, workflow_path), ...]`` for execution task_units."""
+    starts: List[Tuple[int, str]] = []
+    for i, m in enumerate(all_msgs):
+        if m.get("type") != "user_prompt":
+            continue
+        p = m.get("prompt", "")
+        if not isinstance(p, str) or not p.startswith("Proceed with: "):
+            continue
+        first_line = p.splitlines()[0]
+        path = first_line.removeprefix("Proceed with: ").strip()
+        if path:
+            starts.append((i, path))
+
+    if starts:
+        return starts
+
+    starts = _infer_node_starts_from_resume_points(all_msgs, workflow_tree)
+    if starts:
+        return starts
+
+    planning_end = _find_planning_end_index(all_msgs)
+    return _infer_node_starts_fallback(all_msgs, workflow_tree, planning_end, initial_task)
 
 
 WORKFLOW_PLAN_INSTRUCTION = "\n".join([
@@ -3165,29 +3389,19 @@ def build_weight_based_session(
     )
 
     # ── Segment messages into phases ──
-    # Find boundaries: "Proceed with:" prompts mark node execution starts
-    node_starts: List[Tuple[int, str]] = []  # (msg_index, node_description)
-    path_nodes = iter_workflow_nodes_with_path(workflow_tree)
+    # Primary boundaries: persisted "Proceed with:" node prompts. When those were not
+    # stored (common on Pi), fall back to resumePoint.uuid, node_completed, or a single
+    # post-planning execution segment — matching context export's actor-based split.
+    node_starts = _resolve_node_starts(all_msgs, workflow_tree, initial_task_instruction)
     path_to_node: Dict[str, dict] = {}
-    for path, node in path_nodes:
+    for path, node in iter_workflow_nodes_with_path(workflow_tree):
         if isinstance(node.get("id"), str) and path:
             path_to_node[path] = node
 
-    for i, m in enumerate(all_msgs):
-        if m.get("type") != "user_prompt":
-            continue
-        p = m.get("prompt", "")
-        if not isinstance(p, str) or not p.startswith("Proceed with: "):
-            continue
-        first_line = p.splitlines()[0]
-        path = first_line.removeprefix("Proceed with: ").strip()
-        if path:
-            node_starts.append((i, path))
-
-    # ── Build planning task_unit ──
-    planning_end = node_starts[0][0] if node_starts else len(all_msgs)
+    planning_end = node_starts[0][0] if node_starts else _find_planning_end_index(all_msgs)
     planning_msgs = all_msgs[:planning_end]
 
+    # ── Build planning task_unit ──
     planning_agent_traj_raw: List[dict] = []
     # Absolute index in ``all_msgs`` for each entry pushed to ``planning_agent_traj_raw`` (Pi only;
     # Legacy merging shifts indices, so the env-aware OAI mapping below is gated on ``is_pi``).
@@ -3499,6 +3713,20 @@ def build_weight_based_session(
                 human_traj.append(be_entry)
                 if m.get("state_snapshot"):
                     last_snapshot_msg = m
+
+        if not node_first_turn_prompt:
+            backend_prompt = _first_backend_node_prompt_from_all_msgs(node_msgs)
+            if backend_prompt:
+                node_first_turn_prompt = backend_prompt
+                if node_first_turn_idx is None:
+                    node_first_turn_idx = start_i
+            else:
+                node_first_turn_prompt = _build_synthetic_node_prompt(
+                    path, node if isinstance(node, dict) else {"description": path},
+                    initial_task_instruction,
+                )
+                if node_first_turn_idx is None:
+                    node_first_turn_idx = start_i
 
         # Build verifiers from final workflow tree
         final_node = _find_node_in_tree(workflow_tree, node_id)
