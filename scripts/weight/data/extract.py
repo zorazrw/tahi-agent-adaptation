@@ -411,6 +411,54 @@ def _artifact_path_skipped_for_training(path: str) -> bool:
     return ext in _SKIP_EXTENSIONS
 
 
+def _is_human_chat_follow_up_prompt(prompt: Any) -> bool:
+    """True for typed human chat follow-ups (not backend / edit-synthetic prompts).
+
+    Weight export stores several non-chat ``user_prompt`` rows as
+    ``human_trajectories`` entries with ``type == "follow_up"``, including
+    backend ``Proceed with: …`` node prompts and compose-box edit packages.
+    Those are not human messaging actions for DPO curation.
+    """
+    if not isinstance(prompt, str):
+        return False
+    p = prompt.strip()
+    if not p:
+        return False
+    if p.startswith("Proceed with: ") and "\n\nTask: " in p:
+        return False
+    if (
+        p.startswith("Human file edits (localized line changes):")
+        or p.startswith("Human file edits (line diff")
+        or p.startswith("Human verifier edits:")
+        or p.startswith("Human comments on text files:")
+    ):
+        return False
+    return True
+
+
+def _version_opened_by_human_message(session: dict, version: dict) -> bool:
+    """Whether *version* was written in a round opened by a human chat follow-up.
+
+    Exporter convention: a ``follow_up`` with ``round_index == k`` is the user
+    prompt that opens agent round ``k + 1`` within the same task_unit.
+    """
+    unit_idx = version.get("unit_idx")
+    round_idx = version.get("round_idx")
+    if not isinstance(unit_idx, int) or not isinstance(round_idx, int) or round_idx <= 0:
+        return False
+    units = session.get("task_units") or []
+    if unit_idx >= len(units) or not isinstance(units[unit_idx], dict):
+        return False
+    human_traj = units[unit_idx].get("human_trajectories") or []
+    return any(
+        isinstance(h, dict)
+        and h.get("type") == "follow_up"
+        and h.get("round_index") == round_idx - 1
+        and _is_human_chat_follow_up_prompt(h.get("prompt"))
+        for h in human_traj
+    )
+
+
 def _build_file_version_index(
     session: dict,
     system_prompt: str,
@@ -498,6 +546,7 @@ def extract_dpo_pairs(
     sessions: list[dict],
     renderer: Any | None = None,
     pair_mode: str = "adjacent",
+    message_only_adjacent: bool = False,
 ) -> list[dict[str, Any]]:
     """Extract DPO preference pairs from weight-format sessions.
 
@@ -517,6 +566,11 @@ def extract_dpo_pairs(
       k, chosen = version k+1, prompt = context at the time version k was
       written. Produces more pairs and preserves fine-grained preference signal.
 
+    With ``message_only_adjacent=True``, an adjacent pair is retained only when
+    the chosen version was written in a round opened by an explicit human
+    chat follow-up. Backend ``Proceed with`` prompts and edit-synthetic
+    follow-ups do not qualify. Limited to ``pair_mode="adjacent"``.
+
     Completions are artifact-only: each version is reconstructed as a single
     ``write`` tool_call. Pairs where either side has no string content are
     skipped. Files with only one version (no revisions) are skipped.
@@ -528,6 +582,10 @@ def extract_dpo_pairs(
     if pair_mode not in {"adjacent", "first_last"}:
         raise ValueError(
             f"pair_mode must be 'adjacent' or 'first_last', got {pair_mode!r}"
+        )
+    if message_only_adjacent and pair_mode != "adjacent":
+        raise ValueError(
+            "message_only_adjacent requires pair_mode='adjacent'"
         )
 
     pairs: list[dict[str, Any]] = []
@@ -549,6 +607,8 @@ def extract_dpo_pairs(
                 candidates = [(versions[k], versions[k + 1]) for k in range(len(versions) - 1)]
 
             for rej, cho in candidates:
+                if message_only_adjacent and not _version_opened_by_human_message(session, cho):
+                    continue
                 rej_msgs, rej_is_agent = _build_artifact_completion(
                     [{"path": rej["path"], "content": rej["content"]}],
                 )
@@ -1635,6 +1695,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--message-only-adjacent",
+        action="store_true",
+        help=(
+            "DPO only: with --pair-mode adjacent, retain only version transitions "
+            "whose chosen version was produced after an explicit human chat follow-up "
+            "(excludes backend Proceed-with prompts and edit-synthetic follow-ups)."
+        ),
+    )
+    parser.add_argument(
         "--use-gt",
         action="store_true",
         help=(
@@ -1654,13 +1723,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.message_only_adjacent and (
+        args.mode != "dpo" or args.pair_mode != "adjacent"
+    ):
+        parser.error("--message-only-adjacent requires mode=dpo and --pair-mode adjacent")
+
     with open(args.input, encoding="utf-8") as f:
         sessions = json.load(f)
     if not isinstance(sessions, list):
         sessions = [sessions]
 
     if args.mode == "dpo":
-        units = extract_dpo_pairs(sessions, pair_mode=args.pair_mode)
+        units = extract_dpo_pairs(
+            sessions,
+            pair_mode=args.pair_mode,
+            message_only_adjacent=args.message_only_adjacent,
+        )
         print(f"Extracted {len(units)} DPO pairs")
         for i, u in enumerate(units):
             print(f"\n── Pair {i} ──")

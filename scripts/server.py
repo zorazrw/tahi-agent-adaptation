@@ -70,6 +70,7 @@ class Config:
     # -- DPO-specific --
     dpo_beta: float = 0.1
     dpo_pair_mode: Literal["first_last", "adjacent"] = "first_last"
+    dpo_message_only_adjacent: bool = False
     dpo_rpo_alpha: float = 0.0
     dpo_use_ipo: bool = False
     dpo_online_rollout: bool = False
@@ -779,6 +780,7 @@ class Server:
             dataset_builder = WeightDPODataBuilder(
                 train_path=train_path,
                 pair_mode=self.config.dpo_pair_mode,
+                message_only_adjacent=self.config.dpo_message_only_adjacent,
                 common_config=ChatDatasetBuilderCommonConfig(
                     model_name_for_tokenizer=model_name,
                     renderer_name=renderer_name,

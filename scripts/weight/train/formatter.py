@@ -154,6 +154,7 @@ class WeightDPODataBuilder(ChatDatasetBuilder):
     train_path: str
     test_path: str | None = None
     pair_mode: str = "adjacent"
+    message_only_adjacent: bool = False
 
     def _load(self, path: str) -> list[dict]:
         sessions = _sessions_from_json_root(_load_json_root(path))
@@ -162,14 +163,18 @@ class WeightDPODataBuilder(ChatDatasetBuilder):
         # hand-rolled into the system prompt text. Falls back to plain system
         # prompt when the renderer doesn't support tools (e.g. RoleColon).
         return extract_dpo_pairs(
-            sessions, renderer=self.renderer, pair_mode=self.pair_mode,
+            sessions,
+            renderer=self.renderer,
+            pair_mode=self.pair_mode,
+            message_only_adjacent=self.message_only_adjacent,
         )
 
     def __call__(self) -> tuple[SupervisedDataset, SupervisedDataset | None]:
         train_rows = self._load(self.train_path)
         logger.info(
-            "Loaded %d DPO pairs from %s (pair_mode=%s)",
+            "Loaded %d DPO pairs from %s (pair_mode=%s, message_only_adjacent=%s)",
             len(train_rows), self.train_path, self.pair_mode,
+            self.message_only_adjacent,
         )
         train_ds = datasets.Dataset.from_list(train_rows)
 

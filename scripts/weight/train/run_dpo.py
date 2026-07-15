@@ -1610,6 +1610,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--message-only-adjacent",
+        action="store_true",
+        help=(
+            "With offline --pair-mode adjacent, keep only file-version pairs "
+            "whose chosen version was produced in a turn opened by an explicit "
+            "human chat follow-up. Backend Proceed-with prompts and edit-synthetic "
+            "follow-ups are skipped. Offline-only: do not combine with "
+            "--online-rollout or --agentic-rollout."
+        ),
+    )
+    parser.add_argument(
         "--rpo-alpha",
         type=float,
         default=0.0,
@@ -1758,6 +1769,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.message_only_adjacent:
+        if args.pair_mode != "adjacent":
+            parser.error("--message-only-adjacent requires --pair-mode adjacent")
+        if args.online_rollout or args.agentic_rollout:
+            parser.error(
+                "--message-only-adjacent is an offline pair-curation option; "
+                "do not combine it with --online-rollout or --agentic-rollout"
+            )
+
     log_path = str(Path(args.log_path).expanduser())
 
     # ------------------------------------------------------------------ #
@@ -1820,6 +1840,7 @@ def main() -> None:
             train_path=args.train_path,
             test_path=args.test_path,
             pair_mode=args.pair_mode,
+            message_only_adjacent=args.message_only_adjacent,
             common_config=common_config,
         )
         dataset, _ = dataset_builder()
