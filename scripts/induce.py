@@ -5,12 +5,18 @@ Accepts export shape ``{ uuid, name, trajectory }``, weight-based ``{ uuid, name
 (a JSON array of those objects), or legacy ``{ sessions: [...] }``.
 Outputs: ``<output>/memories/<slug>.md`` and ``skills/<slug>.md``.
 
+Per memory file: (1) extract new entries per session, (2) merge after each session,
+(3) final cross-session polish after all sessions complete.
+
+Use ``--finalize_memory_only`` to run only pass (3) on existing ``memories/*.md`` files
+(e.g. after a prior full induction) without re-reading session JSON.
+
 When export JSON includes ``expertise_task`` (e.g. ``data-viz-html``), writes to that stem
 instead of slugifying the session title, and includes existing memory/skill file content in the LM prompt.
 
 Requires: python-dotenv and ``anthropic``.
 
-Model: defaults to ``claude-haiku-4-5`` (same as verifier-generator), overridable via ``--model``.
+Model: defaults to ``claude-sonnet-4-5`` (same as verifier-generator), overridable via ``--model``.
 Always uses Anthropic credentials from ``pi-agent/auth.json`` (in-app Settings), then env —
 independent of the task-solving model in Settings.
 """
@@ -39,7 +45,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_MODEL = "claude-sonnet-4-5"
 _TASK_STEM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 _MAX_EXISTING_FILE_CHARS = 6000
 
@@ -138,7 +144,7 @@ def _pi_settings_model() -> str:
 
 
 def resolve_induce_llm(*, model_override: str | None = None) -> ResolvedRuntimeLlm:
-    """Anthropic Haiku + ``auth.json``, like verifier-generator — not the task-solving model."""
+    """Anthropic Sonnet + ``auth.json``, like verifier-generator — not the task-solving model."""
     model = (model_override or "").strip() or DEFAULT_MODEL
     cfg = resolve_anthropic_config()
     return ResolvedRuntimeLlm(
@@ -255,15 +261,27 @@ def _tool_result_prefix(action: str) -> str:
     return "[USER EDIT — infer preferences from these changes]\n"
 
 
-_QUOTE_COMMENT_RE = re.compile(r"Quote\s*\(")
+# formatQuotedSelectionMessage forms: "Quote (from path):…" or "Quote:…"
+# (often under "Human comments on text files:"). Require the trailing ":" so casual
+# phrases like "Quote (author, year) style" are not treated as file-quote actions.
+_QUOTE_COMMENT_RE = re.compile(r"(?:^|[\n\"])Quote\s*(?:\([^)\n]*\))?:")
+
+
+def _is_quote_comment_action(action: str) -> bool:
+    """True for message(...) rows that carry inline file-quote comments, not chat prefs."""
+    a = action.strip()
+    if not _is_user_message_action(a):
+        return False
+    if "Human comments on text files:" in a:
+        return True
+    return _QUOTE_COMMENT_RE.search(a) is not None
 
 
 def _is_msg_only_user_action(action: str) -> bool:
     a = action.strip()
     if _is_user_message_action(a):
-        # Inline file-quote comments (e.g. "Human comments on text files:\nQuote (from abstract.md)")
-        # are not user-authored preferences; skip them like edit/brain_edit actions.
-        return _QUOTE_COMMENT_RE.search(a) is None
+        # Inline file-quote comments are not user-authored preferences; skip like edit/brain_edit.
+        return not _is_quote_comment_action(a)
     return a.startswith("edit_verifier(") or any(a.startswith(p) for p in _PLAN_EDIT_PREFIXES)
 
 
@@ -379,7 +397,7 @@ MEMORY_CONSOLIDATE_SYSTEM = """Merge new induction entries into the existing mem
 
 You receive (i) the original memory file and (ii) new entries derived from a new session.
 Merge (ii) into (i): keep durable prior preferences, add genuinely new ones, and lightly deduplicate.
-Output line count should stay about the same as (i) or slightly more, but definitely substantially less than (i) and (ii) combineds.
+Output line count should stay about the same as the original memory (i). Do not add excessive new entries.
 
 Keep:
 - Specific user preferences that apply to certain contexts
@@ -403,6 +421,35 @@ Title: <short topic name>
 - Preference: <item>
 ...
 """
+
+MEMORY_FINAL_CONSOLIDATE_SYSTEM = """Refine the complete memory file produced by multiple induction sessions into a concise, high-quality cross-session reference.
+
+You receive the full memory file accumulated across sessions. Produce a polished final version suitable for loading into future agent context.
+
+Keep:
+- Durable user preferences (layout, typography, styling habits) that recur across chart types
+- General facts about how the user works (e.g. iterative refinement, verifier editing habits)
+- Context-scoped rules when the scope is clear (e.g. "in bar charts" vs "in curve plots")
+
+Remove or merge aggressively:
+- Duplicate or near-duplicate lines (merge into one clearer line)
+- Highly task-specific facts (dataset names, axis tick values for one chart, specific model names or scores)
+- Implementation/library details (Chart.js APIs: afterDraw, beginPath, getPixelForValue, plugin methods)
+- Overly granular pixel-level rules that repeat a general theme already captured elsewhere
+
+Target the smallest line set that preserves all distinct preferences. Prefer fewer, broader lines over many narrow ones.
+
+Output rules:
+- One entry per line. Plain text only (NO markdown headers like # or ##).
+- Prefix each line with "Fact:" or "Preference:".
+- Do not include reasoning or a thinking process.
+
+Reply with:
+Title: <short topic name>
+- Fact: <item>
+- Preference: <item>
+...
+If nothing is worth keeping: NONE"""
 
 SKILL_SYSTEM = """From the task and numbered log, describe the workflow the agent used: ordered steps, generalized (no long paths).
 
@@ -612,6 +659,40 @@ def consolidate_memory_file(
     return out
 
 
+def finalize_memory_file(runtime: ResolvedRuntimeLlm, path: Path) -> list[str]:
+    """Third LM pass: polish the complete memory file after all sessions are processed."""
+    if not path.is_file():
+        return []
+    original = path.read_text(encoding="utf-8").strip()
+    if not original:
+        return []
+    before_lines = _parse_memory_lines(original)
+    if len(before_lines) < 2:
+        return before_lines
+    user = f"Complete memory file (all sessions merged):\n{original}\n"
+    try:
+        raw = runtime_llm_text(
+            runtime, MEMORY_FINAL_CONSOLIDATE_SYSTEM, user, max_tokens=4096
+        )
+    except Exception:
+        logger.exception("Final memory consolidation LLM failed")
+        return before_lines
+    out = _parse_memory_lines(raw)
+    if not out:
+        if raw.strip().upper() == "NONE":
+            _log_memory_consolidation_diff(f"{path.stem} (final)", before_lines, [])
+            path.write_text("", encoding="utf-8")
+        elif raw.strip():
+            logger.warning(
+                "Final memory consolidation produced 0 lines after parsing; keeping file. Preview: %s",
+                raw.strip()[:500],
+            )
+        return before_lines
+    _log_memory_consolidation_diff(f"{path.stem} (final)", before_lines, out)
+    path.write_text("\n\n".join(out) + "\n", encoding="utf-8")
+    return out
+
+
 def extract_skill(
     runtime: ResolvedRuntimeLlm, task: str, log: str, *, existing_skill: str = ""
 ) -> tuple[str, list[str]] | None:
@@ -705,9 +786,51 @@ def _slug(name: str, fallback: str) -> str:
     return (s or re.sub(r"[^a-z0-9]+", "-", fallback.lower()).strip("-") or "session")[:100]
 
 
+def _memory_paths_to_finalize(mem_dir: Path, stems: list[str] | None) -> list[Path]:
+    if not mem_dir.is_dir():
+        return []
+    if stems:
+        paths = [mem_dir / f"{stem}.md" for stem in stems]
+        return [p for p in paths if p.is_file()]
+    return sorted(mem_dir.glob("*.md"))
+
+
+def run_finalize_memory_only(
+    runtime: ResolvedRuntimeLlm,
+    out: Path,
+    *,
+    stems: list[str] | None = None,
+) -> int:
+    """Run pass (3) only: refine existing memory files without session JSON."""
+    mem_dir = out / "memories"
+    paths = _memory_paths_to_finalize(mem_dir, stems)
+    if not paths:
+        if stems:
+            logger.warning("No memory files found for stems %s under %s", stems, mem_dir)
+        else:
+            logger.warning("No memory files found under %s", mem_dir)
+        return 0
+
+    refined = 0
+    for path in paths:
+        content = path.read_text(encoding="utf-8").strip()
+        if not content or content.startswith("## Auto memory (fallback)"):
+            logger.info("Skipping %s (empty or fallback)", path.name)
+            continue
+        before = len(_parse_memory_lines(content))
+        after_lines = finalize_memory_file(runtime, path)
+        if after_lines:
+            refined += 1
+            logger.info("Finalized %s (%d → %d lines)", path.name, before, len(after_lines))
+    return refined
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Extract memories & skills from session JSON")
-    p.add_argument("--data_path", required=True, help="Path to session JSON")
+    p.add_argument(
+        "--data_path",
+        help="Path to session JSON (not required with --finalize_memory_only)",
+    )
     p.add_argument("--output_dir", default=None, help="Output root (default: app userData)")
     p.add_argument(
         "--model",
@@ -718,15 +841,56 @@ def main() -> None:
         "--msg_only",
         action="store_true",
         help="Only user message(...), edit_workflow()/edit_plan(), and edit_verifier() actions; "
-        "drop other user actions (edit, brain_edit, etc.) and message actions containing Quote(",
+        "drop other user actions (edit, brain_edit, etc.) and Quote / file-comment message actions",
     )
     p.add_argument(
         "--memory_only",
         action="store_true",
         help="Only induce memory files; skip skill extraction",
     )
+    p.add_argument(
+        "--finalize_memory_only",
+        action="store_true",
+        help="Only run final memory refinement (pass 3) on existing memories/*.md; "
+        "does not read session JSON or re-induce",
+    )
+    p.add_argument(
+        "--memory_stem",
+        nargs="+",
+        default=None,
+        metavar="STEM",
+        help="With --finalize_memory_only: refine only these memory file stem(s) "
+        "(default: all *.md under memories/)",
+    )
     args = p.parse_args()
     load_dotenv()
+
+    if args.finalize_memory_only and args.data_path:
+        logger.warning("--data_path is ignored with --finalize_memory_only")
+    if not args.finalize_memory_only and not args.data_path:
+        p.error("--data_path is required unless --finalize_memory_only is set")
+
+    try:
+        runtime = resolve_induce_llm(model_override=args.model)
+    except AnthropicConfigError as e:
+        logger.error("%s", e)
+        raise SystemExit(1) from e
+
+    out = (Path(args.output_dir) if args.output_dir else default_agent_cowork_user_data()).expanduser().resolve()
+
+    if args.finalize_memory_only:
+        logger.info(
+            "Finalize memory only: provider=%s model=%s output=%s stems=%s",
+            runtime.provider,
+            runtime.model,
+            out,
+            args.memory_stem or "all",
+        )
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "memories").mkdir(parents=True, exist_ok=True)
+        n = run_finalize_memory_only(runtime, out, stems=args.memory_stem)
+        logger.info("Done: finalized %d memory file(s) → %s", n, out)
+        return
 
     with open(args.data_path, encoding="utf-8") as f:
         raw = json.load(f)
@@ -735,11 +899,6 @@ def main() -> None:
         logger.warning("Nothing to extract.")
         return
 
-    try:
-        runtime = resolve_induce_llm(model_override=args.model)
-    except AnthropicConfigError as e:
-        logger.error("%s", e)
-        raise SystemExit(1) from e
     logger.info(
         "Induce LLM: provider=%s model=%s msg_only=%s memory_only=%s",
         runtime.provider,
@@ -748,12 +907,12 @@ def main() -> None:
         args.memory_only,
     )
 
-    out = (Path(args.output_dir) if args.output_dir else default_agent_cowork_user_data()).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
     mem_dir, sk_dir = out / "memories", out / "skills"
     mem_dir.mkdir(parents=True, exist_ok=True)
     sk_dir.mkdir(parents=True, exist_ok=True)
     seen: dict[str, int] = {}
+    touched_memory_stems: set[str] = set()
     nm, ns = 0, 0
 
     for row in inputs:
@@ -805,7 +964,11 @@ def main() -> None:
                 (sk_dir / f"{stem}.md").write_text("", encoding="utf-8")
 
         nm += len(memories)
+        touched_memory_stems.add(stem)
         logger.info("%s → %s.md", src, stem)
+
+    for stem in sorted(touched_memory_stems):
+        finalize_memory_file(runtime, mem_dir / f"{stem}.md")
 
     logger.info("Done: %d memory lines, %d skills → %s", nm, ns, out)
 
