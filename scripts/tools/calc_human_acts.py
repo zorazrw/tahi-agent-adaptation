@@ -19,7 +19,9 @@ Examples:
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,32 @@ from rate_file_versions import (  # noqa: E402
 )
 
 
+_QUOTE_ACTION_RE = re.compile(
+    r'^message\("Human comments on text files:.*Quote\s*\(',
+    re.DOTALL,
+)
+
+
+def user_action_type(action: Any) -> str:
+    """Return the action function name, separating inline file quotes from messages."""
+    if not isinstance(action, str):
+        return "unknown"
+    action = action.strip()
+    if _QUOTE_ACTION_RE.search(action):
+        return "quote"
+    action_type, separator, _ = action.partition("(")
+    return action_type.strip() if separator and action_type.strip() else "unknown"
+
+
+def user_action_type_counts(session: dict[str, Any]) -> dict[str, int]:
+    counts = Counter(
+        user_action_type(step.get("action"))
+        for step in session_trajectory(session)
+        if step.get("actor") == "user"
+    )
+    return dict(sorted(counts.items()))
+
+
 def human_acts_for_session(session: dict[str, Any]) -> dict[str, Any]:
     per_iter = session_user_action_stats(session)
     traj = session_trajectory(session)
@@ -47,16 +75,21 @@ def human_acts_for_session(session: dict[str, Any]) -> dict[str, Any]:
         "iteration_count": len(per_iter),
         "user_actions_total": sum(per_iter),
         "user_actions_per_iteration": per_iter,
+        "user_action_type_counts": user_action_type_counts(session),
     }
 
 
 def summarize_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
     iteration_counts = [int(r.get("iteration_count") or 0) for r in rows]
     action_totals = [int(r.get("user_actions_total") or 0) for r in rows]
+    action_type_counts: Counter[str] = Counter()
+    for row in rows:
+        action_type_counts.update(row.get("user_action_type_counts") or {})
     return {
         "session_count": len(rows),
         "total_iterations": sum(iteration_counts),
         "total_user_actions": sum(action_totals),
+        "total_user_actions_by_type": dict(sorted(action_type_counts.items())),
         "mean_iterations_per_session": (sum(iteration_counts) / len(rows)) if rows else None,
         "mean_user_actions_per_session": (sum(action_totals) / len(rows)) if rows else None,
     }
@@ -94,6 +127,11 @@ def print_aggregate_summary(summary: dict[str, Any]) -> None:
         print(f"mean iterations/session: {mean_iter:.2f}", file=sys.stderr)
     if isinstance(mean_actions, (int, float)):
         print(f"mean user actions/session: {mean_actions:.2f}", file=sys.stderr)
+    action_types = summary.get("total_user_actions_by_type") or {}
+    if action_types:
+        print("user actions by type:", file=sys.stderr)
+        for action_type, count in action_types.items():
+            print(f"  {action_type}: {count}", file=sys.stderr)
     print("--- end summary ---", file=sys.stderr)
 
 

@@ -632,8 +632,6 @@ def main(argv: list[str] | None = None) -> int:
             entry, overlap = match_rubrics(catalog, instruction, args.min_overlap)
             criteria = criteria_list(entry)
             files, required_paths, artifact_issue = grading_artifact_blocks(session, eval_first=args.eval_first)
-            if not criteria:
-                raise SystemExit("Matched rubric entry has no criteria.")
 
             last_step = (final_workflow_nodes(session) or [None])[-1]
             last_step_desc = ""
@@ -652,6 +650,30 @@ def main(argv: list[str] | None = None) -> int:
             }
             if artifact_issue:
                 report["artifact_issue"] = artifact_issue
+
+            if not criteria:
+                print_summary(
+                    session=session, entry=entry, overlap=overlap, files=files, criteria_count=0
+                )
+                print("Matched rubric entry has no criteria; counting as 0.0")
+                print("average_success_rate: 0/0 = 0.0000")
+                if not args.dry_run:
+                    report.update(
+                        {
+                            "backend": args.backend,
+                            "model": args.model
+                            or (DEFAULT_OPENAI_MODEL if args.backend == "openai" else DEFAULT_MODEL),
+                            "raw_response": "Skipped verifier model call: matched rubric entry has no criteria.",
+                            "results": [],
+                            "n_pass": 0,
+                            "n_fail": 0,
+                            "n_unknown": 0,
+                            "average_success_rate": 0.0,
+                            "artifact_issue": "Matched rubric entry has no criteria.",
+                        }
+                    )
+                reports.append(report)
+                continue
 
             if args.dry_run:
                 print_summary(

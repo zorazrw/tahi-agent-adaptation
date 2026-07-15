@@ -1,5 +1,38 @@
 # Tools
 
+## Generate verifiers from task instructions
+
+`generate_verifiers.py` calls Anthropic to create concrete, falsifiable rubrics using only each task's `instruction`. It does not provide existing verifiers, outputs, or session history to the model. Credentials are resolved from the app's Anthropic settings, then `ANTHROPIC_API_KEY`.
+
+```bash
+# Generate a verifier catalog for every task
+python scripts/tools/generate_verifiers.py expertise-examples/tasks.json \
+  -o scripts/verifiers.json
+
+# Generate one task by ID
+python scripts/tools/generate_verifiers.py expertise-examples/tasks.json --task-id 3
+
+# Generate from a direct instruction
+python scripts/tools/generate_verifiers.py --instruction "Create a bar chart of ..."
+
+# Inspect the exact prompt without calling the LM
+python scripts/tools/generate_verifiers.py --instruction "Create a bar chart of ..." --print-prompt
+```
+
+File input produces a JSON array of `{uuid, id, type, instruction, verifiers}` entries compatible with the grading tools. Direct instruction input produces one `{instruction, verifiers}` object.
+
+## Extract initial verifiers
+
+`extract_initial_verifiers.py` reads session exports such as `out_writing_13-weight.json`. For each session, it finds the **first** `task_units` entry whose `actor` is `"agent"`, then takes only the **last** top-level step in that unit's `environment.workflow` and extracts that step's verifiers.
+
+```bash
+python scripts/tools/extract_initial_verifiers.py \
+  scripts/log_writing/out_writing_13-weight.json \
+  -o scripts/initial_verifiers.json
+```
+
+The output is a JSON array of `{uuid, instruction, verifiers}`.
+
 ## Extract final verifiers
 
 `extract_verifiers.py` reads exported session JSON (from `tasks/export_task_sessions.py`) and writes a JSON array of `{uuid, instruction, verifiers}`.
