@@ -3544,12 +3544,20 @@ def build_weight_based_session(
     return result
 
 
+def _last_workflow_node_with_outputs(workflow: Any) -> Optional[dict]:
+    """Last workflow node (preorder) whose ``outputFiles`` list is non-empty."""
+    last: Optional[dict] = None
+    for _, node in iter_workflow_nodes_with_path(workflow):
+        ofs = node.get("outputFiles")
+        if isinstance(ofs, list) and any(str(x).strip() for x in ofs if x is not None):
+            last = node
+    return last
+
+
 def _last_workflow_node_verifiers(workflow: Any) -> Tuple[Tuple[str, str], ...]:
-    """Verifiers on the last top-level ``workflow`` node (criterion + status)."""
-    if not isinstance(workflow, list) or not workflow:
-        return ()
-    last = workflow[-1]
-    if not isinstance(last, dict):
+    """Verifiers on the last workflow node with non-empty ``outputFiles`` (criterion + status)."""
+    last = _last_workflow_node_with_outputs(workflow)
+    if last is None:
         return ()
     vs = last.get("verifiers") or []
     return tuple(
@@ -3560,10 +3568,8 @@ def _last_workflow_node_verifiers(workflow: Any) -> Tuple[Tuple[str, str], ...]:
 
 
 def _last_workflow_node_description(workflow: Any) -> str:
-    if not isinstance(workflow, list) or not workflow:
-        return ""
-    last = workflow[-1]
-    if not isinstance(last, dict):
+    last = _last_workflow_node_with_outputs(workflow)
+    if last is None:
         return ""
     return str(last.get("description", "")).strip()
 
