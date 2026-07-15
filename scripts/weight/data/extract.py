@@ -618,12 +618,18 @@ def extract_dpo_final_artifacts(
 
     * The **chosen** side is the *final* version of each file
       (``versions[-1]`` from :func:`_build_file_version_index`), i.e. the
-      accepted artifact after all user follow-ups, scored under that version's
-      accumulated-context prompt -- identical formatting to
-      :func:`extract_dpo_accepted_artifacts`.
+      accepted artifact content after all user follow-ups. Crucially, it is
+      **scored under the bare initial-task prompt** (``tools_prefix + initial
+      task``), NOT under the accumulated follow-up-rich context. DPO requires
+      the chosen and rejected responses to share an identical prompt, and that
+      prompt must match the deployment/rollout condition. Conditioning the
+      chosen artifact on privileged human follow-ups gives away the answer,
+      saturates its logprob (p->1), and mismatches eval; scoring under the bare
+      task keeps the preference signal meaningful.
     * The **rollout seed** is the session's initial task (no privileged
       follow-ups), mirroring :func:`extract_reinforce_rollout_seeds`. The
-      current policy generates the rejected artifact live at train time.
+      current policy generates the rejected artifact live at train time, and it
+      is scored under the same bare prompt as the chosen side.
 
     Files with fewer than ``min_versions`` versions are skipped (set
     ``min_versions=2`` to restrict to files actually revised after follow-ups).
@@ -654,6 +660,15 @@ def extract_dpo_final_artifacts(
             tool_schemas,
             renderer,
         )
+        # Bare, follow-up-free scoring prompt shared by BOTH chosen and rejected:
+        # exactly the context the rejected rollout is generated under
+        # (see dpo_rollout: ``tools_prefix + prompt_messages``) and the eval
+        # condition. Human follow-ups are intentionally excluded so the DPO
+        # preference is learned given only the task, not privileged hints.
+        base_prompt: list[dict] = list(
+            _session_tools_prefix(system_prompt, tool_schemas, renderer)
+        )
+        base_prompt.append({"role": "user", "content": initial_task.strip()})
         chosen_artifacts: list[dict[str, Any]] = []
         for basename, versions in file_index.items():
             if len(versions) < max(1, min_versions):
@@ -675,7 +690,7 @@ def extract_dpo_final_artifacts(
                 "expected_path": final["path"],
                 "basename": basename,
                 "chosen": chosen,
-                "prompt": list(final["prompt"]),
+                "prompt": list(base_prompt),
                 "first_content": first_content,
             })
 

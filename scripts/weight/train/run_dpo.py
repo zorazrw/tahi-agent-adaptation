@@ -43,6 +43,7 @@ from tinker_cookbook.supervised.types import (
     SupervisedDataset,
 )
 
+from . import logprob_viz
 from .dpo_rollout import rollout_one_dpo_episode
 from .formatter import WeightDPODataBuilder, _hydrate_tool_calls, _load_sessions
 from .run_opd import (
@@ -1325,6 +1326,7 @@ def do_update(
     rolling_mgr: checkpoint_utils.CheckpointManager | None = None,
     data_override: list[tinker.Datum] | None = None,
     extra_metrics: dict[str, float] | None = None,
+    logprob_viz_enabled: bool = False,
 ) -> None:
     step = epoch_idx * n_batches + batch_idx
     metrics: dict[str, int | float | str] = {"epoch": epoch_idx}
@@ -1388,11 +1390,26 @@ def do_update(
             chosen_ref_logprob_seqs = [all_ref_logprob_seqs[i] for i in range(0, len(data), 2)]
             rejected_ref_logprob_seqs = [all_ref_logprob_seqs[i] for i in range(1, len(data), 2)]
 
+        # When per-token visualization is requested for this epoch's first
+        # batch, capture the policy per-token logprobs computed inside the loss
+        # closure. This is a pure read of tensors that already exist -- no extra
+        # inference is triggered.
+        capture_viz = logprob_viz_enabled and batch_idx == 0
+        viz_capture: dict[str, list[torch.Tensor]] = {}
+
         def dpo_loss_fn(
             data: list[tinker.Datum], logprobs_list: list[torch.Tensor]
         ) -> tuple[torch.Tensor, dict[str, float]]:
             chosen_logprob_seqs = [logprobs_list[i] for i in range(0, len(data), 2)]
             rejected_logprob_seqs = [logprobs_list[i] for i in range(1, len(data), 2)]
+
+            if capture_viz:
+                viz_capture["chosen"] = [
+                    s.detach().float().cpu() for s in chosen_logprob_seqs
+                ]
+                viz_capture["rejected"] = [
+                    s.detach().float().cpu() for s in rejected_logprob_seqs
+                ]
 
             chosen_logprobs: list[torch.Tensor] = []
             chosen_ref_logprobs: list[torch.Tensor] = []
@@ -1428,6 +1445,26 @@ def do_update(
         with trace.scope_span_sync("step"):
             backward_result = training_client.forward_backward_custom(data, dpo_loss_fn).result()
             training_client.optim_step(adam_params).result()
+
+        if capture_viz and "rejected" in viz_capture:
+            try:
+                viz_dir = Path(log_path) / "logprob_viz"
+                html_path = logprob_viz.render_epoch(
+                    chosen_data=chosen_data,
+                    rejected_data=rejected_data,
+                    chosen_lp_seqs=viz_capture.get("chosen", []),
+                    rejected_lp_seqs=viz_capture.get("rejected", []),
+                    tokenizer=tokenizer,
+                    epoch=epoch_idx,
+                    out_dir=viz_dir,
+                )
+                logger.info("Wrote token log-prob visualization: %s", html_path)
+            except Exception:
+                logger.warning(
+                    "Failed to render token log-prob visualization for epoch %d",
+                    epoch_idx,
+                    exc_info=True,
+                )
 
         metrics.update(
             num_pairs=len(chosen_data),
@@ -1473,6 +1510,15 @@ def main() -> None:
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--infrequent-eval-every", type=int, default=100)
     parser.add_argument("--span-chart-every", type=int, default=0)
+    parser.add_argument(
+        "--logprob-viz", action=argparse.BooleanOptionalAction, default=True,
+        help=(
+            "Write a per-epoch HTML visualization coloring every token of each "
+            "chosen and rejected sample in the epoch's first batch by its policy "
+            "log probability. Reuses logprobs already computed in the DPO loss "
+            "(no extra inference). Use --no-logprob-viz to disable."
+        ),
+    )
     parser.add_argument("--load-checkpoint-path", default=None)
     parser.add_argument("--wandb-project", default=None)
     parser.add_argument("--wandb-name", default=None)
@@ -1919,6 +1965,7 @@ def main() -> None:
                 rolling_mgr=rolling_mgr,
                 data_override=data_override,
                 extra_metrics=extra_metrics,
+                logprob_viz_enabled=args.logprob_viz,
             )
             # Refresh the on-policy sampler after each step. Off-policy agentic
             # DPO intentionally keeps the frozen initial snapshot for the whole

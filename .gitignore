@@ -46,3 +46,7 @@ scripts/eval.sh
 # Local Python environments
 scripts/.venv/
 tinker-bridge/.venv/
+
+expertise-examples/**
+scripts/dataviz_22-offline
+scripts/train.sh
