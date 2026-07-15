@@ -46,3 +46,4 @@ scripts/eval.sh
 # Local Python environments
 scripts/.venv/
 tinker-bridge/.venv/
+.uv-bin/

@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { join } from "path";
 import { fileURLToPath } from "url";
 import type { ChildProcessWithoutNullStreams } from "child_process";
 import {
@@ -101,7 +103,24 @@ type BridgeResolveCheckpointResult =
     };
 
 const bridgeProjectPath = fileURLToPath(new URL("../../../tinker-bridge", import.meta.url));
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const TINKER_BRIDGE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+function resolveUvBin(): string {
+  const name = process.platform === "win32" ? "uv.exe" : "uv";
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const candidates = [
+    join(repoRoot, ".uv-bin", name),
+    join(repoRoot, ".uv-bin", "bin", name),
+    join(repoRoot, ".uv-bin", "Scripts", name),
+    home ? join(home, ".local", "bin", name) : "",
+    home ? join(home, ".cargo", "bin", name) : "",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return "uv";
+}
 
 type BridgePendingRequest = {
   resolve: (value: unknown) => void;
@@ -144,7 +163,7 @@ function ensurePersistentBridgeServer(): ChildProcessWithoutNullStreams {
     return persistentBridgeChild;
   }
 
-  const child = spawn("uv", ["run", "--project", bridgeProjectPath, "python", "-m", "tinker_bridge", "--serve"], {
+  const child = spawn(resolveUvBin(), ["run", "--project", bridgeProjectPath, "python", "-m", "tinker_bridge", "--serve"], {
     cwd: bridgeProjectPath,
     stdio: ["pipe", "pipe", "pipe"],
   });
