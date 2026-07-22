@@ -157,3 +157,33 @@ python scripts/tools/grade_redo.py \
 ```
 
 See `scripts/tools/README.md` for options (`--dry-run`, `--json-out`, `--model`, etc.).
+
+## Merge LoRA Adapters
+
+To reproduce the LoRA-only merge flow we use for the offline dataviz runs:
+
+1. Put `TINKER_API_KEY` in the environment, or in `scripts/weight/.env`.
+
+2. Pick a scratch directory on a disk with enough space, then run the merge script from the repo root:
+
+```bash
+python scripts/lora_merge_workflow.py \
+  --work-dir /data \
+  --download
+```
+
+This script reads the final `sampler_path` from each `model-weights/*/checkpoints.jsonl`, downloads the LoRA adapters from Tinker, and writes the merged LoRA adapter under your `--work-dir`:
+
+`<work-dir>/merged_lora_linear`
+
+The merge is LoRA-only. It does not materialize a full merged base model. The output is one adapter that can be served on top of the original base model.
+
+To use a different scratch directory or custom linear weights:
+
+```bash
+python scripts/lora_merge_workflow.py \
+  --work-dir /path/to/your/scratch-dir \
+  --download \
+  --lora-output /path/to/your/merged_lora \
+  --weights 0.1,0.2,0.2,0.25,0.25
+```
