@@ -278,11 +278,16 @@ def _is_quote_comment_action(action: str) -> bool:
 
 
 def _is_msg_only_user_action(action: str) -> bool:
+    """True for preference-bearing message(...) actions kept under --msg_only.
+
+    Drops every other action type (edit_workflow/edit_plan/edit_verifier, file edits,
+    Quote / file-comment messages, etc.).
+    """
     a = action.strip()
-    if _is_user_message_action(a):
-        # Inline file-quote comments are not user-authored preferences; skip like edit/brain_edit.
-        return not _is_quote_comment_action(a)
-    return a.startswith("edit_verifier(") or any(a.startswith(p) for p in _PLAN_EDIT_PREFIXES)
+    if not _is_user_message_action(a):
+        return False
+    # Inline file-quote comments are not user-authored chat preferences.
+    return not _is_quote_comment_action(a)
 
 
 def _format_action_entry(entry: dict[str, str], *, include_tool_result: bool = False) -> str:
@@ -333,7 +338,7 @@ def build_context_inputs(data: Any, *, msg_only: bool = False) -> list[dict[str,
             tool_result = entry.get("tool_result")
             if isinstance(tool_result, str) and tool_result.strip():
                 row_entry["tool_result"] = tool_result
-            if msg_only and row_entry["actor"] == "user" and not _is_msg_only_user_action(row_entry["action"]):
+            if msg_only and not _is_msg_only_user_action(row_entry["action"]):
                 continue
             action_entries.append(row_entry)
         if not action_entries:
@@ -840,8 +845,8 @@ def main() -> None:
     p.add_argument(
         "--msg_only",
         action="store_true",
-        help="Only user message(...), edit_workflow()/edit_plan(), and edit_verifier() actions; "
-        "drop other user actions (edit, brain_edit, etc.) and Quote / file-comment message actions",
+        help="Only keep message(...) actions; drop everything else "
+        "(edit_workflow, edit_plan, edit_verifier, file edits, Quote / file-comment messages, etc.)",
     )
     p.add_argument(
         "--memory_only",
