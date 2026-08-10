@@ -714,6 +714,10 @@ def extract_dpo_final_artifacts(
             tool_schemas,
             renderer,
         )
+        base_prompt: list[dict] = list(
+            _session_tools_prefix(system_prompt, tool_schemas, renderer)
+        )
+        base_prompt.append({"role": "user", "content": initial_task.strip()})
         chosen_artifacts: list[dict[str, Any]] = []
         for basename, versions in file_index.items():
             if len(versions) < max(1, min_versions):
@@ -743,7 +747,7 @@ def extract_dpo_final_artifacts(
                 "expected_path": final["path"],
                 "basename": basename,
                 "chosen": chosen,
-                "prompt": list(final["prompt"]),
+                "prompt": base_prompt,
                 "first_content": first_content,
                 "earlier_contents": earlier_contents,
             })
