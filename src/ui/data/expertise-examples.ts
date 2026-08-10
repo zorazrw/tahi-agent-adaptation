@@ -20,6 +20,24 @@ function toCategoryLabel(slug: string): string {
     .join(" ");
 }
 
+/** Display labels for heldout category keys (override auto Title Case). */
+const HELDOUT_CATEGORY_LABELS: Record<string, string> = {
+  "abstract-writing-heldout": "Abstract Writing (heldout)",
+  "data-viz-html-heldout": "Data Viz HTML (heldout)",
+};
+
+function heldoutCategoryKey(slug: string): string {
+  return `${slug}-heldout`;
+}
+
+function categoryLabel(key: ExpertiseTaskCategory): string {
+  if (HELDOUT_CATEGORY_LABELS[key]) return HELDOUT_CATEGORY_LABELS[key];
+  if (key.endsWith("-heldout")) {
+    return `${toCategoryLabel(key.slice(0, -"-heldout".length))} (heldout)`;
+  }
+  return toCategoryLabel(key);
+}
+
 function unwrapTaskPayload(raw: unknown): unknown {
   if (Array.isArray(raw)) return raw;
   if (!raw || typeof raw !== "object") return raw;
@@ -57,6 +75,11 @@ const rawTaskJsonModules = import.meta.glob("../../../expertise-examples/*/tasks
   eager: true,
 }) as Record<string, unknown>;
 
+const rawHeldoutJsonModules = import.meta.glob(
+  "../../../expertise-examples/*/heldout.json",
+  { eager: true },
+) as Record<string, unknown>;
+
 const taskEntries = Object.entries(rawTaskJsonModules)
   .map(([path, raw]) => {
     const match = path.match(/\/expertise-examples\/([^/]+)\/tasks\.json$/);
@@ -66,16 +89,30 @@ const taskEntries = Object.entries(rawTaskJsonModules)
   })
   .filter((entry): entry is readonly [ExpertiseTaskCategory, ExpertiseTaskInstance[]] =>
     Boolean(entry),
-  )
-  .sort(([a], [b]) => a.localeCompare(b));
+  );
+
+const heldoutEntries = Object.entries(rawHeldoutJsonModules)
+  .map(([path, raw]) => {
+    const match = path.match(/\/expertise-examples\/([^/]+)\/heldout\.json$/);
+    if (!match) return null;
+    const category = heldoutCategoryKey(match[1]);
+    return [category, normalizeTasks(raw)] as const;
+  })
+  .filter((entry): entry is readonly [ExpertiseTaskCategory, ExpertiseTaskInstance[]] =>
+    Boolean(entry),
+  );
+
+const allEntries = [...taskEntries, ...heldoutEntries].sort(([a], [b]) =>
+  a.localeCompare(b),
+);
 
 const TASKS_BY_CATEGORY: Record<ExpertiseTaskCategory, ExpertiseTaskInstance[]> =
-  Object.fromEntries(taskEntries);
+  Object.fromEntries(allEntries);
 
 export const EXPERTISE_TASK_CATEGORIES: ReadonlyArray<{
   key: ExpertiseTaskCategory;
   label: string;
-}> = taskEntries.map(([key]) => ({ key, label: toCategoryLabel(key) }));
+}> = allEntries.map(([key]) => ({ key, label: categoryLabel(key) }));
 
 export function getExpertiseTasks(category: ExpertiseTaskCategory): ExpertiseTaskInstance[] {
   return TASKS_BY_CATEGORY[category] ?? [];

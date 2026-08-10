@@ -3,7 +3,7 @@ uvicorn
 anthropic
 openai
 fastapi
-tinker>=0.22.3
+tinker>=0.25.0
 tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git
 python-dotenv
 orjson
