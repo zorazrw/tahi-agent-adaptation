@@ -2,351 +2,211 @@
     {
         "id": 1,
         "type": "Data Visualization",
-        "instruction": "Plot two vertical box plots stacked vertically, titled GPT-4o (top) and GPT-4o-mini (bottom). The x-axis is Number of shards (1–8) and the y-axis is Performance. Annotate each box with its max (top whisker), median (% label on the left), and min (bottom whisker) values. The data are:\nGPT-4o (max, median%, min): \n- Shard 1: 100, 19%, 81.\n- Shard 2: 87, 49%, 38.\n- Shard 3: 91, 46%, 45.\n- Shard 4: 91, 65%, 26.\n- Shard 5: 94, 65%, 29.\n- Shard 6: 87, 62%, 26.\n- Shard 7: 90, 68%, 23.\n- Shard 8: 90, 71%, 19.\nGPT-4o-mini (max, median%, min):\n- Shard 1: 90, 32%, 58.\n- Shard 2: 68, 45%, 23.\n- Shard 3: 77, 65%, 13.\n- Shard 4: 74, 58%, 16.\n- Shard 5: 65, 53%, 13.\n- Shard 6: 68, 59%, 10.\n- Shard 7: 65, 56%, 10.\n- Shard 8: 69, 56%, 13.",
+        "instruction": "In HTML, plot two vertical box plots stacked vertically, titled GPT-4o (top) and GPT-4o-mini (bottom). The x-axis is Number of shards (1\u20138) and the y-axis is Performance. Annotate each box with its max (top whisker), median (% label on the left), and min (bottom whisker) values. The data are:\nGPT-4o (max, median%, min): \n- Shard 1: 100, 19%, 81.\n- Shard 2: 87, 49%, 38.\n- Shard 3: 91, 46%, 45.\n- Shard 4: 91, 65%, 26.\n- Shard 5: 94, 65%, 29.\n- Shard 6: 87, 62%, 26.\n- Shard 7: 90, 68%, 23.\n- Shard 8: 90, 71%, 19.\nGPT-4o-mini (max, median%, min):\n- Shard 1: 90, 32%, 58.\n- Shard 2: 68, 45%, 23.\n- Shard 3: 77, 65%, 13.\n- Shard 4: 74, 58%, 16.\n- Shard 5: 65, 53%, 13.\n- Shard 6: 68, 59%, 10.\n- Shard 7: 65, 56%, 10.\n- Shard 8: 69, 56%, 13.",
         "title": "LLMs Get Lost In Multi-Turn Conversation",
         "figure": "Figure 6 (c)"
     },
     {
         "id": 2,
         "type": "Data Visualization",
-        "instruction": "Plot three diagrams stacked vertically, each showing a pair of box plots connected by dotted lines from the top and bottom whiskers. The y-axis is Performance (0%–100%). Each box plot is annotated with A (Aptitude) at the top whisker and U (Unreliability) as the spread (max minus min). The three scenarios are:\nLoss in aptitude: Left box: A=95, min=70, U=25. Right box: A=65, min=40, U=25. (Same spread, lower aptitude.)\nLoss in reliability: Left box: A=95, min=70, U=25. Right box: A=95, min=30, U=65. (Same aptitude, larger spread.)\nLoss in aptitude & reliability: Left box: A=95, min=70, U=25. Right box: A=80, min=40, U=40. (Both aptitude and spread change.)",
+        "instruction": "In HTML, plot three diagrams stacked vertically, each showing a pair of box plots connected by dotted lines from the top and bottom whiskers. The y-axis is Performance (0%\u2013100%). Each box plot is annotated with A (Aptitude) at the top whisker and U (Unreliability) as the spread (max minus min). The three scenarios are:\nLoss in aptitude: Left box: A=95, min=70, U=25. Right box: A=65, min=40, U=25. (Same spread, lower aptitude.)\nLoss in reliability: Left box: A=95, min=70, U=25. Right box: A=95, min=30, U=65. (Same aptitude, larger spread.)\nLoss in aptitude & reliability: Left box: A=95, min=70, U=25. Right box: A=80, min=40, U=40. (Both aptitude and spread change.)",
         "title": "LLMs Get Lost In Multi-Turn Conversation",
         "figure": "Figure 6 (a)"
     },
     {
         "id": 3,
         "type": "Data Visualization",
-        "instruction": "Plot four confusion matrices side by side titled Concrete, Relevant, Severe, and Surprising. Each is a 2×2 matrix with Human (no/yes) on the x-axis and LLM judge (no/yes) on the y-axis. Use a colormap where higher values are darker. The cell values (top-left, top-right, bottom-left, bottom-right) = (Human=no/LLM=no, Human=yes/LLM=no, Human=no/LLM=yes, Human=yes/LLM=yes) are:\nConcrete: 13, 0, 0, 17. Relevant: 3, 1, 0, 26. Severe: 4, 0, 6, 22. Surprising: 15, 0, 1, 15.",
-        "title": "'I Don't Think RAI Applies to My Model' – Engaging Non-champions with Sticky Stories for Responsible AI Work",
+        "instruction": "In HTML, plot four confusion matrices side by side titled Concrete, Relevant, Severe, and Surprising. Each is a 2\u00d72 matrix with Human (no/yes) on the x-axis and LLM judge (no/yes) on the y-axis. Use a colormap where higher values are darker. The cell values (top-left, top-right, bottom-left, bottom-right) = (Human=no/LLM=no, Human=yes/LLM=no, Human=no/LLM=yes, Human=yes/LLM=yes) are:\nConcrete: 13, 0, 0, 17. Relevant: 3, 1, 0, 26. Severe: 4, 0, 6, 22. Surprising: 15, 0, 1, 15.",
+        "title": "'I Don't Think RAI Applies to My Model' \u2013 Engaging Non-champions with Sticky Stories for Responsible AI Work",
         "figure": "Figure 6"
     },
     {
         "id": 4,
         "type": "Data Visualization",
-        "instruction": "Plot a diverging horizontal bar chart with a central zero axis. The x-axis is Number of participants, ranging from -10 (left) to +15 (right). Bars extending left are Baseline stories and bars extending right are Sticky stories. The 12 row labels and their (baseline, sticky) values are:\n1a Challenges Assumptions/Disagrees/Contests: 0, 7.\n1b Explores Multiple Perspectives: 0, 10.\n1c Connects to Wider Systems/Past Incidents: 6, 9.\n1d Expresses Surprise/Shows Enthusiasm: 3, 15.\n1e Iterative Thinking: 0, 10.\n1f Plans Change: 1, 6.\n2a Skimming: 5, 0.\n2b Ignoring: 1, 0.\n2c Copy-Paste: 3, 0.\n2d Negative Comment/Behavior: 5, 6.\n2e Neutral Stance: 3, 1.\nOther: 1, 0.",
-        "title": "'I Don't Think RAI Applies to My Model' – Engaging Non-champions with Sticky Stories for Responsible AI Work",
+        "instruction": "In HTML, plot a diverging horizontal bar chart with a central zero axis. The x-axis is Number of participants, ranging from -10 (left) to +15 (right). Bars extending left are Baseline stories and bars extending right are Sticky stories. The 12 row labels and their (baseline, sticky) values are:\n1a Challenges Assumptions/Disagrees/Contests: 0, 7.\n1b Explores Multiple Perspectives: 0, 10.\n1c Connects to Wider Systems/Past Incidents: 6, 9.\n1d Expresses Surprise/Shows Enthusiasm: 3, 15.\n1e Iterative Thinking: 0, 10.\n1f Plans Change: 1, 6.\n2a Skimming: 5, 0.\n2b Ignoring: 1, 0.\n2c Copy-Paste: 3, 0.\n2d Negative Comment/Behavior: 5, 6.\n2e Neutral Stance: 3, 1.\nOther: 1, 0.",
+        "title": "'I Don't Think RAI Applies to My Model' \u2013 Engaging Non-champions with Sticky Stories for Responsible AI Work",
         "figure": "Figure 11"
     },
     {
         "id": 5,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a bar chart with a Pareto-style descending pattern. The x-axis lists misclassification error types (True -> Predicted) and the y-axis is frequency count (0\u2013200). Add a dotted curve overlaid showing the declining trend. The bars and their approximate values in descending order are:\nX to Artifact: 186. X to P: 52. Artifact to Figure: 33. Caption to Table: 15. Artifact to H1: 8. Figure to Caption: 3. Artifact to BibEntry: 2. H3 to Li: 2. H3 to Table: 2. P to Caption: 2. P to Table: 2. Caption to Figure: 2. Figure to Table: 2. Formula to Figure: 1. Li to H3: 1. Li to Table: 1. P to H3: 1. P to Li: 1. Table to Figure: 1.",
+        "title": "iTagPDF: Towards Finally Automating PDF Accessibility",
+        "figure": "Figure 7"
     },
     {
         "id": 6,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a bubble scatter chart with x-axis as Inference Time on a log scale (0.1s, 1s, 10s, 1min) and y-axis as FID (Frechet Inception Distance, lower is better, range ~1.5 to 6). Bubble size encodes model size (0.3B=small, 1B, 2B, 5B=large). Add a horizontal dashed reference line at FID=1.78 labeled 'FID lower bound 1.78 (val set)'. Connect points within the same model family with lines. The models, their approximate (inference time, FID, size) values are:\nVAR/ours: ~0.15s/3.3/0.3B, ~0.2s/2.8/1B, ~0.25s/2.1/1B, ~0.3s/1.73/2B. \nAR-RQ: ~0.3s/5.3/0.3B, ~0.4s/4.6/1B, ~0.6s/3.9/2B, ~1s/3.9/5B.\nDiT: ~8s/2.3/1B, ~10s/2.1/2B, ~1min/2.3/5B, ~8s/4.6/1B.\nMaskGIT: ~0.1s/4.5/0.5B.\nGigagan: ~0.2s/3.5/1B.\nRCG: ~0.5s/3.7/1B.\nAR-vqgan: ~1s/4.5/1B.\nADM: ~1min/4.6/0.5B.",
+        "title": "Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction",
+        "figure": "Figure 1"
     },
     {
         "id": 7,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, draw a horizontal pipeline diagram with 5 nodes connected by arrows left to right: (1) 'High-quality Corpus', (2) 'Step 1: Train a reference model on high-quality text' with a small neural network icon labeled 'Reference Model' to its right, (3) 'Step 2: Calculate each token's ppl in the pretraining corpus' with a 'Pretraining Corpus' node to its right, (4) 'Step 3: Train an LLM with loss focused on high-score tokens' with a larger neural network icon labeled 'Language Model' to its right. Connect all nodes sequentially with arrows from left to right.",
+        "title": "Not All Tokens Are What You Need for Pretraining",
+        "figure": "Figure 4"
     },
     {
         "id": 8,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, draw a schematic diagram with a header arrow labeled \"Stated Preferences \u2192 Contextual Preferences\". Below it place three side-by-side panels (A, B, C) each as a rounded rectangle. Panel A is titled \"Behaviour Attributes\", Panel B \"Performance Attributes\", Panel C \"Choice Attributes\". Each panel has a prompt text at the top and a scale label (red on left, green on right), followed by 7 slider rows. On the left side, place 7 colored label boxes connected to their corresponding slider rows across all three panels by horizontal colored lines: Value-alignment, Fluency, Factuality, Safety, Diversity, Creativity, Helpfulness.\n\nThe 7 row items per panel are:\n\nPanel A (scale: Strongly disagree \u2192 Strongly agree): \"...reflects my values &/or cultural perspective\", \"...produces responses that are well-written & coherent\", \"...produces factual & informative responses\", \"...produces responses that are safe & do not risk harm to myself & others\", \"...summarises multiple viewpoints or different worldviews\", \"...pces responses that are creative & inspiring\", \"...produces responses that are helpful & relevant to my request\".\n\nPanel B (scale: Performed v. poorly \u2192 Performed v. well): \"...reflected my values &/or cultural perspective\", \"...was well-written & coherent\", \"...was factual & informative\", \"...was safe & does not risk harm to myself & others\", \"...summarised multiple viewpoints or different worldviews\", \"...was creative & inspiring\", \"...was helpful & relevant to my request\".\n\nPanel C (scale: Very unimportant \u2192 Very important): \"...because it reflected my values &/or cultural perspective\", \"...because it was well-written & coherent\", \"...because it was factual & informative responses\", \"...because it was safe & does not risk harm to myself & others\", \"...because it summarised multiple viewpoints or different worldviews\", \"...because it was creative & inspiring\", \"...because it was helpful & relevant to my request\".",
+        "title": "The PRISM Alignment Dataset: What Participatory, Representative and Individualised Human Feedback Reveals About the Subjective and Multicultural Alignment of Large Language Models",
+        "figure": "Figure 2"
     },
     {
         "id": 9,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot two line charts side by side titled Train (left) and Test (right). The x-axis is Input PSNR (0 to 42, ticks every 3) and the y-axis is Output PSNR (9 to 63). Add a dashed identity line (y=x) to both panels. Plot 6 curves per panel for training set sizes N=1, 10, 100, 1000, 10000, 100000, colored from black to light orange as N increases. The approximate curve values (Input PSNR \u2192 Output PSNR) are:\nTrain:\nN=1: starts ~43 at x=0, rises linearly to ~63 at x=42 (follows identity closely).\nN=10: starts ~40 at x=0, rises to ~63 at x=42 (slightly below N=1).\nN=100: starts ~37 at x=0, rises then plateaus ~55 from x=27 onward.\nN=1000: starts ~28 at x=0, rises gradually to ~40 at x=42.\nN=10000: starts ~21 at x=0, rises to ~41 at x=42.\nN=100000: starts ~21 at x=0, rises to ~41 at x=42 (overlaps N=10000).\nTest:\nN=1: starts ~12 at x=0, stays flat ~12 across all input PSNR.\nN=10: starts ~14 at x=0, stays flat ~15 across all input PSNR.\nN=100: starts ~17 at x=0, stays flat ~17 across all input PSNR.\nN=1000: starts ~19 at x=0, rises slightly to ~21 at x=42.\nN=10000: starts ~20 at x=0, rises to ~41 at x=42.\nN=100000: starts ~21 at x=0, rises to ~42 at x=42 (tracks identity line closely).",
+        "title": "Generalization in Diffusion Models Arises from Geometry-Adaptive Harmonic Representations",
+        "figure": "Figure 1"
     },
     {
         "id": 10,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a grouped bar chart with two task groups on the x-axis: Mean performance - LRA and PathX-256. The y-axis ranges from 40 to 100. Each group has bars for two model types (Transformer, S4) crossed with two training modes (Trained from Scratch, Self Pretrained). Annotate each bar with its value. The data are:\nMean performance - LRA: Transformer Scratch=53.60, Transformer Self Pretrained=86.21, S4 Scratch=86.09, S4 Self Pretrained=86.75.\nPathX-256: S4 Scratch=67.82, S4 Self Pretrained=87.11. (No Transformer bars for PathX-256.)",
+        "title": "Never Train from Scratch: Fair Comparison of Long-Sequence Models Requires Data-Driven Priors",
+        "figure": "Figure 1"
     },
     {
         "id": 11,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, draw a flowchart with two input boxes on the left feeding into a central processing node, which then flows right through a density estimation step and splits into two output paths. The nodes and connections are:\nTwo input boxes on the left: (1) \"In silico designs\" containing example sequences: QSVTQRPRTVLP..., NIVMTQRPTPSV..., QSVEEGGRTVLP..., RTVMTQRPTPSV... (2) \"Reference set\" containing: QSVEPSVRTVLP..., NIVMTQRPTPSV..., QSVEEGGRTVLP..., NIVGGRRPTPSV...\nBoth input boxes point right via arrows to a central node: \"Compute metrics\" listing: naturalness, alignment score, surface hydrophobicity, charge patches, structural symmetry, ...\nThe compute metrics node points right to a \"joint density estimation\" node (illustrated as a 3D bell curve/surface plot).\nFrom joint density estimation, two arrows go up-right: one to \"Likelihood of each sequence\" and one to \"Likelihood of a held-out reference set\".\n\"Likelihood of each sequence\" points right to \"Conformity measure A\". \"Likelihood of a held-out reference set\" also points up to \"Conformity measure A\".",
+        "title": "Protein Discovery with Discrete Walk-Jump Sampling",
+        "figure": "Figure 3"
     },
     {
         "id": 12,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a grouped bar chart with 4 bars on the x-axis (Protocol) and y-axis as Judge Accuracy (%) ranging from 50 to 100. The 4 bars represent: Static Consultancy, Interactive Consultancy, Static Debate, Interactive Debate. Each bar has an error bar. For the first two bars (Consultancy protocols), overlay a hatched extension above the solid bar up to ~91% to show the \"Correct\" assignment range, with a dashed horizontal line marking the boundary between Correct and Incorrect assignments within the bar. Add a legend for Assignment types: Combined (solid), Correct (single-hatched), Incorrect (double-hatched). The data are:\nStatic Consultancy: solid bar=76%, dashed line at 60%, hatched extension to 91%, error bar ~\u00b13%.\nInteractive Consultancy: solid bar=81%, dashed line at 70%, hatched extension to 92%, error bar ~\u00b13%.\nStatic Debate: solid bar=88%, error bar ~\u00b12%.\nInteractive Debate: solid bar=88%, error bar ~\u00b12%.",
+        "title": "Debating with More Persuasive LLMs Leads to More Truthful Answers",
+        "figure": "Figure 6 (Left)"
     },
     {
         "id": 13,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a grouped bar chart with 3 protocol groups on the x-axis (Consultancy, Debate, Interactive Debate) and y-axis as Performance gap recovered (%) ranging from 0 to 65. Each group has 3 bars for judges: GPT-3.5-Turbo, Claude 2.1, GPT-4-Turbo. Add error bars to each bar. The data are:\nConsultancy: GPT-3.5-Turbo=27%, Claude 2.1=19%, GPT-4-Turbo=4%. Debate: GPT-3.5-Turbo=49%, Claude 2.1=52%, GPT-4-Turbo=63%. Interactive Debate: GPT-3.5-Turbo=40%, Claude 2.1=40%, GPT-4-Turbo=53%.",
+        "title": "Debating with More Persuasive LLMs Leads to More Truthful Answers",
+        "figure": "Figure 9"
     },
     {
         "id": 14,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a scatter chart with x-axis as Compute (FLOPs) on a log scale (10^20 to 10^22) and y-axis ranging from 0.0018 to 0.0025. Each point represents a model size: 41M, 96M, 192M, 404M, 811M, 1.6B, 2.7B. Point size increases with model size. The approximate (FLOPs, y-value) coordinates are:\n41M: (2\u00d710^20, 0.00247). 96M: (5\u00d710^20, 0.00233). 192M: (8\u00d710^20, 0.00218). 404M: (1.2\u00d710^21, 0.00205). 811M: (2.5\u00d710^21, 0.00196). 1.6B: (6\u00d710^21, 0.00184). 2.7B: (8\u00d710^21, 0.00182).",
+        "title": "Genie: Generative Interactive Environments",
+        "figure": "Figure 9 (Middle)"
     },
     {
         "id": 15,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, draw a vertical continuum diagram with a central vertical bar colored from dark red/brown at the top (labeled \"Impossible\") to dark gray at the bottom (labeled \"Possible\"), with a gradient through orange, yellow, green, blue, purple downward. Add a dotted horizontal line with a \"?\" label near the bottom third of the bar to indicate an uncertain boundary. On the left side, place 5 labeled boxes connected by horizontal lines with dots to their corresponding positions on the central bar, from top to bottom: Random Word Shuffles (pink, top), Local Shuffles (light green), Reversed Strings (light blue), Count-based Grammar Rules (light purple), Attested Languages (gray, bottom). On the right side, place 5 labeled boxes connected by bracket/range indicators to the central bar, from top to bottom: Irreversible Functions (red, spans top two), Lacking Information Locality (green, spans positions 2\u20133), Unnatural Word Orders (blue, position 3), Lacking Hierarchical Structure (magenta, spans positions 4\u20135), Hichically Structured (gray, bottom). Each right-side box uses a colored bracket to indicate the range on the continuum it covers.",
+        "title": "Mission: Impossible Language Models",
+        "figure": "Figure 1"
     },
     {
         "id": 16,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a scatter plot with marginal density curves on the top and right axes. The x-axis is Average Sensitivity (range ~2.7 to 5.3) and y-axis is Sharpness (range ~0.2 to 2.1). Plot 4 point clouds with corresponding marginal distributions: Train size 128, Train size 256 , Train size 512, Random function. The approximate cluster centers and spreads are:\nTrain 128: centered ~(3.0, 0.35), spread ~\u00b10.2 in x, \u00b10.15 in y. Train 256: centered ~(3.6, 0.80), spread ~\u00b10.3 in x, \u00b10.2 in y. Train 512: centered ~(4.2, 1.25), spread ~\u00b10.35 in x, \u00b10.25 in y. Random function: centered ~(5.0, 1.55), spread ~\u00b10.2 in x, \u00b10.3 in y.\nThe four clusters are arranged diagonally from bottom-left to top-right with increasing sensitivity and sharpness. Add marginal KDE curves on the top (x-distribution) and right (y-distribution) for each of the 4 groups in matching colors.",
+        "title": "Why are Sensitive Functions Hard for Transformers?",
+        "figure": "Figure 4"
     },
     {
         "id": 17,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a heatmap with 3 rows (Aya Ha-H, Aya Te-H, Aya Tr-H) and 5 columns (Disc., MMLU, Transl., Summ., QA) where higher values are darker. Annotate each cell with its value. Bold the highest value per column. The data are:\nAya Ha-H: +13.0%, +20.2%, +26.8%, +2.8%, +2.4%. Aya Te-H: +14.9%, +21.5%, +25.6%, +7.4%, +3.6%. Aya Tr-H: +13.1%, +21.2%, +38.6%, +1.8%, +2.0%.",
+        "title": "Aya Model: An Instruction Finetuned Open-Access Multilingual Language Model",
+        "figure": "Figure 1"
     },
     {
         "id": 18,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a stacked bar chart with 5 models on the x-axis (Llama-2, GPT-3.5, GPT-4, Claude 1, Claude 2) and y-axis as Attack Success Rate (0%\u2013100%). Each bar has 3 stacked segments representing cumulative success within \u22641 trial (lightest), \u22643 trials (medium), \u226410 trials/max (darkest). Annotate each segment boundary and the total bar top with its value. The data are:\nLlama-2: \u22641 trial=46%, \u22643 trials=68%, \u226410 trials=92%.\nGPT-3.5: \u22641 trial=66%, \u22643 trials=86%, \u226410 trials=94%.\nGPT-4: \u22641 trial=72%, \u22643 trials=88%, \u226410 trials=92%.\nClaude 1: \u22641 trial=0%, \u22643 trials=0%, \u226410 trials=6%.\nClaude 2: \u22641 trial=0%, \u22643 trials=0%, \u226410 trials=0%.",
+        "title": "How Johnny Can Persuade LLMs to Jailbreak Them",
+        "figure": "Figure 10"
     },
     {
         "id": 19,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a grouped bar chart with 3 model groups on the x-axis (Baichuan-13B, Qwen1.5-14B, GPT-3) and y-axis as AUC ranging from 0.5 to 0.74. Each group has 3 bars: CLD, +LUP, +SFO. The data are:\nBaichuan-13B: CLD=0.582, +LUP=0.663, +SFO=0.693.\nQwen1.5-14B: CLD=0.580, +LUP=0.660, +SFO=0.670.\nGPT-3: CLD=0.663, +LUP=0.661, +SFO=0.737.",
+        "title": "Pretraining Data Detection for Large Language Models: A Divergence-based Calibration Method",
+        "figure": "Figure 2"
     },
     {
         "id": 20,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a grouped bar chart with 7 groups on the x-axis and y-axis as Count (0–500). Each group has 3 bars: e2e-instruct, cap-edit, cap-retrieve. Annotate each bar with its value. The data are:\nGroup 1: 5, 25, 76. Group 2: 28, 45, 127. Group 3: 20, 73, 156. Group 4: 9, 22, 24. Group 5: 3, 19, 103. Group 6: 3, 45, 98. Group 7: 5, 17, 54.",
+        "title": "An Image Speaks a Thousand Words, but Can Everyone Listen? On Image Transcreation for Cultural Relevance",
+        "figure": "Figure 6 (bottom)"
     },
     {
         "id": 21,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a grouped bar chart with 4 models on the x-axis (XLS-R 1B, MMS 1B, w2v-BERT 2.0 v2, XEUS) and 3 metrics as grouped bars: FLEURS CER (lower is better), FLEURS ACC (higher is better), JesusFilm chrF (higher is better). The data are:\n\nXLS-R 1B: CER=9.6, ACC=92.5, chrF=13.4. MMS 1B: CER=9.2, ACC=94.0, chrF=15.5. w2v-BERT 2.0 v2: CER=8.7, ACC=94.3, chrF=15.1. XEUS: CER=8.9, ACC=93.0, chrF=22.1.",
+        "title": "Toward Robust Speech Representation Learning for Thousands of Languages",
+        "figure": "Table 4"
     },
     {
         "id": 22,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, draw a Venn diagram inside a rectangle. Place two overlapping circles: a smaller circle on the left labeled 'Stopwords' with 'P(masked) = 0.15' inside its non-overlapping region, and a larger circle on the right labeled 'Dell Chall easy words' with 'P(masked) = 0.20' inside its center. The two circles partially overlap. Outside both circles but inside the rectangle, label the background region 'Other Words' with 'P(masked) = 0.25' in the upper right.",
+        "title": "KidLM: Advancing Language Models for Children",
+        "figure": "Figure 2"
     },
     {
         "id": 23,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a strip/dot plot with two horizontal rows labeled CONSTRAINED (top) and UNCONSTRAINED (bottom) on the y-axis, and Total Words Highlighted (0 to ~700) on the x-axis. Each row shows individual data points as scattered dots, plus a mean point with error bars (95% CI). CONSTRAINED dots are red/pink, UNCONSTRAINED dots are light blue. The approximate data are:\n\nCONSTRAINED: individual points cluster between 50–250, mean ~160, error bar range ~140–175. UNCONSTRAINED: individual points spread from 0–700, mean ~280, error bar range ~200–360.",
+        "title": "Constrained Highlighting in a Document Reader can Improve Reading Comprehension",
+        "figure": "Figure 3"
     },
     {
         "id": 24,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, draw a 2D diagram with x-axis as Tokens (Epochs) and y-axis as Parameters. Add three elements: (1) A dashed blue diagonal line sloping downward from upper-left to lower-right labeled '10^22 FLOPs' representing the IsoFLOP curve. (2) A solid black diagonal line sloping upward from origin to upper-right representing the efficient frontier assuming repeated data equals new data. (3) A gradient line (dark red to orange to light yellow) also sloping upward from origin, slightly below the black line, representing the efficient frontier from data-constrained scaling laws.\nMark two star points where the IsoFLOP curve intersects each frontier: a gold star at (178B tokens / 7.1 epochs, 8.67B parameters) labeled 'Loss: 2.376', and a red star at (242B tokens / 9.7 epochs, 6.34B parameters) labeled 'Loss: 2.359'. Draw vertical and horizontal gray reference lines from each star to the axes. The red star lies on the gradient line and the gold star lies on the black line.",
+        "title": "Scaling Data-Constrained Language Models",
+        "figure": "Figure 1 (right)"
     },
     {
         "id": 25,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a line chart with x-axis as Sampling Temperature (0.25, 0.70, 1.00) and y-axis as Win Rate (0.10 to 0.65). Add a horizontal dashed reference line at y=0.50. Plot 4 lines with error bars: DPO , Best of 128, Preferred-FT, Pythia-2.8B. The data (temperature, win rate) are:\nDPO: (0.25, 0.37), (0.70, 0.59), (1.00, 0.63). Best of 128: (0.25, 0.55), (0.70, 0.60), (1.00, 0.61). Preferred-FT: (0.25, 0.30), (0.70, 0.42), (1.00, 0.37). Pythia-2.8B: (0.25, 0.16), (0.70, 0.25), (1.00, 0.21).",
+        "title": "Direct Preference Optimization: Your Language Model is Secretly a Reward Model",
+        "figure": "Figure 3 (left)"
     },
     {
         "id": 26,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot two overlapping KDE (density) curves with x-axis as Map Prediction Accuracy (IoU) ranging from -0.1 to 0.8 and y-axis as density. The two curves are: UntrainedAgentMemory (peak ~0.07, mean=12.4%) and TrainedAgentMemory (peak ~0.22, mean=32.4%). Add vertical dashed lines at x=0.124 and x=0.324 marking each mean, with percentage labels above. Mark two threshold points on the x-axis with small labeled boxes: A at x≈0.35 and B at x≈0.60.",
+        "title": "Emergence of Maps in the Memories of Blind Navigation Agents",
+        "figure": "Figure 4 (left)"
     },
     {
         "id": 27,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a 2×5 grid of line charts. Each panel has x-axis as shot (10, 20, 55, 275) and shows 3 lines: Ours, DPT, InvPT. Each panel has its own y-axis metric and direction (↑ or ↓). The data are:\nSS (mIoU ↑): Ours: 0.41, 0.45, 0.505, 0.565. DPT: 0.45. InvPT: 0.38.\nSN (mErr ↓): Ours: 11.8, 10.5, 10.0, 8.5. DPT: 6.7. InvPT: 13.0.\nED (RMSE ↓): Ours: 0.075, 0.071, 0.069, 0.057. DPT: 0.054. InvPT: 0.059.\nZD (RMSE ↓): Ours: 0.033, 0.029, 0.028, 0.026. DPT: 0.027. InvPT: 0.030.\nTE (RMSE ↓): Ours: 0.080, 0.079, 0.076, 0.073. DPT: 0.020. InvPT: 0.050.\nOE (RMSE ↓): Ours: 0.091, 0.087, 0.086, 0.081. DPT: 0.070. InvPT: 0.079.\nK2 (RMSE ↓): Ours: 0.063, 0.060, 0.059, 0.058. DPT: 0.035. InvPT: 0.047.\nK3 (RMSE ↓): Ours: 0.052, 0.048, 0.045, 0.043. DPT: 0.036. InvPT: 0.039.\nRS (RMSE ↓): Ours: 0.110, 0.103, 0.102, 0.095. DPT: 0.091. InvPT: 0.097.\nPC (RMSE ↓): Ours: 0.042, 0.051, 0.041, 0.040. DPT: 0.034. InvPT: 0.037.",
+        "title": "Universal Few-shot Learning of Dense Prediction Tasks with Visual Token Matching",
+        "figure": "Figure 3"
     },
     {
         "id": 28,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot a bar chart titled 'Matching task performance' with y-axis from 0 to 120. Add a horizontal reference line at y=95 labeled 'Human'. Divide bars into two groups: 'From Pixels' (left) and 'From Description' (right). Each bar uses fill pattern to indicate evaluation type: zero-shot, 5-shot, fine-tuned. The data are:\nFrom Pixels: CLIP: zero-shot=62. OFA Huge→T5-Large: fine-tuned=45. OFA Huge→T5-11B: fine-tuned=51. HUMAN (est): zero-shot=95.\nFrom Description: T5-Large: fine-tuned=60. T5-11B: fine-tuned=71. GPT3-175B: fine-tuned=51, 5-shot=75. GPT 3.5: zero-shot=50, 5-shot=64. GPT-4: zero-shot=83, 5-shot=85.\nFor GPT3-175B, GPT 3.5, and GPT-4, the bar shows a stacked or overlaid combination of zero-shot and 5-shot.",
+        "title": "Do Androids Laugh at Electric Sheep? Humor 'Understanding' Benchmarks from The New Yorker Caption Contest",
+        "figure": "Figure 12"
     },
     {
         "id": 29,
         "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "instruction": "In HTML, plot two side-by-side horizontal bar charts titled 'Black Stereotypes' (left, x-axis 0–0.8%) and 'White Stereotypes' (right, x-axis 0–2.0%). Both share the same 8 y-axis persona labels (top to bottom): Self-ID White, Imagined Black, Self-ID Black, Imagined White, GPT-4 White, GPT-4 Black, GPT-3.5 White, GPT-3.5 Black. Add error bars (standard error) to each bar. The approximate values are:\nBlack Stereotypes (left panel): Self-ID White: 0.07%. Imagined Black: 0.22%. Self-ID Black: 0.12%. Imagined White: 0.13%. GPT-4 White: 0.10%. GPT-4 Black: 0.27%. GPT-3.5 White: 0.70%. GPT-3.5 Black: 0.48%.\nWhite Stereotypes (right panel): Self-ID White: 0.07%. Imagined Black: 0.07%. Self-ID Black: 0.07%. Imagined White: 0.30%. GPT-4 White: 1.30%. GPT-4 Black: 0.70%. GPT-3.5 White: 2.00%. GPT-3.5 Black: 0.55%.",
+        "title": "Marked Personas: Using Natural Language Prompts to Measure Stereotypes in Language Models",
+        "figure": "Figure 1"
     },
     {
         "id": 30,
         "type": "Data Visualization",
-        "instruction": "",
+        "instruction": "In HTML, plot two rows of 8 small line charts each (panels a and b), sharing the same structure. Each panel has x-axis with two points (Before CFT, After CFT) and y-axis as Accuracy/F1. Plot 3 lines per panel: COSINE, L2R, FTw, plus a horizontal dashed line for Clean Only baseline. Each panel is titled with dataset name and N value.\n\nRow (a) — N=5 per class (classification), N=50 (NER). Approximate (Before CFT, After CFT) values:\nAGNews: COSINE=84,86; L2R=81,80; FTw=84,80; Clean Only=76. Yelp: COSINE=80,86; L2R=68,80; FTw=76,84; Clean Only=64. IMDb: COSINE=78,78; L2R=76,76; FTw=75,81; Clean Only=72. TREC: COSINE=75,81; L2R=63,78; FTw=63,87; Clean Only=57. ChemProt: COSINE=54,57; L2R=51,54; FTw=42,60; Clean Only=48. SemEval: COSINE=84,87; L2R=75,84; FTw=72,87; Clean Only=69. CoNLL-03: COSINE=81,81; L2R=75,79; FTw=66,84; Clean Only=75. OntoNotes 5.0: COSINE=63,66; L2R=63,57; FTw=60,68; Clean Only=51.\n\nRow (b) — N=50 per class (classification), N=500 (NER). Approximate (Before CFT, After CFT) values:\nAGNews: COSINE=94,94; L2R=87,89; FTw=88,91; Clean Only=88. Yelp: COSINE=94,94; L2R=84,86; FTw=82,92; Clean Only=90. IMDb: COSINE=87,87; L2R=84,86; FTw=82,88; Clean Only=86. TREC: COSINE=88,92; L2R=80,88; FTw=68,94; Clean Only=92. ChemProt: COSINE=72,74; L2R=60,69; FTw=57,75; Clean Only=72. SemEval: COSINE=87,88; L2R=84,87; FTw=84,88; Clean Only=83. CoNLL-03: COSINE=87,89; L2R=78,84; FTw=69,91; Clean Only=87. OntoNotes 5.0: COSINE=70,73; L2R=69,72; FTw=66,73; Clean Only=74.",
         "title": "",
-        "figure": ""
-    },
-    {
-        "id": 31,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 32,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 33,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 34,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 35,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 36,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 37,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 38,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 39,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 40,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 41,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 42,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 43,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 44,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 45,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 46,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 47,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 48,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 49,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
-    },
-    {
-        "id": 50,
-        "type": "Data Visualization",
-        "instruction": "",
-        "title": "",
-        "figure": ""
+        "figure": "Figure 5"
     }
 ]

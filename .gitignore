@@ -42,6 +42,9 @@ scripts/config*
 !scripts/config_online.yaml
 runs/*
 scripts/eval.sh
+scripts/log_dataviz
+scripts/log_writing
+scripts/tools/.*
 
 # Local Python environments
 scripts/.venv/
