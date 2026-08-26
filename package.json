@@ -80,7 +80,9 @@
 	"devDependencies": {
 		"@electron/rebuild": "4.2.0",
 		"@eslint/js": "^9.39.2",
+		"@testing-library/react": "16.3.2",
 		"@types/better-sqlite3": "^7.6.13",
+		"@types/jsdom": "21.1.7",
 		"@types/os-utils": "^0.0.4",
 		"@types/react": "^19.2.7",
 		"@types/react-dom": "^19.2.3",
@@ -93,6 +95,7 @@
 		"eslint-plugin-react-hooks": "^7.0.1",
 		"eslint-plugin-react-refresh": "^0.4.26",
 		"globals": "^17.0.0",
+		"jsdom": "30.0.1",
 		"typescript": "~5.9.3",
 		"typescript-eslint": "^8.52.0",
 		"vite": "^7.3.1"

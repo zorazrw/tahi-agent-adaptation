@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2Icon } from "lucide-react";
 import { validateSvg } from "../../../lib/svg-tools";
-import type { EditableRendererProps, PreviewSaveChrome } from "./index";
+import type { EditableRendererProps, PreviewSaveChrome } from "./types";
 
 type Props = { data: { kind: "svg"; content: string } } & EditableRendererProps;
 
@@ -9,6 +9,7 @@ type EditorMessage = {
   type?: unknown;
   channel?: unknown;
   svg?: unknown;
+  error?: unknown;
 };
 
 export function SvgRenderer({
@@ -22,19 +23,28 @@ export function SvgRenderer({
   const frameRef = useRef<HTMLIFrameElement>(null);
   const svgRef = useRef(data.content);
   const baselineRef = useRef(data.content);
+  const diskContentRef = useRef(data.content);
+  const dirtyRef = useRef(false);
+  const conflictRef = useRef(false);
   const [ready, setReady] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const channel = useMemo(() => crypto.randomUUID(), []);
   const canEdit = Boolean(filePath && onReload);
+  const fileName = filePath?.split(/[\\/]/).pop() || "untitled.svg";
+
+  const updateDirty = useCallback((nextDirty: boolean) => {
+    dirtyRef.current = nextDirty;
+    setDirty(nextDirty);
+  }, []);
 
   const sendSvg = useCallback((svg: string) => {
     frameRef.current?.contentWindow?.postMessage(
-      { type: "agent-cowork:set-svg", channel, svg },
+      { type: "agent-cowork:set-svg", channel, svg, fileName },
       "*"
     );
-  }, [channel]);
+  }, [channel, fileName]);
 
   const save = useCallback(async () => {
     if (!filePath || !onReload || saving || !dirty) return;
@@ -49,22 +59,36 @@ export function SvgRenderer({
         sessionId ?? undefined
       );
       if (!result.success) throw new Error(result.error || "Could not save SVG");
-      setDirty(false);
+      diskContentRef.current = content;
+      baselineRef.current = content;
+      conflictRef.current = false;
+      updateDirty(false);
       onReload();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
       setSaving(false);
     }
-  }, [cwd, dirty, filePath, onReload, saving, sessionId]);
+  }, [cwd, dirty, filePath, onReload, saving, sessionId, updateDirty]);
 
   useEffect(() => {
+    if (data.content === diskContentRef.current) return;
+    diskContentRef.current = data.content;
+    if (dirtyRef.current) {
+      conflictRef.current = true;
+      setError("This file changed on disk while the canvas has unsaved edits. Save to overwrite it, or Refresh to discard your canvas edits.");
+      return;
+    }
+    conflictRef.current = false;
     svgRef.current = data.content;
     baselineRef.current = data.content;
-    setDirty(false);
     setError(null);
     if (ready) sendSvg(data.content);
   }, [data.content, ready, sendSvg]);
+
+  useEffect(() => {
+    if (ready) sendSvg(svgRef.current);
+  }, [ready, sendSvg]);
 
   useEffect(() => {
     const receiveMessage = (event: MessageEvent<EditorMessage>) => {
@@ -73,12 +97,16 @@ export function SvgRenderer({
         setReady(true);
         return;
       }
+      if (event.data.type === "agent-cowork:svg-error" && typeof event.data.error === "string") {
+        setError(event.data.error);
+        return;
+      }
       if (event.data.type === "agent-cowork:svg-loaded" && typeof event.data.svg === "string") {
         try {
           const loadedSvg = validateSvg(event.data.svg);
           svgRef.current = loadedSvg;
           baselineRef.current = loadedSvg;
-          setDirty(false);
+          updateDirty(false);
           setError(null);
         } catch (loadError) {
           setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -89,8 +117,8 @@ export function SvgRenderer({
       try {
         const nextSvg = validateSvg(event.data.svg);
         svgRef.current = nextSvg;
-        setDirty(nextSvg !== baselineRef.current);
-        setError(null);
+        updateDirty(nextSvg !== baselineRef.current);
+        if (!conflictRef.current) setError(null);
       } catch (changeError) {
         setError(changeError instanceof Error ? changeError.message : String(changeError));
       }
@@ -98,7 +126,7 @@ export function SvgRenderer({
 
     window.addEventListener("message", receiveMessage);
     return () => window.removeEventListener("message", receiveMessage);
-  }, [channel, data.content, sendSvg]);
+  }, [channel, updateDirty]);
 
   useEffect(() => {
     if (!onTextSaveChromeChange) return;

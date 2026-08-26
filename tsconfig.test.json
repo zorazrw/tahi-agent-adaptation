@@ -1,12 +1,13 @@
 {
 	"compilerOptions": {
 		"target": "ES2022",
-		"lib": ["ES2023"],
+		"lib": ["ES2023", "DOM"],
 		"module": "ESNext",
+		"jsx": "react-jsx",
 		"moduleResolution": "bundler",
 		"strict": true,
 		"noEmit": true,
 		"skipLibCheck": true
 	},
-	"include": ["tests/**/*.ts", "tests/bun-test.d.ts"]
+	"include": ["tests/**/*.ts", "tests/**/*.tsx", "tests/bun-test.d.ts", "types.d.ts", "src/ui/vite-env.d.ts"]
 }
