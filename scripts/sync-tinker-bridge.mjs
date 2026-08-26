@@ -30,9 +30,11 @@ function syncScriptsDeps(uv) {
     return 1;
   }
 
-  const venvStatus =
-    spawnSync(uv, ["venv", "--python", "3.11", scriptsVenv], { cwd: root, stdio: "inherit" }).status ?? 1;
-  if (venvStatus !== 0) return venvStatus;
+  if (!existsSync(venvPython())) {
+    const venvStatus =
+      spawnSync(uv, ["venv", "--python", "3.11", scriptsVenv], { cwd: root, stdio: "inherit" }).status ?? 1;
+    if (venvStatus !== 0) return venvStatus;
+  }
 
   return (
     spawnSync(uv, ["pip", "install", "-r", REQUIREMENTS, "--python", venvPython()], {
