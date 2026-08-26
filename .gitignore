@@ -13,6 +13,8 @@ dist-react
 dist-electron
 *.local
 
+public/svgedit/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

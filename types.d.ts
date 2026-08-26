@@ -18,6 +18,7 @@ type PreviewFileResult =
     | { kind: "xls"; sheets: { name: string; html: string }[] }
     | { kind: "docx"; data: string }
     | { kind: "image"; dataUrl: string }
+    | { kind: "svg"; content: string }
     | { kind: "pdf"; data: string }
     | { kind: "md"; content: string }
     | { kind: "code"; content: string; language: string }

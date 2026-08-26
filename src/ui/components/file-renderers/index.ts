@@ -4,6 +4,7 @@ import { SpreadsheetRenderer } from "./SpreadsheetRenderer";
 import { XlsHtmlRenderer } from "./XlsHtmlRenderer";
 import { DocxRenderer } from "./DocxRenderer";
 import { ImageRenderer } from "./ImageRenderer";
+import { SvgRenderer } from "./SvgRenderer";
 import { PdfRenderer } from "./PdfRenderer";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { CodeRenderer } from "./CodeRenderer";
@@ -50,6 +51,7 @@ const renderers: Record<string, RendererComponent> = {
   xls: XlsHtmlRenderer,
   docx: DocxRenderer,
   image: ImageRenderer,
+  svg: SvgRenderer,
   pdf: PdfRenderer,
   md: MarkdownRenderer,
   code: CodeRenderer,

@@ -75,6 +75,7 @@ type PreviewFileResult =
   | { kind: "xls"; sheets: { name: string; html: string }[] }
   | { kind: "docx"; data: string }
   | { kind: "image"; dataUrl: string }
+  | { kind: "svg"; content: string }
   | { kind: "pdf"; data: string }
   | { kind: "md"; content: string }
   | { kind: "code"; content: string; language: string }
@@ -99,6 +100,7 @@ function getCopyableContent(result: PreviewFileResult | null): string | null {
     case "json":
     case "csv":
     case "html":
+    case "svg":
       return result.content ?? null;
     case "docx":
       return result.data ?? null;
@@ -116,6 +118,7 @@ function canUseHeaderSave(result: PreviewFileResult | null): boolean {
     result.kind === "csv" ||
     result.kind === "json" ||
     result.kind === "html" ||
+    result.kind === "svg" ||
     result.kind === "xlsx"
   );
 }

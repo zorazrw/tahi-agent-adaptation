@@ -20,6 +20,7 @@ import {
 } from "./ipc-handlers.js";
 import { fileToModel, modelToBytes, modelToText } from "./libs/exceljs-xlsx.js";
 import type { XlsxModel } from "../lib/xlsx-model.js";
+import { validateSvg } from "../lib/svg-tools.js";
 import { generateSessionTitle } from "./libs/util.js";
 import type { ClientEvent } from "./types.js";
 import {
@@ -535,7 +536,7 @@ app.on("ready", () => {
 
     const IMAGE_MIME: Record<string, string> = {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-        ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".svg": "image/svg+xml",
+        ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
     };
     const VIDEO_MIME: Record<string, string> = { ".mp4": "video/mp4", ".webm": "video/webm" };
     const AUDIO_MIME: Record<string, string> = { ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg" };
@@ -555,7 +556,7 @@ app.on("ready", () => {
     const ALLOWED_EXTS = new Set([
         ...Object.keys(IMAGE_MIME), ...Object.keys(VIDEO_MIME), ...Object.keys(AUDIO_MIME),
         ...Object.keys(CODE_LANG), ...TEXT_KINDS,
-        ".xlsx", ".xls", ".docx", ".pdf",
+        ".svg", ".xlsx", ".xls", ".docx", ".pdf",
     ]);
 
     ipcMainHandle("preview-file", async (_: any, filePath: string, cwd?: string | null) => {
@@ -585,6 +586,9 @@ app.on("ready", () => {
             }
             if (ext === ".html" || ext === ".htm") {
                 return { kind: "html", content: await readFile(resolved, "utf8") };
+            }
+            if (ext === ".svg") {
+                return { kind: "svg", content: validateSvg(await readFile(resolved, "utf8")) };
             }
             if (CODE_LANG[ext]) {
                 return { kind: "code", content: await readFile(resolved, "utf8"), language: CODE_LANG[ext] };
@@ -674,13 +678,14 @@ app.on("ready", () => {
                 }
                 const base = cwd && typeof cwd === "string" ? cwd : process.cwd();
                 const resolved = isAbsolute(filePath) ? filePath : resolve(base, filePath);
-                await writeFile(resolved, content, "utf8");
+                const validatedContent = resolved.toLowerCase().endsWith(".svg") ? validateSvg(content) : content;
+                await writeFile(resolved, validatedContent, "utf8");
                 const sidRaw = typeof sessionId === "string" ? sessionId.trim() : "";
                 const sid = sidRaw || inferSessionIdForPreviewWrite(resolved, cwd ?? undefined) || "";
                 if (sid) {
                     /** Always record resolved path so DB/export matches workflow ``outputFiles`` (often absolute). */
                     const pathForRecord = resolved.replace(/\\/g, "/");
-                    recordFileEditAfterPreviewSave(sid, pathForRecord, content);
+                    recordFileEditAfterPreviewSave(sid, pathForRecord, validatedContent);
                 }
                 return { success: true };
             } catch (err) {

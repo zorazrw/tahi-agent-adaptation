@@ -11,6 +11,7 @@ export default tseslint.config(
 			'dist-react',
 			'dist-electron',
 			'node_modules',
+			'public/svgedit',
 			'.claude',
 		],
 	},
