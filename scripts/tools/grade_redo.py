@@ -2,32 +2,39 @@
 """
 Grade redo session final artifacts against rubrics from ``verifiers.json``.
 
-Matches rubrics by instruction overlap. Sends only the file(s) required by the **last**
-workflow step (walking back one step if that step has no ``outputFiles``). By default uses
-the **last** snapshot of each file; pass ``--eval-first`` to use the first snapshot instead.
+Matches rubrics by instruction overlap. For session exports, sends only the file(s)
+required by the **last** workflow step (walking back one step if that step has no
+``outputFiles``). By default uses the **last** snapshot of each file; pass ``--eval-first``
+to use the first snapshot instead.
 
-Grades every session in the JSON by default. Pass ``--session-id`` to grade one session.
+``-j`` also accepts a ``tasks.json`` / ``heldout.json`` catalog: each row is graded using
+its ``human_output`` (inline text, or a path relative to the JSON file).
+
+Grades every session/task in the JSON by default. Pass ``--session-id`` to grade one
+session uuid or task ``id``.
 
 Examples:
   python scripts/tools/grade_redo.py -j runs/.../session.json --verifiers verifiers.json
-  python scripts/tools/grade_redo.py -j sessions.json --dry-run --log-file grade_report.txt
+  python scripts/tools/grade_redo.py -j sessions.json --dry-run --log-file grade_report.json
   python scripts/tools/grade_redo.py -j sessions.json --session-id <uuid> --verifiers verifiers.json
+  python scripts/tools/grade_redo.py -j expertise-examples/abstract-writing/tasks.json \
+      --verifiers verifiers.json
   python scripts/tools/grade_redo.py -j session.json --verifiers verifiers.json \
-      --backend openai --model gpt-4.1-mini --json-out ratings.json
+      --backend openai --model gpt-4.1-mini --log-file ratings.json
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import mimetypes
 import os
 import re
 import sys
-from contextlib import contextmanager
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 _tools = Path(__file__).resolve().parent
 _scripts = _tools.parent
@@ -53,35 +60,31 @@ DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 _TRUNCATE_LEN = 14_000
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\n\r]+$")
+_ARTIFACT_PATH_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".html",
+    ".htm",
+    ".txt",
+    ".md",
+    ".json",
+    ".csv",
+    ".pdf",
+    ".py",
+}
 
 
-@contextmanager
-def tee_stdout(log_path: Path | None):
-    if not log_path:
-        yield
-        return
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as log_f:
-        orig = sys.stdout
+class ModelRefusalError(RuntimeError):
+    """Raised when the Anthropic Messages API returns stop_reason=refusal."""
 
-        class Tee(TextIO):
-            def write(self, data: str) -> int:
-                orig.write(data)
-                log_f.write(data)
-                return len(data)
-
-            def flush(self) -> None:
-                orig.flush()
-                log_f.flush()
-
-            def isatty(self) -> bool:
-                return orig.isatty()
-
-        sys.stdout = Tee()  # type: ignore[assignment]
-        try:
-            yield
-        finally:
-            sys.stdout = orig
+    def __init__(self, model: str, *, stop_reason: str | None = "refusal") -> None:
+        self.model = model
+        self.stop_reason = stop_reason
+        super().__init__(f"Model {model} refused the grading request (stop_reason={stop_reason!r})")
 
 
 def resolve_path(path: Path) -> Path:
@@ -98,16 +101,46 @@ def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _session_id_values(session: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("uuid", "id"):
+        raw = session.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            values.add(text)
+    return values
+
+
 def resolve_sessions(sessions: list[dict[str, Any]], session_id: str | None) -> list[dict[str, Any]]:
     if not sessions:
         raise SystemExit("No sessions in JSON.")
     if session_id and str(session_id).strip():
         sid = str(session_id).strip()
         for session in sessions:
-            if session.get("uuid") == sid:
+            if sid in _session_id_values(session):
                 return [session]
-        raise SystemExit(f"No session with uuid {sid!r}")
+        raise SystemExit(f"No session/task with id {sid!r}")
     return sessions
+
+
+def session_label(session: dict[str, Any]) -> str:
+    for key in ("name", "uuid"):
+        raw = session.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    tid = session.get("id")
+    if tid is not None and str(tid).strip():
+        return f"task {tid}"
+    return "(unnamed)"
+
+
+def is_task_catalog_row(item: dict[str, Any]) -> bool:
+    """True for ``tasks.json`` / ``heldout.json`` rows that carry ``human_output``."""
+    if "task_units" in item or "trajectory" in item:
+        return False
+    return "human_output" in item
 
 
 def load_catalog(path: Path) -> list[dict[str, Any]]:
@@ -118,9 +151,10 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
 
 
 def session_instruction(session: dict[str, Any]) -> str:
-    task = session.get("task")
-    if isinstance(task, str) and task.strip():
-        return task.strip()
+    for key in ("task", "instruction"):
+        raw = session.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
     return extract_verifiers.session_instruction(session)
 
 
@@ -147,7 +181,9 @@ def instruction_overlap(a: str, b: str) -> float:
     return max(SequenceMatcher(None, left, right).ratio() for left, right in pairs if left and right)
 
 
-def match_rubrics(catalog: list[dict[str, Any]], instruction: str, min_overlap: float) -> tuple[dict[str, Any], float]:
+def match_rubrics(
+    catalog: list[dict[str, Any]], instruction: str, min_overlap: float
+) -> tuple[dict[str, Any] | None, float]:
     scored = [
         (e, instruction_overlap(instruction, ins))
         for e in catalog
@@ -157,7 +193,7 @@ def match_rubrics(catalog: list[dict[str, Any]], instruction: str, min_overlap: 
         raise SystemExit("No verifier entries in catalog.")
     best, score = max(scored, key=lambda x: x[1])
     if score < min_overlap:
-        raise SystemExit(f"No rubric match (best overlap {score:.3f} < {min_overlap}).")
+        return None, score
     return best, score
 
 
@@ -225,6 +261,64 @@ def _basename(path: str) -> str:
     return Path(path.replace("\\", "/")).name
 
 
+def _looks_like_artifact_path(value: str) -> bool:
+    text = value.strip()
+    if not text or "\n" in text or len(text) > 512:
+        return False
+    return Path(text.replace("\\", "/")).suffix.lower() in _ARTIFACT_PATH_SUFFIXES
+
+
+def _resolve_human_output_file(raw: str, source_dir: Path | None) -> Path | None:
+    text = raw.strip()
+    if not _looks_like_artifact_path(text):
+        return None
+    path = Path(text)
+    candidates: list[Path] = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        if source_dir is not None:
+            candidates.append(source_dir / path)
+        candidates.append(Path.cwd() / path)
+    for cand in candidates:
+        try:
+            if cand.is_file():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _read_artifact_file(path: Path) -> str:
+    media_type, _ = mimetypes.guess_type(path.name)
+    data = path.read_bytes()
+    if media_type and media_type.startswith("image/"):
+        return base64.b64encode(data).decode("ascii")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return base64.b64encode(data).decode("ascii")
+
+
+def human_output_blocks(
+    item: dict[str, Any], *, source_dir: Path | None = None
+) -> tuple[list[tuple[str, str]], list[str], str | None]:
+    """Treat a tasks.json ``human_output`` value as the sole grading artifact."""
+    raw = item.get("human_output")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return [], ["human_output"], "Task has no human_output content."
+    if not isinstance(raw, str):
+        return [], ["human_output"], f"human_output must be a string, got {type(raw).__name__}."
+
+    found = _resolve_human_output_file(raw, source_dir)
+    if found is not None:
+        name = found.name
+        return [(name, _read_artifact_file(found))], [name], None
+    if _looks_like_artifact_path(raw):
+        return [], [raw.strip()], f"human_output path not found: {raw.strip()}"
+    return [("human_output.txt", raw)], ["human_output.txt"], None
+
+
 def all_artifact_blocks(session: dict[str, Any], *, eval_first: bool = False) -> dict[str, str]:
     """Content per path across environment snapshots (first or last version per path)."""
     merged: dict[str, str] = {}
@@ -244,12 +338,19 @@ def all_artifact_blocks(session: dict[str, Any], *, eval_first: bool = False) ->
 
 
 def grading_artifact_blocks(
-    session: dict[str, Any], *, eval_first: bool = False
+    session: dict[str, Any],
+    *,
+    eval_first: bool = False,
+    source_dir: Path | None = None,
 ) -> tuple[list[tuple[str, str]], list[str], str | None]:
     """
-    File blocks for the LM grader: only artifacts required by the last workflow step
-    (walking back if the last step lists no output files).
+    File blocks for the LM grader: ``human_output`` on a tasks.json row, otherwise
+    only artifacts required by the last workflow step (walking back if the last step
+    lists no output files).
     """
+    if is_task_catalog_row(session):
+        return human_output_blocks(session, source_dir=source_dir)
+
     nodes = final_workflow_nodes(session)
     required = required_paths_last_workflow_step(nodes)
     if not required:
@@ -280,6 +381,11 @@ def criteria_list(entry: dict[str, Any]) -> list[str]:
 
 def label_tag(passed: bool | None) -> str:
     return "PASS" if passed is True else "FAIL" if passed is False else "UNKNOWN"
+
+
+def criteria_result_map(criteria: list[str], labels: list[bool | None]) -> dict[str, str]:
+    """Map each criterion text to PASS / FAIL / UNKNOWN."""
+    return {c: label_tag(lab) for c, lab in zip(criteria, labels)}
 
 
 def _truncate_text(text: str, max_len: int = _TRUNCATE_LEN) -> str:
@@ -437,6 +543,16 @@ def interpret_results(text: str, n: int) -> list[bool | None]:
     return out
 
 
+def _text_from_message(msg: Any) -> str:
+    parts: list[str] = []
+    for block in getattr(msg, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(str(text))
+    return "".join(parts)
+
+
 def grade(
     criteria: list[str],
     files: list[tuple[str, str]],
@@ -458,7 +574,10 @@ def grade(
             temperature=0.0,
             messages=[{"role": "user", "content": blocks}],
         )
-        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+        stop_reason = getattr(msg, "stop_reason", None)
+        if stop_reason == "refusal":
+            raise ModelRefusalError(model, stop_reason=stop_reason)
+        return _text_from_message(msg)
 
     raw = fetch()
     try:
@@ -479,8 +598,7 @@ def print_summary(
     criteria_count: int,
     model: str | None = None,
 ) -> None:
-    name = session.get("name") or session.get("uuid")
-    print(f"session: {name}")
+    print(f"session: {session_label(session)}")
     print(f"matched rubrics: {entry.get('uuid')} (overlap {overlap:.3f})")
     if model:
         print(f"model: {model}")
@@ -571,10 +689,16 @@ def grade_openai(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("-j", "--session-json", type=Path, required=True)
+    p.add_argument(
+        "-j",
+        "--session-json",
+        type=Path,
+        required=True,
+        help="Session export JSON, or a tasks.json / heldout.json catalog (grades each row's human_output)",
+    )
     p.add_argument(
         "--session-id",
-        help="Grade only the session with this uuid (default: grade all sessions in the JSON)",
+        help="Grade only this session uuid or tasks.json id (default: grade all entries in the JSON)",
     )
     p.add_argument("--verifiers", type=Path, default=Path("verifiers.json"))
     p.add_argument("--min-overlap", type=float, default=0.55)
@@ -596,7 +720,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Grade the first file version per path instead of the last (default: last)",
     )
     p.add_argument("--json-out", type=Path)
-    p.add_argument("--log-file", type=Path, help="Also write stdout to this .txt file")
+    p.add_argument(
+        "--log-file",
+        type=Path,
+        help="Write per-task criterion PASS/FAIL map as a JSON array (e.g. ratings.json)",
+    )
     p.add_argument("--debug-prompts", action="store_true")
     args = p.parse_args(argv)
 
@@ -606,6 +734,7 @@ def main(argv: list[str] | None = None) -> int:
 
     session_path = resolve_path(args.session_json)
     verifiers_path = resolve_path(args.verifiers)
+    source_dir = session_path if session_path.is_dir() else session_path.parent
     sessions = resolve_sessions(extract_verifiers.load_sessions_from_path(session_path), args.session_id)
     catalog = load_catalog(verifiers_path)
 
@@ -620,138 +749,199 @@ def main(argv: list[str] | None = None) -> int:
         anthropic_client = induce.make_anthropic_client(cfg)
 
     reports: list[dict[str, Any]] = []
-    with tee_stdout(args.log_file):
-        for i, session in enumerate(sessions):
-            if i:
-                print("\n" + "=" * 72 + "\n")
+    log_items: list[dict[str, str]] = []
+    for i, session in enumerate(sessions):
+        if i:
+            print("\n" + "=" * 72 + "\n")
 
-            instruction = session_instruction(session)
-            if not instruction:
-                raise SystemExit("No initial task instruction in session JSON.")
+        instruction = session_instruction(session)
+        if not instruction:
+            raise SystemExit("No initial task instruction in session JSON.")
 
-            entry, overlap = match_rubrics(catalog, instruction, args.min_overlap)
-            criteria = criteria_list(entry)
-            files, required_paths, artifact_issue = grading_artifact_blocks(session, eval_first=args.eval_first)
+        entry, overlap = match_rubrics(catalog, instruction, args.min_overlap)
+        if entry is None:
+            name = session_label(session)
+            print(f"session: {name}")
+            print(f"skipped: no rubric match (best overlap {overlap:.3f} < {args.min_overlap})")
+            reports.append(
+                {
+                    "session_uuid": session.get("uuid"),
+                    "session_name": session.get("name"),
+                    "task_id": session.get("id"),
+                    "matched_verifier_uuid": None,
+                    "instruction_overlap": round(overlap, 4),
+                    "skipped": True,
+                    "skip_reason": "no_rubric_match",
+                    "results": [],
+                    "n_pass": 0,
+                    "n_fail": 0,
+                    "n_unknown": 0,
+                    "average_success_rate": None,
+                }
+            )
+            log_items.append({})
+            continue
 
-            last_step = (final_workflow_nodes(session) or [None])[-1]
-            last_step_desc = ""
-            if isinstance(last_step, dict):
-                last_step_desc = str(last_step.get("description") or "").strip()
+        criteria = criteria_list(entry)
+        files, required_paths, artifact_issue = grading_artifact_blocks(
+            session, eval_first=args.eval_first, source_dir=source_dir
+        )
 
-            report: dict[str, Any] = {
-                "session_uuid": session.get("uuid"),
-                "session_name": session.get("name"),
-                "matched_verifier_uuid": entry.get("uuid"),
-                "instruction_overlap": round(overlap, 4),
-                "last_workflow_step": last_step_desc,
-                "required_output_files": required_paths,
-                "grading_files": [path for path, _ in files],
-                "verifiers": criteria,
-            }
-            if artifact_issue:
-                report["artifact_issue"] = artifact_issue
+        last_step = (final_workflow_nodes(session) or [None])[-1]
+        last_step_desc = ""
+        if isinstance(last_step, dict):
+            last_step_desc = str(last_step.get("description") or "").strip()
 
-            if not criteria:
-                print_summary(
-                    session=session, entry=entry, overlap=overlap, files=files, criteria_count=0
+        report: dict[str, Any] = {
+            "session_uuid": session.get("uuid"),
+            "session_name": session.get("name"),
+            "task_id": session.get("id"),
+            "matched_verifier_uuid": entry.get("uuid"),
+            "instruction_overlap": round(overlap, 4),
+            "last_workflow_step": last_step_desc,
+            "required_output_files": required_paths,
+            "grading_files": [path for path, _ in files],
+            "verifiers": criteria,
+        }
+        if artifact_issue:
+            report["artifact_issue"] = artifact_issue
+
+        if not criteria:
+            print_summary(
+                session=session, entry=entry, overlap=overlap, files=files, criteria_count=0
+            )
+            print("Matched rubric entry has no criteria; counting as 0.0")
+            print("average_success_rate: 0/0 = 0.0000")
+            if not args.dry_run:
+                report.update(
+                    {
+                        "backend": args.backend,
+                        "model": args.model
+                        or (DEFAULT_OPENAI_MODEL if args.backend == "openai" else DEFAULT_MODEL),
+                        "raw_response": "Skipped verifier model call: matched rubric entry has no criteria.",
+                        "results": [],
+                        "n_pass": 0,
+                        "n_fail": 0,
+                        "n_unknown": 0,
+                        "average_success_rate": 0.0,
+                        "artifact_issue": "Matched rubric entry has no criteria.",
+                    }
                 )
-                print("Matched rubric entry has no criteria; counting as 0.0")
-                print("average_success_rate: 0/0 = 0.0000")
-                if not args.dry_run:
+            log_items.append({})
+            reports.append(report)
+            continue
+
+        if args.dry_run:
+            print_summary(
+                session=session, entry=entry, overlap=overlap, files=files, criteria_count=len(criteria)
+            )
+            if artifact_issue:
+                print(f"artifact_issue: {artifact_issue}")
+            log_items.append({})
+        else:
+            if artifact_issue:
+                labels = [False] * len(criteria)
+                raw_response = f"Skipped verifier model call: {artifact_issue}"
+                model = args.model or (DEFAULT_OPENAI_MODEL if args.backend == "openai" else DEFAULT_MODEL)
+            elif args.backend == "openai":
+                model = args.model or DEFAULT_OPENAI_MODEL
+                labels, raw_response = grade_openai(
+                    criteria,
+                    files,
+                    model=model,
+                    api_key=args.api_key,
+                    base_url=args.base_url,
+                    request_timeout=args.request_timeout,
+                    max_retries=args.max_retries,
+                    max_tokens=args.max_tokens,
+                    debug_prompts=args.debug_prompts,
+                )
+            else:
+                model = args.model or DEFAULT_MODEL
+
+                if args.debug_prompts:
+                    for j, block in enumerate(build_message_content(criteria, files)):
+                        print(f"[{j}] {block.get('type')}", file=sys.stderr)
+
+                try:
+                    labels, raw_response = grade(
+                        criteria,
+                        files,
+                        client=anthropic_client,
+                        model=model,
+                        max_tokens=args.max_tokens,
+                    )
+                except ModelRefusalError as exc:
+                    print_summary(
+                        session=session,
+                        entry=entry,
+                        overlap=overlap,
+                        files=files,
+                        criteria_count=len(criteria),
+                        model=model,
+                    )
+                    print(f"skipped: model refusal ({exc})")
                     report.update(
                         {
                             "backend": args.backend,
-                            "model": args.model
-                            or (DEFAULT_OPENAI_MODEL if args.backend == "openai" else DEFAULT_MODEL),
-                            "raw_response": "Skipped verifier model call: matched rubric entry has no criteria.",
+                            "model": model,
+                            "skipped": True,
+                            "skip_reason": "model_refusal",
+                            "raw_response": str(exc),
                             "results": [],
                             "n_pass": 0,
                             "n_fail": 0,
                             "n_unknown": 0,
-                            "average_success_rate": 0.0,
-                            "artifact_issue": "Matched rubric entry has no criteria.",
+                            "average_success_rate": None,
                         }
                     )
-                reports.append(report)
-                continue
+                    log_items.append({})
+                    reports.append(report)
+                    continue
+            results = [{"index": j, "criterion": c, "pass": labels[j]} for j, c in enumerate(criteria)]
 
-            if args.dry_run:
-                print_summary(
-                    session=session, entry=entry, overlap=overlap, files=files, criteria_count=len(criteria)
-                )
-                if artifact_issue:
-                    print(f"artifact_issue: {artifact_issue}")
-            else:
-                if artifact_issue:
-                    labels = [False] * len(criteria)
-                    raw_response = f"Skipped verifier model call: {artifact_issue}"
-                    model = args.model or (DEFAULT_OPENAI_MODEL if args.backend == "openai" else DEFAULT_MODEL)
-                elif args.backend == "openai":
-                    model = args.model or DEFAULT_OPENAI_MODEL
-                    labels, raw_response = grade_openai(
-                        criteria,
-                        files,
-                        model=model,
-                        api_key=args.api_key,
-                        base_url=args.base_url,
-                        request_timeout=args.request_timeout,
-                        max_retries=args.max_retries,
-                        max_tokens=args.max_tokens,
-                        debug_prompts=args.debug_prompts,
-                    )
-                else:
-                    model = args.model or DEFAULT_MODEL
+            n_pass = sum(1 for x in labels if x is True)
+            n_fail = sum(1 for x in labels if x is False)
+            n_unknown = len(labels) - n_pass - n_fail
+            total = len(criteria)
+            rate = n_pass / total if total else 0.0
 
-                    if args.debug_prompts:
-                        for j, block in enumerate(build_message_content(criteria, files)):
-                            print(f"[{j}] {block.get('type')}", file=sys.stderr)
+            for j, (c, lab) in enumerate(zip(criteria, labels)):
+                print(f"[{j:02d}] {label_tag(lab)} - {c}")
 
-                    labels, raw_response = grade(
-                        criteria, files, client=anthropic_client, model=model, max_tokens=args.max_tokens
-                    )
-                results = [{"index": j, "criterion": c, "pass": labels[j]} for j, c in enumerate(criteria)]
-
-                n_pass = sum(1 for x in labels if x is True)
-                n_fail = sum(1 for x in labels if x is False)
-                n_unknown = len(labels) - n_pass - n_fail
-                total = len(criteria)
-                rate = n_pass / total if total else 0.0
-
-                for j, (c, lab) in enumerate(zip(criteria, labels)):
-                    print(f"[{j:02d}] {label_tag(lab)} - {c}")
-
-                print()
-                print_summary(
-                    session=session,
-                    entry=entry,
-                    overlap=overlap,
-                    files=files,
-                    criteria_count=total,
-                    model=model,
-                )
-                if artifact_issue:
-                    print(f"artifact_issue: {artifact_issue}")
-                print(f"pass/fail/unknown: {n_pass}/{n_fail}/{n_unknown} of {total}")
-                print(f"average_success_rate: {n_pass}/{total} = {rate:.4f}")
-                if n_unknown and (n_pass + n_fail):
-                    print(
-                        f"average_success_rate (scored only): {n_pass}/{n_pass + n_fail} = {n_pass / (n_pass + n_fail):.4f}"
-                    )
-
-                report.update(
-                    {
-                        "backend": args.backend,
-                        "model": model,
-                        "raw_response": raw_response,
-                        "results": results,
-                        "n_pass": n_pass,
-                        "n_fail": n_fail,
-                        "n_unknown": n_unknown,
-                        "average_success_rate": round(rate, 4),
-                    }
+            print()
+            print_summary(
+                session=session,
+                entry=entry,
+                overlap=overlap,
+                files=files,
+                criteria_count=total,
+                model=model,
+            )
+            if artifact_issue:
+                print(f"artifact_issue: {artifact_issue}")
+            print(f"pass/fail/unknown: {n_pass}/{n_fail}/{n_unknown} of {total}")
+            print(f"average_success_rate: {n_pass}/{total} = {rate:.4f}")
+            if n_unknown and (n_pass + n_fail):
+                print(
+                    f"average_success_rate (scored only): {n_pass}/{n_pass + n_fail} = {n_pass / (n_pass + n_fail):.4f}"
                 )
 
-            reports.append(report)
+            report.update(
+                {
+                    "backend": args.backend,
+                    "model": model,
+                    "raw_response": raw_response,
+                    "results": results,
+                    "n_pass": n_pass,
+                    "n_fail": n_fail,
+                    "n_unknown": n_unknown,
+                    "average_success_rate": round(rate, 4),
+                }
+            )
+            log_items.append(criteria_result_map(criteria, labels))
+
+        reports.append(report)
 
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -760,6 +950,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote JSON to {args.json_out}", file=sys.stderr)
 
     if args.log_file:
+        args.log_file.parent.mkdir(parents=True, exist_ok=True)
+        args.log_file.write_text(json.dumps(log_items, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"Wrote log to {args.log_file.resolve()}", file=sys.stderr)
 
     return 0

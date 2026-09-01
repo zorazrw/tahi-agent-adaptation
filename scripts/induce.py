@@ -277,17 +277,33 @@ def _is_quote_comment_action(action: str) -> bool:
     return _QUOTE_COMMENT_RE.search(a) is not None
 
 
-def _is_msg_only_user_action(action: str) -> bool:
-    """True for preference-bearing message(...) actions kept under --msg_only.
+def _is_task_setup_message(action: str) -> bool:
+    """True for the initial task prompt that pastes paper Title + Introduction.
 
-    Drops every other action type (edit_workflow/edit_plan/edit_verifier, file edits,
-    Quote / file-comment messages, etc.).
+    Usually the first user message(...) in a writing session (sometimes repeated);
+    not a preference signal under --msg_only.
     """
     a = action.strip()
     if not _is_user_message_action(a):
         return False
-    # Inline file-quote comments are not user-authored chat preferences.
-    return not _is_quote_comment_action(a)
+    # Canonical writing dumps: "...given the title and introduction... Title: ... Introduction: ..."
+    if "Title:" in a and "Introduction:" in a:
+        return True
+    return "Write an abstract of the paper" in a and "Introduction:" in a
+
+
+def _is_msg_only_user_action(action: str) -> bool:
+    """True for preference-bearing message(...) actions kept under --msg_only.
+
+    Drops every other action type (edit_workflow/edit_plan/edit_verifier, file edits,
+    Quote / file-comment messages, initial Title/Introduction task dumps, etc.).
+    """
+    a = action.strip()
+    if not _is_user_message_action(a):
+        return False
+    if _is_quote_comment_action(a) or _is_task_setup_message(a):
+        return False
+    return True
 
 
 def _format_action_entry(entry: dict[str, str], *, include_tool_result: bool = False) -> str:
@@ -846,7 +862,8 @@ def main() -> None:
         "--msg_only",
         action="store_true",
         help="Only keep message(...) actions; drop everything else "
-        "(edit_workflow, edit_plan, edit_verifier, file edits, Quote / file-comment messages, etc.)",
+        "(edit_workflow, edit_plan, edit_verifier, file edits, Quote / file-comment messages, "
+        "initial Title/Introduction task dumps, etc.)",
     )
     p.add_argument(
         "--memory_only",
