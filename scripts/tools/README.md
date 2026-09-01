@@ -1,25 +1,128 @@
 # Tools
 
-## Generate verifiers from task instructions
+## Analyze shared rubrics across two verifier catalogs
 
-`generate_verifiers.py` calls Anthropic to create concrete, falsifiable rubrics using only each task's `instruction`. It does not provide existing verifiers, outputs, or session history to the model. Credentials are resolved from the app's Anthropic settings, then `ANTHROPIC_API_KEY`.
+`analyze_shared_rubrics.py` aligns tasks by paper title, then asks an LLM whether each **source** rubric is covered by any rubric on the matched **target** task. Prints a per-task list of binary `0`/`1` flags (and optionally writes a full JSON report).
 
 ```bash
-# Generate a verifier catalog for every task
-python scripts/tools/generate_verifiers.py expertise-examples/tasks.json \
-  -o scripts/verifiers.json
+python scripts/tools/analyze_shared_rubrics.py \
+  scripts/log_writing/verifiers_ours/6-context.json \
+  scripts/log_writing/verifiers_ours/7-context.json \
+  -o scripts/log_writing/eval_log/shared_rubrics_6_vs_7.json
 
-# Generate one task by ID
-python scripts/tools/generate_verifiers.py expertise-examples/tasks.json --task-id 3
-
-# Generate from a direct instruction
-python scripts/tools/generate_verifiers.py --instruction "Create a bar chart of ..."
-
-# Inspect the exact prompt without calling the LM
-python scripts/tools/generate_verifiers.py --instruction "Create a bar chart of ..." --print-prompt
+# One task only; inspect prompt without calling the LM
+python scripts/tools/analyze_shared_rubrics.py \
+  scripts/log_writing/verifiers_ours/6-context.json \
+  scripts/log_writing/verifiers_ours/7-context.json \
+  --task-index 0 --print-prompt
 ```
 
-File input produces a JSON array of `{uuid, id, type, instruction, verifiers}` entries compatible with the grading tools. Direct instruction input produces one `{instruction, verifiers}` object.
+Requires Anthropic credentials (same as `induce.py`). Default model: `claude-sonnet-4-5` (`--model` to override).
+
+## Summarize shared-rubric coverage across peers
+
+`summarize_shared_rubrics.py` aggregates several `analyze_shared_rubrics.py` reports (same source catalog vs multiple peers). For each source rubric it reports whether it is **shared** (covered by all peers), **partial**, or **specific** (covered by none).
+
+```bash
+python scripts/tools/summarize_shared_rubrics.py \
+  scripts/log_writing/verifiers_ours/shared_rubrics_6_vs_*.json \
+  -o scripts/log_writing/verifiers_ours/shared_rubrics_6_summary.json \
+  --md scripts/log_writing/verifiers_ours/shared_rubrics_6_summary.md
+```
+
+## Label shared/personal rubrics and score agent vs baseline
+
+`calc_shared_improvement.py` consolidates the labeling + eval workflow:
+
+1. Load `shared_rubrics_{id}_vs_*.json` peer coverage reports.
+2. Label each source rubric `shared` if covered by ≥ `--min-shared` peers (default 3), else `personal`.
+3. Write `{id}-context-labeled.json`.
+4. Score agent/baseline PASS–FAIL rates within each label (and print Δ).
+
+```bash
+# Auto-discovers reports under verifiers_ours/ and verifiers_ours/shared-context/
+python scripts/tools/calc_shared_improvement.py 6
+
+# Use dataviz paths (scripts/log_dataviz/...)
+python scripts/tools/calc_shared_improvement.py 16 --domain dataviz
+
+# Weight-method users (eval_log/weight/, {id}-weight.json)
+python scripts/tools/calc_shared_improvement.py 12 --method weight
+
+python scripts/tools/calc_shared_improvement.py 8 \
+  --shared-dir scripts/log_writing/verifiers_ours/shared-context \
+  -o scripts/log_writing/verifiers_ours/8-shared-improvement.json
+
+# Explicit report globs; label only
+python scripts/tools/calc_shared_improvement.py 9 \
+  --shared 'scripts/log_writing/verifiers_ours/shared_rubrics_9_vs_*.json' \
+  --skip-eval
+```
+
+## Create summary verifiers from user history + human guidelines
+
+`create_verifiers.py` asks an LLM for a **joint general** verifier list, then writes it in the same shape as the human guidelines file:
+
+1. Summarize recurring criteria from high-quality user history (e.g. `verifiers-manual_*-*.json`).
+2. Ensure the list **covers every** human-written guideline (first task entry only).
+3. Output an array of `{uuid, instruction, verifiers}` (mirrored from `--human`) with the **same** summarized verifier set on every task.
+
+```bash
+python scripts/tools/create_verifiers.py \
+  --manual scripts/log_dataviz/verifiers_evolve/verifiers-manual_17-context.json \
+  --human scripts/log_dataviz/verifiers_human/verifiers-human_17-context.json \
+  -o scripts/log_dataviz/verifiers_summary/verifiers-summary_17-context.json
+
+# Inspect the prompt without calling the LM
+python scripts/tools/create_verifiers.py \
+  --manual scripts/log_dataviz/verifiers_evolve/verifiers-manual_17-context.json \
+  --human scripts/log_dataviz/verifiers_human/verifiers-human_17-context.json \
+  --print-prompt
+```
+
+Requires Anthropic credentials (same as `induce.py`). Default model: `claude-sonnet-4-5` (`--model` to override).
+
+## Joint memory (intersection of induction runs)
+
+`joint_memory.py` calls Anthropic to keep only preferences/facts shared across **all** provided memory files, and writes one consolidated `Fact:` / `Preference:` file.
+
+```bash
+python scripts/tools/joint_memory.py \
+  scripts/brain/dataviz_25-offline/memories/data-viz-html.md \
+  scripts/brain/dataviz_28-offline/memories/data-viz-html.md \
+  -o scripts/brain/joint/memories/data-viz-html.md
+
+# Inspect prompt / preview without writing
+python scripts/tools/joint_memory.py a.md b.md --print-prompt
+python scripts/tools/joint_memory.py a.md b.md --dry-run
+```
+
+Requires Anthropic credentials (same as `induce.py`). Default model: `claude-sonnet-4-5` (`--model` to override).
+
+## Generate LLM verifiers from task instructions
+
+`create_llm_verifiers.py` calls Claude (`claude-sonnet-4-5` by default) to create concrete, falsifiable evaluation criteria using only each task's `instruction`. It does not provide human outputs, existing verifiers, or session history to the model. Credentials are resolved the same way as `induce.py`.
+
+```bash
+# One abstract-writing task
+python scripts/tools/create_llm_verifiers.py \
+  expertise-examples/abstract-writing/tasks.json --task-id 1
+
+# Full catalog
+python scripts/tools/create_llm_verifiers.py \
+  expertise-examples/abstract-writing/tasks.json \
+  -o scripts/log_writing/verifiers_llm/all-context.json
+
+# Direct instruction
+python scripts/tools/create_llm_verifiers.py \
+  --instruction "Write an abstract of the paper given the title and introduction..."
+
+# Inspect the prompt without calling the LM
+python scripts/tools/create_llm_verifiers.py \
+  expertise-examples/abstract-writing/tasks.json --task-id 1 --print-prompt
+```
+
+File input produces a JSON array of `{uuid, id, type, instruction, verifiers}` entries compatible with the grading tools. Direct `--instruction` input produces one `{uuid, instruction, verifiers}` object.
 
 ## Extract initial verifiers
 
