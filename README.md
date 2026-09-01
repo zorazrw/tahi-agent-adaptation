@@ -29,9 +29,9 @@ All interface implementations are under the `src/` directory.
   <table>
     <tr>
       <td width="50%" valign="middle" align="center">
-        <video src="docs/assets/step3-iteration-preview.mp4" width="100%" autoplay muted loop playsinline controls>
-          <a href="docs/assets/step3-iteration.MP4">Human-agent interaction interface</a>
-        </video>
+        <a href="docs/assets/step3-iteration-preview.mp4">
+          <img src="docs/assets/step3-iteration-preview.gif" alt="Human-agent interaction interface" width="100%" />
+        </a>
       </td>
       <td width="50%" valign="middle" align="center">
         <img src="docs/assets/agent-init.jpg" alt="Set up the provider, model, and API for the agent" width="100%" />
@@ -54,9 +54,9 @@ Whenever you want to use the current task session to update the agent, single cl
         <img src="docs/assets/adaptation-mode-setup.jpg" alt="Adaptation mode setup: Mode tab with Context Update and Weight Update" width="100%" />
       </td>
       <td width="50%" valign="middle" align="center">
-        <video src="docs/assets/brain-edit.mov" width="100%" autoplay muted loop playsinline controls>
-          <a href="docs/assets/brain-edit.mov">Inspect, edit, and add context items in Context Update mode</a>
-        </video>
+        <a href="docs/assets/brain-edit.mov">
+          <img src="docs/assets/brain-edit.gif" alt="Inspect, edit, and add context items in Context Update mode" width="100%" />
+        </a>
       </td>
     </tr>
   </table>
