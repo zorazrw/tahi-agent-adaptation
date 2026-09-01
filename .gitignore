@@ -45,6 +45,7 @@ scripts/eval.sh
 scripts/log_dataviz
 scripts/log_writing
 scripts/tools/.*
+scripts/eval_log/*
 
 # Local Python environments
 scripts/.venv/
