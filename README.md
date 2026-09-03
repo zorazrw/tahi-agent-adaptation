@@ -1,7 +1,7 @@
 
 <div align="center">
 
-# Efficient Test-Time Adaptation in Human-Agent Interaction
+# Efficient Test-Time Adaptation through Human-AI Interaction
 
 </div>
 
