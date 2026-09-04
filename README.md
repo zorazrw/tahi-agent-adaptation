@@ -68,8 +68,8 @@ If you want to closely inspect, reproduce, and extend our experiments, you can f
 ```bibtex
 @article{wang2026efficient,
   title={Efficient Test-Time Adaptation in Human-Agent Interaction},
-  author={...},
-  journal={arXiv preprint arXiv:2609.xxxxx},
+  author={Zora Zhiruo Wang, Apurva Gandhi, Rulin Shao, Aspen Chen, Jonas Mueller, Zhiqi Liang, Jett Chen, Michael Ryan, Qianou Ma, Luxi He, Zhoujun Cheng, Andre He, Seungone Kim, Jiayi Geng, Mingqian Zheng, Weiwei Sun, Zheyuan Zhang, Xinran Zhao, Yike Wang, Abe Hou, Liwei Jiang, Pang Wei Koh, Diyi Yang, Graham Neubig, Daniel Fried},
+  journal={arXiv preprint arXiv:2609.04141},
   year={2026}
 }
 ```
